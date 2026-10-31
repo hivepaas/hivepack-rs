@@ -1,7 +1,7 @@
 //! Times hivepack-7z against the 7z decoder of the LZMA SDK 26.05, and against
 //! 7-Zip's program for what the SDK's decoder does not read, on the same
 //! archives, in each thing a 7z reader does: opening, listing, and reading each
-//! method and filter.
+//! method and filter; and against `7zz` writing them.
 //!
 //! ```text
 //! python3 scripts/testdata.py fetch --group generated --group bench
@@ -28,6 +28,12 @@
 //! the best speeds, which what else the machine does cannot make better, and the
 //! port's over the reference's: above 1 the port is faster. Against the SDK, both
 //! must read the same bytes.
+//!
+//! The writing rows are against `7zz a -mmt=1`, timed whole, and the port reads
+//! the same files and writes a file through a buffer. The encoders are not the same
+//! (`hivepack-xz` is liblzma's, `7zz` has its own), so that each row also says what
+//! size each made, and a speed means nothing without it. The port's archives must
+//! pass `7zz t`.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
@@ -35,7 +41,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
-use hivepack_7z::{Archive, Options};
+use hivepack_7z::{Archive, Method, NewEntry, Options, WriteOptions, Writer};
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -428,6 +434,252 @@ fn tool_test(tool: &Path, path: &Path, password: bool) -> Result<(Duration, u64)
     Ok((time, 0))
 }
 
+/// A row of writing: the input, the port's options, `7zz`'s.
+struct WriteRow {
+    name: &'static str,
+    input: Input,
+    method: Method,
+    solid: bool,
+    password: bool,
+    per_entry: bool,
+    tool: &'static str,
+}
+
+const fn write_row(
+    name: &'static str,
+    input: Input,
+    method: Method,
+    tool: &'static str,
+) -> WriteRow {
+    WriteRow {
+        name,
+        input,
+        method,
+        solid: true,
+        password: false,
+        per_entry: false,
+        tool,
+    }
+}
+
+const WRITE_ROWS: &[WriteRow] = &[
+    write_row("Copy", Input::Big, Method::Copy, "-m0=Copy"),
+    write_row(
+        "LZMA2, xz's preset 1, 1 MiB",
+        Input::Big,
+        Method::Lzma2 { preset: 1 },
+        "-m0=LZMA2:d=1m -mx=1",
+    ),
+    write_row(
+        "LZMA2, xz's preset 6, 8 MiB",
+        Input::Big,
+        Method::Lzma2 { preset: 6 },
+        "-m0=LZMA2:d=8m -mx=5",
+    ),
+    write_row(
+        "LZMA, xz's preset 6, 8 MiB",
+        Input::Big,
+        Method::Lzma { preset: 6 },
+        "-m0=LZMA:d=8m -mx=5",
+    ),
+    write_row(
+        "Deflate, level 6",
+        Input::Big,
+        Method::Deflate { level: 6 },
+        "-m0=Deflate -mx=5",
+    ),
+    write_row(
+        "BZip2, blocks of 900 KiB",
+        Input::Big,
+        Method::BZip2 { level: 9 },
+        "-m0=BZip2:d=900k -mx=5",
+    ),
+    WriteRow {
+        password: true,
+        ..write_row(
+            "AES-256, LZMA2, names too",
+            Input::Big,
+            Method::Lzma2 { preset: 1 },
+            "-m0=LZMA2:d=1m -mx=1 -mhe=on -pPASSWORD",
+        )
+    },
+    WriteRow {
+        solid: false,
+        per_entry: true,
+        ..write_row(
+            "LZMA2, not solid, small files",
+            Input::Small,
+            Method::Lzma2 { preset: 1 },
+            "-m0=LZMA2:d=1m -mx=1 -ms=off",
+        )
+    },
+    WriteRow {
+        per_entry: true,
+        ..write_row("Copy, many files", Input::Many, Method::Copy, "-m0=Copy")
+    },
+];
+
+/// The files under `folder`, by their names in it, with the folders they are in
+/// as `7zz` adds them.
+fn walk(folder: &Path, prefix: &str, out: &mut Vec<(String, Option<PathBuf>)>) -> Result<()> {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(folder)
+        .map_err(|e| e.to_string())?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .collect();
+    entries.sort();
+    for path in entries {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or("a name that is not text")?;
+        let name = format!("{prefix}{name}");
+        if path.is_dir() {
+            out.push((name.clone(), None));
+            walk(&path, &format!("{name}/"), out)?;
+        } else {
+            out.push((name, Some(path)));
+        }
+    }
+    Ok(())
+}
+
+fn port_write(
+    row: &WriteRow,
+    files: &[(String, Option<PathBuf>)],
+    out: &Path,
+) -> Result<(Duration, u64)> {
+    let error = |e: hivepack_7z::Error| e.name().to_string();
+    let options = WriteOptions {
+        method: row.method,
+        solid_block_size: row.solid.then_some(1 << 32),
+        password: row.password.then(|| PASSWORD.to_string()),
+        encrypt_headers: row.password,
+        ..WriteOptions::default()
+    };
+    let start = Instant::now();
+    let file = File::create(out).map_err(|e| e.to_string())?;
+    let mut w =
+        Writer::with_options(BufWriter::with_capacity(BUF_SIZE, file), options).map_err(error)?;
+    for (name, path) in files {
+        match path {
+            None => w.add_directory(NewEntry::new(name)).map_err(error)?,
+            Some(path) => {
+                let mut input = File::open(path).map_err(|e| e.to_string())?;
+                w.add_file(NewEntry::new(name), &mut input)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    w.finish().map_err(error)?;
+    let time = start.elapsed();
+    Ok((
+        time,
+        std::fs::metadata(out).map_err(|e| e.to_string())?.len(),
+    ))
+}
+
+fn tool_write(tool: &Path, dir: &Path, row: &WriteRow, out: &Path) -> Result<(Duration, u64)> {
+    let _ = std::fs::remove_file(out);
+    let folder = match row.input {
+        Input::Big => "big",
+        Input::Small => "small",
+        Input::Many => "many",
+    };
+    let options = row.tool.replace("PASSWORD", PASSWORD);
+    let start = Instant::now();
+    let status = Command::new(tool)
+        .current_dir(dir.join(folder))
+        .args(["a", "-mmt=1", "-bd", "-bso0", "-bse0", "-bsp0", "-y"])
+        .args(options.split_whitespace())
+        .arg(out)
+        .arg(".")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .status()
+        .map_err(|e| e.to_string())?;
+    let time = start.elapsed();
+    if !status.success() {
+        return Err(format!("7zz a {options}: {status}"));
+    }
+    Ok((
+        time,
+        std::fs::metadata(out).map_err(|e| e.to_string())?.len(),
+    ))
+}
+
+/// The writing rows.
+fn bench_writing(options: &Options_, tool: &Path, dir: &Path, big_bytes: u64) -> Result<()> {
+    let mut printed = false;
+    let port_out = dir.join("written-port.7z");
+    let tool_out = dir.join("written-tool.7z");
+    for row in WRITE_ROWS {
+        if let Some(only) = &options.only
+            && !"Writing, against 7zz a -mmt=1".contains(only.as_str())
+            && !row.name.contains(only.as_str())
+        {
+            continue;
+        }
+        if !printed {
+            println!("| **Writing, against `7zz a -mmt=1`** | | | |");
+            printed = true;
+        }
+        let folder = match row.input {
+            Input::Big => "big",
+            Input::Small => "small",
+            Input::Many => "many",
+        };
+        let mut files = Vec::new();
+        walk(&dir.join(folder), "", &mut files)?;
+        let (mut port_times, mut tool_times) = (Vec::new(), Vec::new());
+        let (mut port_size, mut tool_size) = (0, 0);
+        for round in 0..options.rounds {
+            for port in [round % 2 == 0, round % 2 == 1] {
+                let (mut total, mut runs) = (Duration::ZERO, 0u32);
+                while runs == 0 || total.as_secs_f64() < options.seconds {
+                    let (time, size) = if port {
+                        port_write(row, &files, &port_out)?
+                    } else {
+                        tool_write(tool, dir, row, &tool_out)?
+                    };
+                    total += time;
+                    runs += 1;
+                    if port {
+                        port_size = size;
+                    } else {
+                        tool_size = size;
+                    }
+                }
+                let time = total.as_secs_f64() / f64::from(runs);
+                if port {
+                    port_times.push(time);
+                } else {
+                    tool_times.push(time);
+                }
+            }
+        }
+        tool_test(tool, &port_out, row.password)?;
+        let amount = match row.input {
+            Input::Many => options.many as f64,
+            Input::Small => options.small as f64,
+            Input::Big => big_bytes as f64,
+        };
+        let (port_time, tool_time) = (best(&port_times), best(&tool_times));
+        println!(
+            "| {}: {:.2} MB, `7zz` {:.2} MB | {} | {} | {:.2}× |",
+            row.name,
+            port_size as f64 / 1e6,
+            tool_size as f64 / 1e6,
+            speed(amount, port_time, row.per_entry),
+            speed(amount, tool_time, row.per_entry),
+            tool_time / port_time
+        );
+        std::io::stdout().flush().map_err(|e| e.to_string())?;
+    }
+    let _ = std::fs::remove_file(port_out);
+    let _ = std::fs::remove_file(tool_out);
+    Ok(())
+}
+
 struct Options_ {
     only: Option<String>,
     rounds: usize,
@@ -685,6 +937,7 @@ fn real_main() -> Result<()> {
         std::io::stdout().flush().map_err(|e| e.to_string())?;
     }
     drop(sdk);
+    bench_writing(&options, &tool, &dir, big_bytes)?;
     if options.dir.is_none() {
         let _ = std::fs::remove_dir_all(&dir);
     }

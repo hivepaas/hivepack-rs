@@ -1,5 +1,6 @@
 //! Reading 7z archives in safe Rust, ported from the 7z decoder of the LZMA
-//! SDK (7-Zip 26.05), which is in the public domain.
+//! SDK (7-Zip 26.05), which is in the public domain, and writing them, from the
+//! description of the format.
 //!
 //! [`Archive::open`] reads an archive's headers (`SzArEx_Open`), encoded
 //! ones included, and lists its files: their names, sizes, attributes,
@@ -32,6 +33,22 @@
 //! }
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
+//!
+//! [`Writer`] writes an archive: Copy, LZMA, LZMA2, Deflate or BZip2, with a
+//! branch converter or the delta filter before LZMA and LZMA2, solid or not, and
+//! AES with a password, the names too if wanted.
+//!
+//! ```no_run
+//! use std::io::Write;
+//!
+//! let file = std::io::BufWriter::new(std::fs::File::create("backup.7z")?);
+//! let mut archive = hivepack_7z::Writer::new(file)?;
+//! archive.add_directory(hivepack_7z::NewEntry::new("notes"))?;
+//! archive.start_file(hivepack_7z::NewEntry::new("notes/hello.txt"))?;
+//! archive.write_all(b"hello\n")?;
+//! archive.finish()?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 #![forbid(unsafe_code)]
 
@@ -43,11 +60,13 @@ mod dec;
 mod error;
 mod lzma_dec;
 mod ppmd7;
+mod writer;
 
 use std::io::{self, Read, Seek};
 
 pub use arc_in::SIGNATURE;
 pub use error::{Error, Result};
+pub use writer::{Filter, Method, NewEntry, RandomSource, WriteOptions, Writer};
 
 use aes7z::{Decoding, MAX_KEY_CYCLES};
 use arc_in::ArEx;
@@ -182,6 +201,8 @@ impl<R: Read + Seek> Archive<R> {
     /// with but the data.
     pub fn set_password(&mut self, password: &str) {
         self.decoding.set_password(password);
+        // What a wrong password decoded to is not the folder.
+        self.cache = None;
     }
 
     /// The error for file `index`'s CRC not matching.
