@@ -197,6 +197,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "tar_write"
+path = "fuzz_targets/tar_write.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "extract_tar"
 path = "fuzz_targets/extract_tar.rs"
 test = false

@@ -1,6 +1,6 @@
 //! Times hivepack-tar against Go's archive/tar (Go 1.27.2), which it ports, on the
 //! same archives, in each thing a tar reader does: going through the entries of
-//! each format, and reading their data.
+//! each format, reading their data, and writing them.
 //!
 //! ```text
 //! python3 scripts/testdata.py fetch --group bench
@@ -21,6 +21,10 @@
 //! at a time. A file given as it is lets Go seek past data, as does
 //! `Reader::seekable` on the port's side.
 //!
+//! The writing rows take the same entries, made before the clock starts: to
+//! nowhere, so that only the writer is timed, or to a file through a buffer of
+//! 64 KiB, where the two files must be the same.
+//!
 //! Rounds take turns between the two, so that a noisy machine slows them alike,
 //! and each round runs for at least `--seconds`. The output is a Markdown table of
 //! the best speeds, which what else the machine does cannot make better, and the
@@ -33,7 +37,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
-use hivepack_tar::Reader;
+use hivepack_tar::{Format, Header, Reader, TYPE_REG, Time, Writer};
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -61,6 +65,8 @@ enum Where {
     File,
     /// The file as it is, which both seek.
     Seekable,
+    /// Written, and kept by nobody.
+    Nowhere,
 }
 
 impl Where {
@@ -70,6 +76,7 @@ impl Where {
             Where::Buffered => "buf",
             Where::File => "file",
             Where::Seekable => "seek",
+            Where::Nowhere => "-",
         }
     }
 }
@@ -82,6 +89,8 @@ struct Workload {
     /// The data read, or skipped.
     read: bool,
     per_entry: bool,
+    /// The archive written, not read.
+    write: bool,
 }
 
 const fn entries(
@@ -97,6 +106,7 @@ const fn entries(
         from,
         read: false,
         per_entry: true,
+        write: false,
     }
 }
 
@@ -114,6 +124,25 @@ const fn data(
         from,
         read,
         per_entry: false,
+        write: false,
+    }
+}
+
+const fn writing(
+    category: &'static str,
+    name: &'static str,
+    archive: Archive,
+    from: Where,
+    per_entry: bool,
+) -> Workload {
+    Workload {
+        category,
+        name,
+        archive,
+        from,
+        read: false,
+        per_entry,
+        write: true,
     }
 }
 
@@ -232,6 +261,48 @@ const WORKLOADS: &[Workload] = &[
         Archive::Small,
         Where::Seekable,
     ),
+    writing(
+        "Writing entries, to nowhere",
+        "USTAR",
+        Archive::Ustar,
+        Where::Nowhere,
+        true,
+    ),
+    writing(
+        "Writing entries, to nowhere",
+        "PAX, long names and times in nanoseconds",
+        Archive::Pax,
+        Where::Nowhere,
+        true,
+    ),
+    writing(
+        "Writing entries, to nowhere",
+        "GNU, long names",
+        Archive::Gnu,
+        Where::Nowhere,
+        true,
+    ),
+    writing(
+        "Writing entries, to nowhere",
+        "Small entries",
+        Archive::Small,
+        Where::Nowhere,
+        true,
+    ),
+    writing(
+        "Writing to a file",
+        "USTAR, through a buffer",
+        Archive::Ustar,
+        Where::Buffered,
+        true,
+    ),
+    writing(
+        "Writing to a file",
+        "Big entries, through a buffer",
+        Archive::Big,
+        Where::Buffered,
+        false,
+    ),
 ];
 
 /// Go's program.
@@ -340,7 +411,151 @@ fn port(path: &Path, memory: &[u8], from: Where, read: bool) -> Result<(Duration
         (Where::File, false) => go_through(file()?),
         (Where::Seekable, true) => read_all_of(Reader::seekable(file()?)),
         (Where::Seekable, false) => go_through_all(Reader::seekable(file()?)),
+        (Where::Nowhere, _) => Err("nothing to read from".into()),
     }
+}
+
+/// The entries of a "many" archive, as Go's `manyItems` makes them.
+fn many_entries(archive: Archive, count: usize) -> Vec<(Header, Vec<u8>)> {
+    let long = "a-long-folder-name/".repeat(8);
+    (0..count)
+        .map(|i| {
+            let name = format!("dir{:03}/sub{:03}/file{i:06}.txt", i % 100, i % 997);
+            let mut header = Header {
+                typeflag: TYPE_REG,
+                name: name.clone().into_bytes(),
+                size: 16,
+                mode: 0o644,
+                mod_time: Some(Time {
+                    secs: 1_700_000_000,
+                    nanos: 0,
+                }),
+                format: Format::USTAR,
+                ..Default::default()
+            };
+            if archive != Archive::Ustar {
+                header.name = format!("{long}{name}").into_bytes();
+                header.format = Format::GNU;
+            }
+            if archive == Archive::Pax {
+                header.format = Format::PAX;
+                header.mod_time = Some(Time {
+                    secs: 1_700_000_000,
+                    nanos: i as u32 + 1,
+                });
+            }
+            (header, b"sixteen bytes...".to_vec())
+        })
+        .collect()
+}
+
+/// The entries of a list, as Go's `packItems` makes them.
+fn list_entries(list: &Path) -> Result<Vec<(Header, Vec<u8>)>> {
+    let text = std::fs::read_to_string(list).map_err(|e| e.to_string())?;
+    let mut files: std::collections::HashMap<&str, Vec<u8>> = std::collections::HashMap::new();
+    let mut entries = Vec::new();
+    for line in text.lines() {
+        let field: Vec<&str> = line.split('\t').collect();
+        let [name, file, offset, length] = field[..] else {
+            return Err(format!("{}: {line}", list.display()));
+        };
+        if !files.contains_key(file) {
+            let bytes = std::fs::read(file).map_err(|e| format!("{file}: {e}"))?;
+            files.insert(file, bytes);
+        }
+        let offset: usize = offset.parse().map_err(|_| "an offset")?;
+        let length: usize = length.parse().map_err(|_| "a length")?;
+        let header = Header {
+            typeflag: TYPE_REG,
+            name: name.as_bytes().to_vec(),
+            size: length as i64,
+            mode: 0o644,
+            mod_time: Some(Time {
+                secs: 1_700_000_000,
+                nanos: 0,
+            }),
+            format: Format::USTAR,
+            ..Default::default()
+        };
+        entries.push((header, files[file][offset..offset + length].to_vec()));
+    }
+    Ok(entries)
+}
+
+/// Counts what is written, and keeps none of it, as Go's `nowhere` does.
+#[derive(Default)]
+struct Nowhere(u64);
+
+impl Write for Nowhere {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0 += b.len() as u64;
+        Ok(b.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn write_entries<W: Write>(w: W, entries: &[(Header, Vec<u8>)]) -> Result<W> {
+    let mut tar = Writer::new(w);
+    for (header, data) in entries {
+        tar.write_header(header).map_err(|e| e.to_string())?;
+        tar.write_all(data).map_err(|e| e.to_string())?;
+    }
+    tar.close().map_err(|e| e.to_string())?;
+    Ok(tar.into_inner())
+}
+
+/// The entries written, timed, to nowhere or to `out`.
+fn port_write(entries: &[(Header, Vec<u8>)], out: Option<&Path>) -> Result<(Duration, u64)> {
+    let Some(out) = out else {
+        let start = Instant::now();
+        let w = write_entries(Nowhere::default(), entries)?;
+        return Ok((start.elapsed(), w.0));
+    };
+    let file = File::create(out).map_err(|e| e.to_string())?;
+    let start = Instant::now();
+    let w = write_entries(BufWriter::with_capacity(CHUNK, file), entries)?;
+    let time = start.elapsed();
+    let file = w.into_inner().map_err(|e| e.to_string())?;
+    let len = file.metadata().map_err(|e| e.to_string())?.len();
+    Ok((time, len))
+}
+
+/// Times the two in turn: which goes first changes each round. The best times of
+/// the port and of Go, and what each found.
+fn rounds(
+    options: &Options,
+    go: &mut Go,
+    request: &str,
+    mut run: impl FnMut() -> Result<(Duration, u64)>,
+) -> Result<(f64, f64, u64, u64)> {
+    let mut port_times = Vec::new();
+    let mut go_times = Vec::new();
+    let (mut port_value, mut go_value) = (0, 0);
+    for round in 0..options.rounds {
+        for is_port in [round % 2 == 0, round % 2 == 1] {
+            let (mut total, mut runs) = (Duration::ZERO, 0u32);
+            while runs == 0 || total.as_secs_f64() < options.seconds {
+                let (time, value) = if is_port { run()? } else { go.ask(request)? };
+                total += time;
+                runs += 1;
+                if is_port {
+                    port_value = value;
+                } else {
+                    go_value = value;
+                }
+            }
+            let time = total.as_secs_f64() / f64::from(runs);
+            if is_port {
+                port_times.push(time);
+            } else {
+                go_times.push(time);
+            }
+        }
+    }
+    Ok((best(&port_times), best(&go_times), port_value, go_value))
 }
 
 struct Options {
@@ -501,6 +716,17 @@ fn speed(amount: f64, seconds: f64, per_entry: bool) -> String {
     }
 }
 
+fn print_row(w: &Workload, amount: f64, port_time: f64, go_time: f64) -> Result<()> {
+    println!(
+        "| {} | {} | {} | {:.2}× |",
+        w.name,
+        speed(amount, port_time, w.per_entry),
+        speed(amount, go_time, w.per_entry),
+        go_time / port_time
+    );
+    std::io::stdout().flush().map_err(|e| e.to_string())
+}
+
 fn real_main() -> Result<()> {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let options = parse_options(&repository)?;
@@ -542,6 +768,56 @@ fn real_main() -> Result<()> {
         if w.category != category {
             category = w.category;
             println!("| **{category}** | | | |");
+        }
+        if w.write {
+            let (entries, request_end, amount) = match w.archive {
+                Archive::Small => (
+                    list_entries(&small_list)?,
+                    format!("writepack {{}} {}", text(&small_list)?),
+                    options.small as f64,
+                ),
+                Archive::Big => (
+                    list_entries(&big_list)?,
+                    format!("writepack {{}} {}", text(&big_list)?),
+                    big_bytes as f64,
+                ),
+                kind => {
+                    let word = format!("{kind:?}").to_lowercase();
+                    (
+                        many_entries(kind, options.many),
+                        format!("writemany {{}} {word} {}", options.many),
+                        options.many as f64,
+                    )
+                }
+            };
+            let to_file = w.from != Where::Nowhere;
+            let port_out = dir.join("written-port.tar");
+            let go_out = dir.join("written-go.tar");
+            let target = if to_file { text(&go_out)? } else { "-" };
+            let request = request_end.replacen("{}", target, 1);
+            let out = to_file.then_some(port_out.as_path());
+            let (port_time, go_time, port_value, go_value) =
+                rounds(&options, &mut go, &request, || port_write(&entries, out))?;
+            if port_value != go_value {
+                return Err(format!(
+                    "{}, {}: the port wrote {port_value} bytes, Go {go_value}",
+                    w.category, w.name
+                ));
+            }
+            if to_file {
+                let same = std::fs::read(&port_out).map_err(|e| e.to_string())?
+                    == std::fs::read(&go_out).map_err(|e| e.to_string())?;
+                if !same {
+                    return Err(format!(
+                        "{}, {}: the files are not the same",
+                        w.category, w.name
+                    ));
+                }
+                let _ = std::fs::remove_file(&port_out);
+                let _ = std::fs::remove_file(&go_out);
+            }
+            print_row(w, amount, port_time, go_time)?;
+            continue;
         }
         if !made.iter().any(|(archive, ..)| *archive == w.archive) {
             let path = dir.join(format!("{:?}.tar", w.archive));
@@ -590,35 +866,10 @@ fn real_main() -> Result<()> {
             text(path)?,
             w.from.word()
         );
-        let mut port_times = Vec::new();
-        let mut go_times = Vec::new();
-        let (mut port_value, mut go_value) = (0, 0);
-        for round in 0..options.rounds {
-            // Which goes first changes each round.
-            for is_port in [round % 2 == 0, round % 2 == 1] {
-                let (mut total, mut runs) = (Duration::ZERO, 0u32);
-                while runs == 0 || total.as_secs_f64() < options.seconds {
-                    let (time, value) = if is_port {
-                        port(path, memory, w.from, w.read)?
-                    } else {
-                        go.ask(&request)?
-                    };
-                    total += time;
-                    runs += 1;
-                    if is_port {
-                        port_value = value;
-                    } else {
-                        go_value = value;
-                    }
-                }
-                let time = total.as_secs_f64() / f64::from(runs);
-                if is_port {
-                    port_times.push(time);
-                } else {
-                    go_times.push(time);
-                }
-            }
-        }
+        let (port_time, go_time, port_value, go_value) =
+            rounds(&options, &mut go, &request, || {
+                port(path, memory, w.from, w.read)
+            })?;
         if port_value != go_value {
             return Err(format!(
                 "{}, {}: the port got {port_value}, Go {go_value}",
@@ -632,16 +883,7 @@ fn real_main() -> Result<()> {
         } else {
             (SPARSE_FILES as u64 * SPARSE_SIZE) as f64
         };
-        let port_time = best(&port_times);
-        let go_time = best(&go_times);
-        println!(
-            "| {} | {} | {} | {:.2}× |",
-            w.name,
-            speed(amount, port_time, w.per_entry),
-            speed(amount, go_time, w.per_entry),
-            go_time / port_time
-        );
-        std::io::stdout().flush().map_err(|e| e.to_string())?;
+        print_row(w, amount, port_time, go_time)?;
     }
     drop(go);
     if options.dir.is_none() {

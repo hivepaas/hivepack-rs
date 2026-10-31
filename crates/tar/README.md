@@ -1,8 +1,8 @@
 # hivepack-tar
 
-Reading tar archives in safe Rust, ported from the reading half of Go's `archive/tar` (Go 1.27.2).
+Reading and writing tar archives in safe Rust, ported from Go's `archive/tar` (Go 1.27.2).
 
-> **Status:** reads V7, USTAR, PAX, GNU and STAR archives: PAX records and GNU long names merged into their entries, global PAX headers, and sparse files in GNU's formats 0.0, 0.1, 1.0 and the old one, their holes read as zeros. Every header, byte of data and error is the same as Go's, on Go's own test archives, archives Go's writer makes, and thousands of damaged ones. Writing is not ported. This crate is not on crates.io.
+> **Status:** reads V7, USTAR, PAX, GNU and STAR archives: PAX records and GNU long names merged into their entries, global PAX headers, and sparse files in GNU's formats 0.0, 0.1, 1.0 and the old one, their holes read as zeros. Every header, byte of data and error is the same as Go's, on Go's own test archives, archives Go's writer makes, and thousands of damaged ones. Writes USTAR, PAX and GNU, choosing the first that can hold each header unless it names one: every byte and error the same as Go's, over thousands of scripts of calls, with wrong headers and failing outputs among them. It writes no sparse files, as Go does not. This crate is not on crates.io.
 
 ```rust
 use std::io::Read;
@@ -15,7 +15,24 @@ while let Some(header) = tar.next()? {
 }
 ```
 
-Names are bytes, as tar keeps them. Data not read is skipped by the next `next`. An error stays: every later call returns it. Extracting to disk, with its checks on names and links, belongs to hivepack-extract.
+```rust
+use std::io::Write;
+
+let file = std::io::BufWriter::new(std::fs::File::create("backup.tar")?);
+let mut tar = hivepack_tar::Writer::new(file);
+let data = b"hello\n";
+tar.write_header(&hivepack_tar::Header {
+    typeflag: hivepack_tar::TYPE_REG,
+    name: b"hello.txt".to_vec(),
+    mode: 0o644,
+    size: data.len() as i64,
+    ..Default::default()
+})?;
+tar.write_all(data)?;
+tar.close()?;
+```
+
+Names are bytes, as tar keeps them. Data not read is skipped by the next `next`. An error stays: every later call returns it, except, when writing, a header no format can hold and a write past an entry's size, which fail alone. `close` is what ends an archive: dropping the writer leaves it without its end. Extracting to disk, with its checks on names and links, belongs to hivepack-extract.
 
 How the port follows Go, and how it is checked, is in [docs/tar.md](../../docs/tar.md).
 

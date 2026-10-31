@@ -3,7 +3,7 @@
 //! requests and answers.
 
 // Test helpers: a broken oracle should stop the test.
-#![allow(dead_code, clippy::expect_used, clippy::panic)]
+#![allow(dead_code, clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
@@ -145,4 +145,33 @@ pub fn unbase64(text: &[u8]) -> Vec<u8> {
         out.extend_from_slice(&n.to_be_bytes()[1..4 - pad]);
     }
     out
+}
+
+/// Go's test archives: their names and bytes, the base64 and bzip2 ones
+/// decoded.
+pub fn go_archives() -> Vec<(String, Vec<u8>)> {
+    let folder = repository().join("testdata/go-tar");
+    let mut names: Vec<String> = std::fs::read_dir(&folder)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n != "LICENSE")
+        .collect();
+    names.sort();
+    names
+        .into_iter()
+        .map(|name| {
+            let bytes = std::fs::read(folder.join(&name)).unwrap();
+            let bytes = if name.ends_with(".base64") {
+                unbase64(&bytes)
+            } else if name.ends_with(".bz2") {
+                let mut out = vec![0; 64 << 20];
+                let n = hivepack_bzip2::buff_to_buff_decompress(&mut out, &bytes, false).unwrap();
+                out.truncate(n);
+                out
+            } else {
+                bytes
+            };
+            (name, bytes)
+        })
+        .collect()
 }
