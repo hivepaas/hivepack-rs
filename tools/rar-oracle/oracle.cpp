@@ -364,6 +364,10 @@ static void do_list(int enable_broken, const char *hex) {
     if (!Arc.Open(wide)) {
       out += " notopened";
     } else {
+      // IsArchive sets HeadSize only past the signature, and Archive's
+      // constructor leaves it as it finds it: without this, a file that is
+      // not an archive has whatever the stack held read as its mark's size.
+      Arc.MarkHead.HeadSize = 0;
       bool ok = Arc.IsArchive(enable_broken != 0);
       out += ok ? " archive" : " notarchive";
       put_state(Arc);

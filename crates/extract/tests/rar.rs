@@ -559,8 +559,10 @@ fn real_archives_come_out_as_they_read() {
         }
     }
     eprintln!("{compared} archives extracted as read, {files} files compared");
+    // libarchive's archives alone give 44 and 97: Windows has only those, as
+    // the other projects' come with the group it does not fetch.
     if !archives().is_empty() {
         assert!(compared >= 40, "only {compared}");
-        assert!(files >= 100, "only {files}");
+        assert!(files >= 90, "only {files}");
     }
 }
