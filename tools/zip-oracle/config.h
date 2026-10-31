@@ -23,6 +23,11 @@
 #define HAVE_FTELLO
 #ifdef _WIN32
 #define HAVE_LOCALTIME_S
+#define HAVE__FSEEKI64
+#define HAVE__FSTAT64
+#define HAVE__FTELLI64
+#define HAVE__SETMODE
+#define HAVE__SNWPRINTF_S
 #else
 #define HAVE_LOCALTIME_R
 #define HAVE_MKSTEMP

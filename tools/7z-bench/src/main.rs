@@ -835,7 +835,10 @@ fn real_main() -> Result<()> {
         options.many,
     )?;
     let tool = repository
-        .join("target/testdata/7zz/7zz")
+        .join(format!(
+            "target/testdata/7zz/7zz{}",
+            std::env::consts::EXE_SUFFIX
+        ))
         .canonicalize()
         .map_err(|e| {
             format!("7zz: {e}: run `python3 scripts/testdata.py fetch --group generated`")
