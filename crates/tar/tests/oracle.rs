@@ -25,7 +25,7 @@ use std::path::PathBuf;
 
 use hivepack_crypto::Sha256;
 use hivepack_tar::{Error, Reader, Records, Time};
-use support::{Oracle, Rng, hex, repository, unbase64, unhex};
+use support::{Oracle, Rng, go_archives, hex, repository, unhex};
 
 /// How much of an entry's data both read.
 const MAX_DATA: usize = 8 << 20;
@@ -69,7 +69,7 @@ fn error_name(e: &Error) -> &'static str {
         Error::MissData => "miss-data",
         Error::UnrefData => "unref-data",
         Error::UnexpectedEof => "unexpected-eof",
-        Error::Io(_) => "other",
+        _ => "other",
     }
 }
 
@@ -134,35 +134,6 @@ fn answer_of<R: Read>(tr: &mut Reader<R>, rng: &mut Rng) -> String {
         ));
     }
     out.join("|")
-}
-
-/// Go's test archives: their names and bytes, the base64 and bzip2 ones
-/// decoded.
-fn go_archives() -> Vec<(String, Vec<u8>)> {
-    let folder = repository().join("testdata/go-tar");
-    let mut names: Vec<String> = std::fs::read_dir(&folder)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().into_string().unwrap())
-        .filter(|n| n != "LICENSE")
-        .collect();
-    names.sort();
-    names
-        .into_iter()
-        .map(|name| {
-            let bytes = std::fs::read(folder.join(&name)).unwrap();
-            let bytes = if name.ends_with(".base64") {
-                unbase64(&bytes)
-            } else if name.ends_with(".bz2") {
-                let mut out = vec![0; 64 << 20];
-                let n = hivepack_bzip2::buff_to_buff_decompress(&mut out, &bytes, false).unwrap();
-                out.truncate(n);
-                out
-            } else {
-                bytes
-            };
-            (name, bytes)
-        })
-        .collect()
 }
 
 /// The checksum of the block at `at` written again, as Go's Writer writes

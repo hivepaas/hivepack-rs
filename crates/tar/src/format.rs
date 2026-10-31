@@ -1,5 +1,4 @@
-//! The 512-byte header block and its layouts: port of `format.go`, the
-//! reading half.
+//! The 512-byte header block and its layouts: port of `format.go`.
 //!
 //! - V7: name, mode, uid, gid, size, mtime, checksum, type, link name.
 //! - USTAR (POSIX.1-1988), and PAX on top of it: magic `ustar\0`, version
@@ -10,7 +9,7 @@
 //!   end.
 
 use crate::common::{BLOCK_SIZE, Format};
-use crate::strconv::Parser;
+use crate::strconv::{Formatter, Parser};
 
 /// A header block.
 pub(crate) type Block = [u8; BLOCK_SIZE];
@@ -51,9 +50,15 @@ pub(crate) fn get(b: &Block, (at, len): (usize, usize)) -> &[u8] {
     &b[at..at + len]
 }
 
+/// A field of `b`, to fill in.
+pub(crate) fn get_mut(b: &mut Block, (at, len): (usize, usize)) -> &mut [u8] {
+    &mut b[at..at + len]
+}
+
 const MAGIC_GNU: &[u8] = b"ustar ";
 const VERSION_GNU: &[u8] = b" \x00";
 const MAGIC_USTAR: &[u8] = b"ustar\x00";
+const VERSION_USTAR: &[u8] = b"00";
 const TRAILER_STAR: &[u8] = b"tar\x00";
 
 /// `computeChecksum`: the block's bytes summed, unsigned and signed (some
@@ -89,6 +94,22 @@ pub(crate) fn get_format(b: &Block) -> Format {
     } else {
         Format::V7
     }
+}
+
+/// `setFormat`, for the formats the writer writes: GNU's magic, or USTAR's
+/// for USTAR and PAX, and the checksum, which ends in a NUL and a space.
+pub(crate) fn set_format(b: &mut Block, format: Format) {
+    if format.has(Format::GNU) {
+        get_mut(b, field::MAGIC).copy_from_slice(MAGIC_GNU);
+        get_mut(b, field::VERSION).copy_from_slice(VERSION_GNU);
+    } else {
+        get_mut(b, field::MAGIC).copy_from_slice(MAGIC_USTAR);
+        get_mut(b, field::VERSION).copy_from_slice(VERSION_USTAR);
+    }
+    let (chksum, _) = compute_checksum(b); // From 256 to 128776.
+    let sum = get_mut(b, field::CHKSUM);
+    Formatter::default().format_octal(&mut sum[..7], chksum); // 128776 < 262143.
+    sum[7] = b' ';
 }
 
 /// `sparseArray`: entries of 24 bytes, an offset and a length of 12 each,

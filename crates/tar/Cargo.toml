@@ -1,7 +1,7 @@
 [package]
 name = "hivepack-tar"
 version = "0.0.0"
-description = "Reading tar archives in safe Rust, ported from Go's archive/tar"
+description = "Reading and writing tar archives in safe Rust, ported from Go's archive/tar"
 license = "BSD-3-Clause"
 readme = "README.md"
 keywords = ["tar", "archive", "pax", "ustar"]

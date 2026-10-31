@@ -1,6 +1,6 @@
 # Porting Go's archive/tar
 
-`hivepack-tar` reads tar archives in safe Rust. It is a port of the reading half of `archive/tar` in Go's standard library: a small, well-tested reader of every format in use, hardened by years of fuzzing, under the BSD-3-Clause license. Most `.tar.gz`, `.tar.zst`, `.tar.xz` and `.tar.zst.age` files are tar inside a compressor, which hivepack's other crates read.
+`hivepack-tar` reads and writes tar archives in safe Rust. It is a port of `archive/tar` in Go's standard library: a small, well-tested reader of every format in use and writer of USTAR, PAX and GNU, hardened by years of fuzzing, under the BSD-3-Clause license. Most `.tar.gz`, `.tar.zst`, `.tar.xz` and `.tar.zst.age` files are tar inside a compressor, which hivepack's other crates read.
 
 ## The source
 
@@ -9,9 +9,10 @@ The port follows **Go 1.27.2** (`src/archive/tar`), the latest release as of Oct
 | Go | Port | What |
 |---|---|---|
 | `reader.go` | `reader.rs` (`Reader`) | entries in order: PAX records and GNU long names merged into the entries they describe, global PAX headers as entries of their own, data read and skipped, sparse files in GNU's formats 0.0, 0.1, 1.0 and the old one |
+| `writer.go` | `writer.rs` (`Writer`) | entries in order: the header in the format chosen, with PAX records or GNU long names before it where it needs them, the data held to the header's size, padding, the end of the archive |
 | `format.go` | `format.rs` | the 512-byte block, its checksum (unsigned or signed) and layouts: V7, USTAR, PAX, GNU, STAR |
-| `strconv.go` | `strconv.rs` | numbers in octal or GNU's base-256, PAX records and times |
-| `common.go` | `common.rs` (`Header`, `Format`, `Time`, `Error`, the `TYPE_` constants) | headers, formats, sparse maps validated and turned into holes |
+| `strconv.go` | `strconv.rs` | numbers in octal or GNU's base-256, PAX records and times, both ways; the name split between USTAR's two fields |
+| `common.go` | `common.rs` (`Header`, `Format`, `Time`, `Error`, the `TYPE_` constants) | headers, the formats that can hold one (`allowedFormats`), sparse maps validated and turned into holes |
 
 ## What differs
 
@@ -22,7 +23,13 @@ The port follows **Go 1.27.2** (`src/archive/tar`), the latest release as of Oct
 - **Seeking is asked for.** Go skips the rest of an entry with `Seek` when it finds that its input can, by asking the value's type. Rust cannot ask, so `Reader::new` reads past the data of any `Read`, and `Reader::seekable` seeks, as Go does, up to the data's last byte, so that an archive cut short is found by the read after it. The outcome is the same, which `seeking_changes_nothing` checks on Go's archives and their damaged copies; the tests give Go an input that cannot seek.
 - **No `GODEBUG=tarinsecurepath`.** Names are checked where files are written, in hivepack-extract.
 - **The global PAX header's records are merged in key order.** Go merges them in its map's random order and ignores the error of a bad one, so a global header with both a bad record and a `path` can come out either way in Go; here the order is fixed.
-- **Not ported:** the writer (`writer.go`), `FileInfoHeader` and `Header.FileInfo`, which convert to and from the file system's `fs.FileInfo`.
+- **`Flush` is `Writer::finish_entry`.** `io::Write::flush` has to work in the middle of an entry, for a buffer around the writer, where Go's `Flush` fails, so it is the output's `flush`, and Go's has another name.
+- **`close` flushes the output** after the end of the archive, and reports its error, which Go's writers have no way to ask for. As in Go, the output is not closed, and an error from `close` does not change that the writer is then closed.
+- **A write past an entry's size stops at its end.** Go's `Write` returns the bytes it took and `ErrWriteTooLong` at once; Rust's cannot, so `write` returns the bytes and the next one the error, which `write_all` sees the same way. So does an output that takes some and fails. An interrupted write is tried again.
+- **A header is not copied.** Go works on a shallow copy of `Header`; here `HeaderView` borrows the names and records, for the same reason. A time is normalised on the way in, as a `Time` with its fields public can be anything and Go's cannot, and `None` and Go's zero time are one.
+- **The messages of `Error::CannotEncode` quote differently** from Go's `%q` and `%v`, and if several PAX records are invalid they name the first by key, where Go's names one at random. Which error comes, and when, is Go's.
+- **Not ported:** `FileInfoHeader` and `Header.FileInfo`, which convert to and from the file system's `fs.FileInfo`, and `Writer.AddFS`, which needs them. So making an archive from a folder is the caller's to do.
+- **No sparse files are written**, as in Go, whose code for them is commented out or cannot be reached: `sparseFileWriter`, `alignSparseEntries` and `readFrom` are not ported. A type `S` entry passes through as a plain header, and the reader, Go's or this one, refuses it, as it has no map.
 
 ## Bounded resources
 
@@ -63,6 +70,14 @@ AMD Ryzen 9 9950X (16 cores, x86-64), 45 GiB of memory, Ubuntu 26.04 with Linux 
 | Big entries, through a buffer of 64 KiB | 32.4 GB/s | 33.9 GB/s | 0.96× |
 | Big entries, seeking in a file (`Reader::seekable`) | 4,919 GB/s | 2,401 GB/s | 2.05× |
 | Small entries, seeking in a file | 1148 k entries/s | 518 k entries/s | 2.21× |
+| **Writing entries, to nowhere** | | | |
+| USTAR | 6800 k entries/s | 2382 k entries/s | 2.85× |
+| PAX, long names and times in nanoseconds | 1275 k entries/s | 508 k entries/s | 2.51× |
+| GNU, long names | 3180 k entries/s | 1024 k entries/s | 3.11× |
+| Small entries | 6853 k entries/s | 2383 k entries/s | 2.88× |
+| **Writing to a file** | | | |
+| USTAR, through a buffer of 64 KiB | 3640 k entries/s | 1790 k entries/s | 2.03× |
+| Big entries, through a buffer of 64 KiB | 7983 MB/s | 7584 MB/s | 1.05× |
 
 What to read in it:
 
@@ -80,7 +95,9 @@ What to read in it:
   - 800 sparse files built by the test in GNU's formats 0.1, 1.0 and the old one, with maps that are random and sometimes overlap, and a few bytes more or less of data than the map needs, as they are or damaged; Go's writer does not write sparse files.
 
   About 3,300 archives are compared where the oracle is built (Linux and macOS in CI), every ending among them: the end, a bad header, an archive cut short, a field or sparse map too long, a sparse file with data missing or left over. `testdata/oracle/tar.txt` replays 1,066 everywhere else, Go's archives and their damage by name and number, which the test makes again.
-- **Fuzzing**: the `tar` target reads any input, every entry and up to 4 MiB of its data, twice, in pieces of different sizes: the same headers, data and end both times, and no panic. CI seeds it with Go's test archives.
+- **`tests/writer.rs`**: the writer against Go's through the same oracle. 3,000 scripts of random calls on one writer, half with fields that fit, so that what follows from names, times and the format asked for is reached: `write_header` with names around USTAR's lengths, in ASCII or not, with NULs, invalid UTF-8 and paths to clean; numbers and times that fit each format or none; every type, those not allowed among them; PAX records that conflict with the fields, are invalid or pass 1 MiB; every format and some sets of them; then too little, enough or too much data, a flush, and in a fifth of the scripts an output that fails partway; then `close` twice, and a header and a write after it. Each call's error and every byte must be Go's, and each kind of error must come up. Go's 46 test archives are also read and written again by both, headers as they came. `testdata/oracle/tar-writer.txt` replays 1,046 of these everywhere else, by seed or name, with the archives' lengths and hashes. Faults put in the port by hand, one at a time, in the choice of format, the cleaning of paths, the rounding of times and the errors that stay, were each found.
+- **`src/strconv.rs`'s tests** also hold the tables of Go's `strconv_test.go` and `writer_test.go` for `formatNumeric`, `formatPAXTime`, `formatPAXRecord`, `fitsInBase256`, `fitsInOctal` and `splitUSTARPath`.
+- **Fuzzing**: the `tar` target reads any input, every entry and up to 4 MiB of its data, twice, in pieces of different sizes: the same headers, data and end both times, and no panic. CI seeds it with Go's test archives. The `tar_write` target writes each entry of any input again, in a format its first bytes pick or none, sometimes with a longer name, and reads it back: the same names, sizes and data, and no panic.
 
 ## Following new releases
 

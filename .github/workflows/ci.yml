@@ -520,6 +520,11 @@ jobs:
           mkdir -p fuzz/corpus/tar
           cp testdata/go-tar/*.tar fuzz/corpus/tar/
       - run: cargo fuzz run --target x86_64-unknown-linux-gnu tar -- -max_total_time=60
+      - name: Seed the tar writing corpus with the same archives
+        run: |
+          mkdir -p fuzz/corpus/tar_write
+          cp testdata/go-tar/*.tar fuzz/corpus/tar_write/
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu tar_write -- -max_total_time=60
       - name: Seed the tar extraction corpus with the same archives, behind a choice of options
         run: |
           mkdir -p fuzz/corpus/extract_tar
