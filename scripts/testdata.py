@@ -176,28 +176,35 @@ def build_tool(source: Path, tool: str) -> Path:
 def build_7zz(source: Path, folder: Path) -> None:
     """7-Zip's console program from the release's sources, with its own
     makefile: what makes the archives the tests read. The makefile for GCC
-    leaves out assembly; the one for arm64 macs has it."""
+    leaves out assembly; the one for arm64 macs has it. On Windows, the same
+    makefile finds MinGW's compiler by itself."""
     bundle = source / "CPP" / "7zip" / "Bundles" / "Alone2"
     print(f"  building 7zz from {source.name}")
     makefile = "cmpl_gcc.mak"
     if sys.platform == "darwin":
         makefile = "cmpl_mac_arm64.mak" if platform.machine() == "arm64" else "cmpl_mac_x64.mak"
     jobs = str(os.cpu_count() or 2)
-    build = subprocess.run(["make", "-f", f"../../{makefile}", "-j", jobs], cwd=bundle,
+    make = "mingw32-make" if sys.platform == "win32" else "make"
+    build = subprocess.run([make, "-f", f"../../{makefile}", "-j", jobs], cwd=bundle,
                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     if build.returncode != 0:
         # The end of what it said: it warns a lot before an error.
         print(build.stderr[-4000:], file=sys.stderr)
         raise SystemExit(f"building 7zz failed with {build.returncode}")
-    shutil.copy2(next(bundle.glob("b/*/7zz")), folder / "7zz")
+    program = next(bundle.glob("b/*/7zz*"))
+    shutil.copy2(program, folder / program.name)
 
 
 def libzip_sources(lib: Path) -> list:
     """The library's C files, as lib/CMakeLists.txt lists them in ZIP_SOURCES,
-    with the Unix ones it adds; zip_err_str.c is generated apart."""
+    with the ones it adds for the system; zip_err_str.c is generated apart."""
     text = (lib / "CMakeLists.txt").read_text()
     listed = text.split("set(ZIP_SOURCES", 1)[1].split(")", 1)[0].split()
     names = [n for n in listed if n.endswith(".c") and not n.startswith("$")]
+    if sys.platform == "win32":
+        return names + ["zip_source_file_win32.c", "zip_source_file_win32_named.c",
+                        "zip_source_file_win32_utf16.c", "zip_source_file_win32_utf8.c",
+                        "zip_source_file_win32_ansi.c", "zip_random_win32.c"]
     return names + ["zip_source_file_stdio_named.c", "zip_random_unix.c"]
 
 
@@ -252,7 +259,7 @@ NETTLE_SOURCES = [
 # temporary arrays are local to the block that declares them, and
 # hmac_set_key keeps a pointer to the digest of a key longer than a block
 # past its block: gcc happens to leave it there, clang does not.
-NETTLE_FLAGS = ["-DHAVE_ALLOCA=1", "-include", "alloca.h"]
+NETTLE_FLAGS = ["-DHAVE_ALLOCA=1", "-include", "malloc.h" if sys.platform == "win32" else "alloca.h"]
 
 
 def nettle_headers(nettle: Path, folder: Path) -> Path:
@@ -539,9 +546,10 @@ def build_oracle(source: Path, sources: list, included: list, folder: Path, extr
         subprocess.run([compiler, "-O2", "-w", "-DZSTD_DISABLE_ASM", "-c", *zstd_files],
                        check=True, cwd=objects)
         files += sorted(str(f) for f in objects.glob("*.o"))
+        system = ["-DWIN32_LEAN_AND_MEAN", "-lbcrypt"] if sys.platform == "win32" else []
         subprocess.run([compiler, "-O2", "-w", "-pthread", *NETTLE_FLAGS, f"-I{config}", f"-I{lib}", f"-I{zlib}",
                         f"-I{include}", f"-I{nettle}", f"-I{bzip2}", f"-I{xz / 'api'}", f"-I{zstd}", *files,
-                        "-o", str(folder / "oracle")],
+                        "-o", str(folder / "oracle"), *system],
                        check=True)
         return
     libarchive = next(source.glob("libarchive-*/libarchive"), None)

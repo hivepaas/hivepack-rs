@@ -33,6 +33,9 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "zipint.h"
 
@@ -65,9 +68,16 @@ static void fail(const char *what, const char *detail) {
 }
 
 static uint64_t now(void) {
+#ifdef _WIN32
+    LARGE_INTEGER count, frequency;
+    QueryPerformanceCounter(&count);
+    QueryPerformanceFrequency(&frequency);
+    return (uint64_t)((double)count.QuadPart * 1e9 / (double)frequency.QuadPart);
+#else
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
     return (uint64_t)t.tv_sec * 1000000000ULL + (uint64_t)t.tv_nsec;
+#endif
 }
 
 static zip_t *open_archive(const char *path, int flags) {

@@ -1,6 +1,6 @@
 /*
  * config.h for building libzip 1.12.1 into the oracle on 64-bit Linux and
- * macOS, in place of the one libzip's CMake build writes from
+ * macOS, and with MinGW on Windows, in place of the one libzip's CMake build writes from
  * config.h.in: what those systems have, with libbzip2 (bzip2 1.0.8's
  * sources), liblzma (XZ Utils 5.8.4's, built apart with
  * tools/xz-oracle/config.h) and libzstd (1.5.7's, built apart) but not the
@@ -16,11 +16,17 @@
 #endif
 #define ENABLE_FDOPEN
 #define HAVE_FILENO
+#ifndef _WIN32
 #define HAVE_FCHMOD
+#endif
 #define HAVE_FSEEKO
 #define HAVE_FTELLO
+#ifdef _WIN32
+#define HAVE_LOCALTIME_S
+#else
 #define HAVE_LOCALTIME_R
 #define HAVE_MKSTEMP
+#endif
 #define HAVE_SNPRINTF
 #define HAVE_STRCASECMP
 #define HAVE_STRDUP

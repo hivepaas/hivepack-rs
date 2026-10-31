@@ -19,6 +19,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "7z.h"
 #include "7zAlloc.h"
@@ -31,9 +34,16 @@
 static const ISzAlloc g_alloc = { SzAlloc, SzFree };
 
 static unsigned long long now(void) {
+#ifdef _WIN32
+    LARGE_INTEGER count, frequency;
+    QueryPerformanceCounter(&count);
+    QueryPerformanceFrequency(&frequency);
+    return (unsigned long long)((double)count.QuadPart * 1e9 / (double)frequency.QuadPart);
+#else
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
     return (unsigned long long)t.tv_sec * 1000000000ULL + (unsigned long long)t.tv_nsec;
+#endif
 }
 
 static unsigned long long fnv64(const unsigned char *bytes, size_t len) {
