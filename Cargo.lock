@@ -275,6 +275,7 @@ dependencies = [
  "hivepack-udf",
  "hivepack-xar",
  "hivepack-xz",
+ "hivepack-zip",
  "hivepack-zstd",
  "liblzma",
  "lz4",

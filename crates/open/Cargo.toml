@@ -42,3 +42,5 @@ hivepack-udf.workspace = true
 hivepack-xar.workspace = true
 # For the 7z archives it finds.
 hivepack-7z.workspace = true
+# For the volumes of split ZIP archives it finds.
+hivepack-zip.workspace = true

@@ -37,7 +37,9 @@ pub enum Container {
     /// A tar archive.
     Tar,
     /// A ZIP archive, which is read by random access: in a layer, it must
-    /// be taken out to a file first.
+    /// be taken out to a file first. Its file may be one volume of a split
+    /// archive, told by its name when its bytes start anywhere: open it
+    /// with `hivepack_zip::Volumes::open`, which finds the others.
     Zip,
     /// A 7z archive, which `hivepack-7z` reads by random access, its
     /// headers from its end: in a layer, it must be taken out to a file
@@ -271,10 +273,33 @@ fn is_udf(head: &[u8]) -> bool {
     false
 }
 
+/// Whether `name` is that of a volume of a split ZIP archive, whose bytes,
+/// but for the first volume's, start anywhere in the archive: `.z01`,
+/// `.z02`, … and `.zip`, the last (Info-ZIP, PKZIP), `.zx01`, … and
+/// `.zipx` (WinZip), and 7-Zip's `.zip.001`, ….
+fn is_zip_volume_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let Some((stem, ext)) = name.rsplit_once('.') else {
+        return false;
+    };
+    ext == "zip"
+        || ext == "zipx"
+        || ext
+            .strip_prefix("zx")
+            .is_some_and(|n| n.len() >= 2 && digits(n))
+        || ext
+            .strip_prefix('z')
+            .is_some_and(|n| n.len() >= 2 && digits(n))
+        || ext.len() >= 3 && digits(ext) && stem.ends_with(".zip")
+}
+
 /// What `head`, the first [`HEAD_LEN`] bytes of a stream (fewer if it is
 /// shorter), or [`ISO_HEAD_LEN`] to tell an ISO 9660 image, or
 /// [`UDF_HEAD_LEN`] to tell a UDF volume, is. `name`, the file's name if
-/// the stream is the file's, tells `.lzma`, which has no magic.
+/// the stream is the file's, tells `.lzma`, which has no magic, and the
+/// volumes of a split ZIP archive after the first, which start anywhere in
+/// it: read them with `hivepack_zip::Volumes::open`.
 pub fn detect(head: &[u8], name: Option<&str>) -> Detected {
     let starts = |magic: &[u8]| head.starts_with(magic);
     if starts(AGE_INTRO) {
@@ -348,6 +373,9 @@ pub fn detect(head: &[u8], name: Option<&str>) -> Detected {
     }
     if name.is_some_and(|n| n.to_ascii_lowercase().ends_with(".lzma")) {
         return Detected::Layer(Layer::Lzma);
+    }
+    if name.is_some_and(is_zip_volume_name) {
+        return Detected::Container(Container::Zip);
     }
     Detected::Container(Container::Data)
 }
@@ -741,6 +769,41 @@ mod tests {
         // Magic bytes come first.
         assert_eq!(
             detect(b"\x1F\x8B\x08", Some("x.lzma")),
+            Detected::Layer(Layer::Gzip)
+        );
+    }
+
+    #[test]
+    fn zip_volumes_by_their_names() {
+        let middle = [0x98, 0x93, 0x8E, 0xEA, 0x7D, 0x32, 0x9D, 0xB0];
+        assert_eq!(layer(&middle), Detected::Container(Container::Data));
+        let zip = Detected::Container(Container::Zip);
+        for name in [
+            "a.zip",
+            "A.ZIP",
+            "a.z02",
+            "a.Z99",
+            "a.z100",
+            "a.zipx",
+            "a.zx01",
+            "a.ZX12",
+            "a.zip.002",
+            "a.ZIP.0010",
+        ] {
+            assert_eq!(detect(&middle, Some(name)), zip, "{name}");
+        }
+        for name in [
+            "a.z", "a.z1", "a.zx1", "a.zipper", "a.7z.002", "a.002", "zip", "a.tar",
+        ] {
+            assert_eq!(
+                detect(&middle, Some(name)),
+                Detected::Container(Container::Data),
+                "{name}"
+            );
+        }
+        // Magic bytes come first: a gzip file named .zip is gzip.
+        assert_eq!(
+            detect(b"\x1F\x8B\x08", Some("x.zip")),
             Detected::Layer(Layer::Gzip)
         );
     }

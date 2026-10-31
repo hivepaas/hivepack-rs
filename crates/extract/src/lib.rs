@@ -37,11 +37,12 @@
 //!
 //! ```no_run
 //! use hivepack_extract::{Options, Origin, extract_zip};
-//! use hivepack_zip::{Archive, OpenFlags};
+//! use hivepack_zip::{Archive, OpenFlags, Volumes};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let path = std::path::Path::new("archive.zip");
-//! let archive = Archive::open(std::fs::File::open(path)?, OpenFlags::CHECKCONS)?;
+//! // The file, or the volumes of a split archive (archive.z01, … archive.zip).
+//! let archive = Archive::open(Volumes::open(path)?, OpenFlags::CHECKCONS)?;
 //! let mut options = Options::default();
 //! // Downloaded files are marked; what is extracted from them must be too.
 //! options.origin = Origin::of(path)?;

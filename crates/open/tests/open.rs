@@ -601,6 +601,31 @@ fn seven_zip_archives_under_layers_open() {
     }
 }
 
+/// The volumes of the split archives of `testdata/zip-split`, made by
+/// Info-ZIP's `zip -s`: the first by its split signature, the others,
+/// which start anywhere in the archive, by their names; from any of them,
+/// hivepack-zip's `Volumes::open` finds the rest and reads the archive.
+#[test]
+fn split_zip_volumes_open() {
+    use hivepack_zip::{Archive, Flags, OpenFlags, Volumes, volume_paths};
+    let folder = support::repository().join("testdata/zip-split");
+    for last in ["infozip.zip", "infozip64.zip", "infozip-crypt.zip"] {
+        let paths = volume_paths(&folder.join(last));
+        assert!(paths.len() > 1, "{last}");
+        for path in &paths {
+            let name = path.file_name().unwrap().to_str().unwrap();
+            let file = std::fs::read(path).unwrap();
+            let (layers, container, _) = open_named(&file, Some(name)).unwrap();
+            assert_eq!((layers, container), (vec![], Container::Zip), "{name}");
+            let za = Archive::open(Volumes::open(path).unwrap(), OpenFlags::RDONLY).unwrap();
+            assert!(za.get_num_entries(Flags::NONE) > 3, "{name}");
+        }
+        // Without its name, a volume that starts anywhere is data.
+        let file = std::fs::read(folder.join(last)).unwrap();
+        assert_eq!(open(&file).unwrap().1, Container::Data, "{last}");
+    }
+}
+
 /// Data looked into for an ISO 9660 image, cut short in what is looked
 /// at: it opens, and the error comes after the data before it, as without
 /// the look.
