@@ -81,6 +81,17 @@ fn items(rng: &mut Rng, count: usize, max_size: u64) -> Vec<Item> {
         .collect()
 }
 
+/// Salts and IVs for the tests, where the system's are not at hand: Windows has
+/// no `/dev/urandom`, and a program there gives its own.
+fn random_source() -> hivepack_7z::RandomSource {
+    let rng = std::sync::Mutex::new(Rng(0x7a37_7a37));
+    Arc::new(move |bytes: &mut [u8]| {
+        let mut rng = rng.lock().unwrap();
+        bytes.iter_mut().for_each(|b| *b = rng.next() as u8);
+        Ok(())
+    })
+}
+
 fn write_archive(options: &WriteOptions, items: &[Item], rng: &mut Rng) -> Vec<u8> {
     let mut w = Writer::with_options(Cursor::new(Vec::new()), options.clone()).unwrap();
     for item in items {
@@ -252,6 +263,7 @@ fn read_back_by_all_three() {
             let mut options = WriteOptions {
                 method,
                 filter,
+                random_source: Some(random_source()),
                 ..WriteOptions::default()
             };
             match layout {
@@ -459,6 +471,7 @@ fn encrypting_hides_what_it_should() {
                 encrypt_headers,
                 compress_headers,
                 key_cycles: 6,
+                random_source: Some(random_source()),
                 ..WriteOptions::default()
             },
         )
