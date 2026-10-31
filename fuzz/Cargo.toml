@@ -331,6 +331,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "sevenz_write"
+path = "fuzz_targets/sevenz_write.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "extract_rar"
 path = "fuzz_targets/extract_rar.rs"
 test = false

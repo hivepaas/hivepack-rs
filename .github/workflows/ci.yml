@@ -500,6 +500,7 @@ jobs:
               pathlib.Path(f"fuzz/corpus/sevenz/r{i}").write_bytes(bytes.fromhex(line.split("\t")[0]))
           PY
       - run: cargo fuzz run --target x86_64-unknown-linux-gnu sevenz -- -max_total_time=60 -rss_limit_mb=4096
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu sevenz_write -- -max_total_time=60 -rss_limit_mb=4096
       - name: Seed the 7z extraction corpus with testdata/7z, behind a byte of options
         run: |
           mkdir -p fuzz/corpus/extract_7z

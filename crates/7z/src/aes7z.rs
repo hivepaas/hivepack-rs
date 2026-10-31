@@ -1,4 +1,4 @@
-//! `7zAES`: AES-256 in CBC mode, with a key hashed from a password.
+//! `7zAES`: AES-256 in CBC mode, with a key hashed from a password, both ways.
 //!
 //! 7-Zip's code for it, `CPP/7zip/Crypto/7zAes.cpp`, is under the LGPL, so
 //! none of it is ported. The format is the one 7-Zip's archives have, from
@@ -28,6 +28,9 @@ use crate::error::{Error, Result};
 
 /// `k_AES`.
 pub(crate) const K_AES: u32 = 0x6F1_0701;
+
+/// `K_AES`, as a coder's ID.
+pub(crate) const K_AES_ID: [u8; 4] = [0x06, 0xF1, 0x07, 0x01];
 
 /// The power of 2 of the rounds that stands for no hashing at all.
 const NO_HASHING: u32 = 0x3F;
@@ -239,5 +242,114 @@ impl AesCoder {
 impl Drop for AesCoder {
     fn drop(&mut self) {
         clear(&mut self.buf);
+    }
+}
+
+/// The encryption of a coder's output.
+pub(crate) struct AesEncoder {
+    aes: Aes,
+    /// The block before, which the next one goes on from.
+    iv: [u8; AES_BLOCK_LENGTH],
+    /// Bytes short of a block.
+    pending: [u8; AES_BLOCK_LENGTH],
+    pending_len: usize,
+    cipher: Vec<u8>,
+}
+
+impl AesEncoder {
+    /// The key from a password.
+    pub(crate) fn key(cycles: u32, salt: &[u8], password: &str) -> [u8; 32] {
+        let mut password: Vec<u8> = password.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let key = derive_key(cycles, salt, &password);
+        clear(&mut password);
+        key
+    }
+
+    /// The coder's properties, for a salt and an IV of a whole block each.
+    pub(crate) fn props(
+        cycles: u32,
+        salt: &[u8; AES_BLOCK_LENGTH],
+        iv: &[u8; AES_BLOCK_LENGTH],
+    ) -> Vec<u8> {
+        // Both sizes are 16: a high bit of the first byte, and 15 in the second.
+        let mut props = vec![0xC0 | cycles as u8, 0xFF];
+        props.extend_from_slice(salt);
+        props.extend_from_slice(iv);
+        props
+    }
+
+    pub(crate) fn new(key: &[u8; 32], iv: [u8; AES_BLOCK_LENGTH]) -> Result<Self> {
+        Ok(AesEncoder {
+            aes: Aes::new(key).ok_or(Error::Fail)?,
+            iv,
+            pending: [0; AES_BLOCK_LENGTH],
+            pending_len: 0,
+            cipher: Vec::with_capacity(BUF_SIZE),
+        })
+    }
+
+    fn block(&mut self, block: &[u8; AES_BLOCK_LENGTH]) {
+        for (byte, from) in self.iv.iter_mut().zip(block) {
+            *byte ^= *from;
+        }
+        self.aes.encrypt_block(&mut self.iv);
+        self.cipher.extend_from_slice(&self.iv);
+    }
+
+    /// Gives `out` the whole blocks `data` completes, and keeps the rest.
+    pub(crate) fn encrypt(
+        &mut self,
+        mut data: &[u8],
+        out: &mut dyn FnMut(&[u8]) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        if self.pending_len > 0 {
+            let n = (AES_BLOCK_LENGTH - self.pending_len).min(data.len());
+            self.pending[self.pending_len..self.pending_len + n].copy_from_slice(&data[..n]);
+            self.pending_len += n;
+            data = &data[n..];
+            if self.pending_len < AES_BLOCK_LENGTH {
+                return Ok(());
+            }
+            let block = self.pending;
+            self.block(&block);
+            self.pending_len = 0;
+        }
+        let (blocks, rest) = data.as_chunks::<AES_BLOCK_LENGTH>();
+        for block in blocks {
+            self.block(block);
+            if self.cipher.len() >= BUF_SIZE {
+                out(&self.cipher)?;
+                self.cipher.clear();
+            }
+        }
+        self.pending[..rest.len()].copy_from_slice(rest);
+        self.pending_len = rest.len();
+        if !self.cipher.is_empty() {
+            out(&self.cipher)?;
+            self.cipher.clear();
+        }
+        Ok(())
+    }
+
+    /// The last block, zeros making it whole.
+    pub(crate) fn finish(
+        &mut self,
+        out: &mut dyn FnMut(&[u8]) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        if self.pending_len > 0 {
+            self.pending[self.pending_len..].fill(0);
+            let block = self.pending;
+            self.block(&block);
+            self.pending_len = 0;
+            out(&self.cipher)?;
+            self.cipher.clear();
+        }
+        Ok(())
+    }
+}
+
+impl Drop for AesEncoder {
+    fn drop(&mut self) {
+        clear(&mut self.pending);
     }
 }

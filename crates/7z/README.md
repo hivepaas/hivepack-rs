@@ -1,6 +1,6 @@
 # hivepack-7z
 
-Reading 7z archives in safe Rust, ported from the 7z decoder of the [LZMA SDK](https://7-zip.org/sdk.html) (7-Zip 26.05), which is in the public domain.
+Reading 7z archives in safe Rust, ported from the 7z decoder of the [LZMA SDK](https://7-zip.org/sdk.html) (7-Zip 26.05), which is in the public domain, and writing them, from the description of the format.
 
 > **Status:** opens what the SDK opens, encoded headers included, and decodes what it decodes (Copy, LZMA, LZMA2 and PPMd, after a branch converter, the delta filter or BCJ2), with the SDK's answers, its error numbers included, on archives 7-Zip makes and on damaged copies of them. Past the SDK, it reads what 7-Zip's program reads: any graph of coders, with Deflate, Deflate64, BZip2 and the swap filters, Zstandard as 7-Zip's forks write it, and AES with a password. This crate is not on crates.io.
 
@@ -33,6 +33,22 @@ The goals:
 - **The same speed**: LZMA and LZMA2 go through [`hivepack-xz`](../xz), which is faster than the SDK's C decoder without its assembly; PPMd takes 0.92× the SDK's speed.
 
 How the port follows the SDK, how it is checked, and what is left are in [docs/7z.md](../../docs/7z.md).
+
+## Writing
+
+```rust,no_run
+use std::io::Write;
+
+let file = std::io::BufWriter::new(std::fs::File::create("backup.7z")?);
+let mut archive = hivepack_7z::Writer::new(file)?;
+archive.add_directory(hivepack_7z::NewEntry::new("notes"))?;
+archive.start_file(hivepack_7z::NewEntry::new("notes/hello.txt"))?;
+archive.write_all(b"hello\n")?;
+archive.finish()?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`WriteOptions` picks Copy, LZMA, LZMA2 (the default), Deflate or BZip2, a branch converter or the delta filter before LZMA and LZMA2, how large a solid block may grow, and AES-256 with a password, for the data alone or the names too. Files take any size, not known beforehand. It writes what `7zz` and the LZMA SDK read; PPMd, BCJ2 and Zstandard are read and not written. An archive is no archive until `finish`.
 
 ## Speed
 
