@@ -276,6 +276,12 @@ impl<R: Read> Reader<R> {
         }
     }
 
+    /// Whether the entry [`Reader::next`] gave last is sparse, its holes read as
+    /// zeros.
+    pub fn is_sparse(&self) -> bool {
+        matches!(self.curr, FileReader::Sparse(_))
+    }
+
     /// The input, as far as it was read.
     pub fn into_inner(self) -> R {
         self.r

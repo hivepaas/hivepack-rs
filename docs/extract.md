@@ -117,7 +117,7 @@ What differs from ZIP:
 - **Hard links** are a second name for a file the archive extracted before them: the target, a name in the archive (`./` dropped, the same rules), must be such a file, kept and earlier, or the link is refused (`ErrorKind::HardLinkTarget`, or `LinkTarget` for a target refused as a name). So a hard link can neither lead outside nor reach a file that was there before. It is created as a hard link inside the destination, by handle; with `Links::AsFile`, as a copy, which counts against the limits as written data.
 - **Devices and FIFOs** have no data in tar, only what to create, and nothing is created as one: they are refused (`ErrorKind::Special`), or left out with `OnRefused::Skip`.
 - **Global PAX headers and GNU volume labels** describe the archive, and are not entries. GNU's dump directories (`D`) are directories; every other type is a regular file, as GNU tar and Python take them.
-- **Sizes**: tar does not compress, so there is no ratio to check here; the compressor's ratio is its own. A sparse file's holes are written as zeros, and count against the limits.
+- **Sizes**: tar does not compress, so there is no ratio to check here; the compressor's ratio is its own. A sparse file's holes stay holes where the file system has them: what reads as zeros in a sparse entry is not written, in a file that is new or emptied. They still count against the limits, as they are what the file comes to. On Windows the file is not marked sparse, which takes a call that safe Rust does not have, so its holes take room there.
 - **Every entry counts against `max_entries`**, metadata too, so that an archive of global headers does not grow the first reading's list without end.
 - **The stream is read to its end.** A tar reader stops at the archive's end, but a compressor checks its data at the end of its stream (gzip's and bzip2's CRC-32, xz's and zstd's checks), and age authenticates its last chunk there. Each reading goes on to the end, as GNU tar reads its compressor's output to the end, so that a stream that fails its check fails the first reading, before anything is written (`ErrorKind::Io`). What follows the archive's end is limited to `max_total_size`, or 1 MiB if that is less, the largest record tar pads to. [open.md](open.md) opens archives through those layers.
 
@@ -245,5 +245,4 @@ One is not made again: macOS's CVE-2026-28849 ("a maliciously crafted ZIP archiv
 
 ## What comes next
 
-- **Sparse files written with holes**, rather than zeros.
 - **Links that lead out through what is already in the destination.** With `Links::Inside`, a target is checked against the archive's own links; one through a link that was there before, in a destination that is not empty, is not looked at. Nothing is written through it, as directories are opened without following links.
