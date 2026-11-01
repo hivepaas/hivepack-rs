@@ -41,6 +41,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
+use std::sync::Arc;
+
 use hivepack_7z::{Archive, Method, NewEntry, Options, WriteOptions, Writer};
 
 type Result<T> = std::result::Result<T, String>;
@@ -554,6 +556,11 @@ fn port_write(
         solid_block_size: row.solid.then_some(1 << 32),
         password: row.password.then(|| PASSWORD.to_string()),
         encrypt_headers: row.password,
+        // The crate's own source is `/dev/urandom`, which Windows does not have.
+        random_source: Some(Arc::new(|bytes: &mut [u8]| {
+            bytes.fill(0x5A);
+            Ok(())
+        })),
         ..WriteOptions::default()
     };
     let start = Instant::now();

@@ -28,6 +28,7 @@
 #define HAVE__FTELLI64
 #define HAVE__SETMODE
 #define HAVE__SNWPRINTF_S
+#define DWORD_MAX 0xFFFFFFFFu
 #else
 #define HAVE_LOCALTIME_R
 #define HAVE_MKSTEMP
