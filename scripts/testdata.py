@@ -513,8 +513,13 @@ def build_oracle(source: Path, sources: list, included: list, folder: Path, extr
     if unrar.is_dir():
         files = [str(ROOT / s) for s in sources if s.endswith(".cpp")]
         files += [str(unrar / name) for name in unrar_sources(unrar)]
+        system = ["-lpthread"]
+        if sys.platform == "win32":
+            # What the makefile, for Unix, leaves out, and what they call.
+            files += [str(unrar / name) for name in ("isnt.cpp", "motw.cpp")]
+            system += ["-lpowrprof", "-lbcrypt", "-lole32", "-loleaut32", "-luuid", "-lshlwapi", "-lshell32"]
         subprocess.run([os.environ.get("CXX", "c++"), "-O2", "-w", "-std=c++11", *UNRAR_FLAGS,
-                        f"-I{unrar}", *files, "-o", str(folder / "oracle"), "-lpthread"], check=True)
+                        f"-I{unrar}", *files, "-o", str(folder / "oracle"), *system], check=True)
         return
     libzip = next(source.glob("libzip-*"), None)
     if libzip is not None:
