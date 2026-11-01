@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use crate::error::{Error, ErrorKind};
@@ -123,6 +124,10 @@ pub enum Packages {
     AsFiles,
 }
 
+/// Which entries to extract: told an entry's path, a component at a time, and
+/// whether it is one of them.
+pub type Select = Arc<dyn Fn(&[String]) -> bool + Send + Sync>;
+
 /// How to extract.
 #[derive(Clone, Default)]
 #[non_exhaustive]
@@ -155,6 +160,12 @@ pub struct Options {
     pub origin: Option<Origin>,
     /// What to do with a macOS package's payloads ([`extract_xar`](crate::extract_xar)).
     pub packages: Packages,
+    /// Extracts only the entries this picks, the folders they are in made as
+    /// they are needed. The others are as if not in the archive: not checked,
+    /// not counted against the limits, not written; an entry whose name cannot
+    /// be used is not picked. All of them by default. Data the picked ones
+    /// depend on, in a solid block or stream, is still read.
+    pub select: Option<Select>,
 }
 
 /// Shows the options, not the password or the progress function.
@@ -173,6 +184,7 @@ impl std::fmt::Debug for Options {
             .field("cancel", &self.cancel)
             .field("progress", &self.progress.as_ref().map(|_| ".."))
             .field("origin", &self.origin)
+            .field("select", &self.select.as_ref().map(|_| ".."))
             .finish()
     }
 }
@@ -259,6 +271,14 @@ pub(crate) fn check<'a>(
     let mut total: u64 = 0;
     let mut seen: HashMap<String, Seen> = HashMap::new();
     for item in items {
+        if let Some(select) = &options.select
+            && !item
+                .name
+                .as_ref()
+                .is_ok_and(|name| select(&name.components))
+        {
+            continue;
+        }
         let refusal = match refused(item, options) {
             Some(kind) => Some(kind),
             None => {
