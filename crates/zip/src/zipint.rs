@@ -115,6 +115,8 @@ pub(crate) const EF_BOTH: Flags = Flags(Flags::LOCAL.0 | Flags::CENTRAL.0);
 
 /// `ZIP_FL_FORCE_ZIP64`: force the Zip64 extra field (`_zip_dirent_write`).
 pub(crate) const FL_FORCE_ZIP64: Flags = Flags(1024);
+/// A local header is written before its data, and is not written again.
+pub(crate) const FL_DATA_FOLLOWS: Flags = Flags(1 << 20);
 
 /// `ZIP_FL_ENCODING_ALL`.
 pub(crate) const FL_ENCODING_ALL: Flags =

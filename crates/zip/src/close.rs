@@ -25,10 +25,10 @@ use crate::source_compress::{Compress, Decompress, maximum_compressed_size};
 use crate::source_crc::Crc;
 use crate::source_data::time_now;
 use crate::source_stack::{Base, Layer, WriteStack};
-use crate::source_write::Output;
+use crate::source_write::{Forward, Output};
 use crate::zip::{ArchiveFlags, Flags, OpenFlags, cm, em, stat};
 use crate::zipint::{
-    BUFSIZE, DATADES_MAGIC, Entry, FL_FORCE_ZIP64, GPBF_DATA_DESCRIPTOR,
+    BUFSIZE, DATADES_MAGIC, Entry, FL_DATA_FOLLOWS, FL_FORCE_ZIP64, GPBF_DATA_DESCRIPTOR,
     MAX_DATA_DESCRIPTOR_LENGTH, changed,
 };
 
@@ -68,6 +68,29 @@ impl<R: ReadAt> Archive<R> {
         self.close_impl(out, None::<fn(u64) -> bool>)
     }
 
+    /// Writes the archive with its changes to `out`, which only goes forwards: to a
+    /// pipe, or an upload, with no more of it held than a piece of an entry. Otherwise
+    /// the same as [`Archive::close_to`], but for what such an archive has to differ
+    /// in. libzip has no such way.
+    ///
+    /// - An entry that is compressed or encrypted here has no CRC or sizes in its
+    ///   local header, and a data descriptor after its data, which ZIP readers take
+    ///   from the central directory. A reader that goes through an archive from its
+    ///   start, not looking at the central directory, may not know where a stored one
+    ///   ends. An entry copied as it is keeps its sizes in its header.
+    /// - An entry of a source that does not say its size, or that may come to 4 GiB,
+    ///   has the Zip64 extra field whatever it comes to.
+    /// - Its time is the one its source said when it was first read.
+    ///
+    /// Torrentzip's format has no data descriptors: it is refused with
+    /// [`ErrorCode::Inval`].
+    pub fn close_to_stream<W: Write>(&mut self, out: W) -> Result<Closed> {
+        if self.want_torrentzip() {
+            return Err(Error::new(ErrorCode::Inval, 0));
+        }
+        self.close_with(Forward::new(out), None::<fn(u64) -> bool>, true)
+    }
+
     /// Writes the archive with its changes to `out`, which must be at its
     /// start, as libzip writes to a source that can clone (a buffer, or a
     /// file on a file system with reflinks): the start of the archive up
@@ -86,11 +109,21 @@ impl<R: ReadAt> Archive<R> {
         self.close_impl(out, Some(can_clone))
     }
 
-    /// Port of `zip_close`, cloning what is kept if `can_clone` is given.
     fn close_impl<W: Write + Seek, F: FnOnce(u64) -> bool>(
         &mut self,
         out: W,
         can_clone: Option<F>,
+    ) -> Result<Closed> {
+        self.close_with(out, can_clone, false)
+    }
+
+    /// Port of `zip_close`, cloning what is kept if `can_clone` is given, and going
+    /// only forwards if `stream`.
+    fn close_with<W: Write + Seek, F: FnOnce(u64) -> bool>(
+        &mut self,
+        out: W,
+        can_clone: Option<F>,
+        stream: bool,
     ) -> Result<Closed> {
         let (changed, survivors) = self.changed();
 
@@ -186,6 +219,7 @@ impl<R: ReadAt> Archive<R> {
         };
 
         let mut out = Output::new(out);
+        out.stream = stream;
         if unchanged_offset > 0 {
             // The clone: the start of the archive as it is.
             let mut src = self.src.view();
@@ -530,6 +564,10 @@ fn add_data<R: ReadAt + ?Sized, W: Write + Seek>(
         de.apply_attributes(&attributes, force_zip64);
     }
 
+    if out.stream {
+        return add_data_forwards(src_final, de, out, flags, force_zip64);
+    }
+
     // as long as we don't support non-seekable output, clear data
     // descriptor bit
     let is_zip64 = de.write(out, flags, want_torrentzip)?;
@@ -606,6 +644,77 @@ fn add_data<R: ReadAt + ?Sized, W: Write + Seek>(
     }
 
     Ok(())
+}
+
+/// The rest of [`add_data`] where `out` goes only forwards: the local header cannot
+/// be written again, so it says nothing the data tells, but for the method. Compressing
+/// gives way to storing only in the first read, of data that fits in it, so that read
+/// is made before the header is written; under encryption it does not give way.
+fn add_data_forwards<R: ReadAt + ?Sized, W: Write + Seek>(
+    mut src: WriteStack<'_, R>,
+    de: &mut Dirent,
+    out: &mut Output<W>,
+    flags: Flags,
+    force_zip64: bool,
+) -> Result<()> {
+    let mut buf = vec![0; BUFSIZE];
+    // What encrypts it gives its own header first, which says nothing of the method.
+    if src.encrypt.is_some()
+        && let Some(compress) = &mut src.compress
+    {
+        compress.ctx.keep_compressing();
+    }
+    src.open()?;
+    let mut flags = flags | FL_DATA_FOLLOWS;
+    // Sizes known may say so, where the flag was not set for them.
+    if de.needs_zip64(Flags::NONE) {
+        flags = flags | FL_FORCE_ZIP64;
+    }
+    let copied = (|| {
+        let first = src.read(&mut buf)?;
+        let st = src.stat()?;
+        de.comp_method = if st.valid & stat::COMP_METHOD != 0 {
+            i32::from(st.comp_method)
+        } else {
+            i32::from(cm_actual(de.comp_method))
+        };
+        // What it asks of a reader goes by the method.
+        de.apply_attributes(&src.file_attributes()?, force_zip64);
+        de.bitflags |= GPBF_DATA_DESCRIPTOR;
+        let is_zip64 = de.write(out, flags, false)?;
+        let offdata = out.tell_write()?;
+        let mut n = first;
+        while n > 0 {
+            out.write(&buf[..n])?;
+            n = src.read(&mut buf)?;
+        }
+        Ok::<_, Error>((is_zip64, offdata))
+    })();
+    let _ = src.close();
+    let (is_zip64, offdata) = copied?;
+    let offend = out.tell_write()?;
+
+    let st = src.stat()?;
+    if st.valid & (stat::COMP_METHOD | stat::CRC | stat::SIZE)
+        != stat::COMP_METHOD | stat::CRC | stat::SIZE
+    {
+        return Err(Error::new(ErrorCode::Internal, 0));
+    }
+    de.comp_method = i32::from(st.comp_method);
+    de.crc = st.crc;
+    de.uncomp_size = st.size;
+    de.comp_size = offend - offdata;
+    if !is_zip64 && de.needs_zip64(Flags::NONE) {
+        // It came to more than its source said it could.
+        return Err(Error::new(ErrorCode::Internal, 0));
+    }
+    let attributes = src.file_attributes()?;
+    de.apply_attributes(&attributes, force_zip64);
+    de.bitflags |= GPBF_DATA_DESCRIPTOR;
+    if de.winzip_aes_version() == 2 {
+        de.crc = 0;
+    }
+    write_data_descriptor(out, de, is_zip64)
 }
 
 /// Reads all of `src` into `out`, opening and closing it: port of
