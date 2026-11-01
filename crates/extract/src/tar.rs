@@ -70,10 +70,21 @@ pub(crate) fn name_of(raw: &[u8], options: &Options) -> Option<Result<Name, Name
     if raw.iter().any(u8::is_ascii_control) {
         return Some(Err(NameError::Control));
     }
-    let Ok(text) = std::str::from_utf8(raw) else {
-        return Some(Err(NameError::NotUtf8));
+    let by_decoder;
+    let mut text = match std::str::from_utf8(raw) {
+        Ok(text) => text,
+        Err(_) => match options
+            .decode_names
+            .as_ref()
+            .and_then(|d| d.decode(raw, None))
+        {
+            Some(text) => {
+                by_decoder = text;
+                by_decoder.as_str()
+            }
+            None => return Some(Err(NameError::NotUtf8)),
+        },
     };
-    let mut text = text;
     while let Some(rest) = text.strip_prefix("./") {
         text = rest.trim_start_matches('/');
     }

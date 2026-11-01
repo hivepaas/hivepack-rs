@@ -88,7 +88,9 @@ pub use error::{Error, ErrorKind};
 pub use iso::extract_iso;
 pub use name::{MAX_COMPONENT, Name, NameError, check_name};
 pub use origin::Origin;
-pub use plan::{Limits, Links, Names, OnRefused, Options, Packages, Permissions, Select};
+pub use plan::{
+    Limits, Links, NameDecoder, Names, OnRefused, Options, Packages, Permissions, Select,
+};
 pub use progress::{Cancel, Progress, ProgressFn};
 #[cfg(feature = "rar")]
 pub use rar::extract_rar;
