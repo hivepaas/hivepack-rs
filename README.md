@@ -43,12 +43,13 @@ Each port is timed against the library it comes from, on the same data, and ever
 | [`hivepack-7z`](crates/7z#speed) | LZMA SDK 26.05, 7-Zip | LZMA and LZMA2 1.10–1.24× against C, Deflate 1.39× | PPMd 0.88–0.92×, BZip2 0.62×, AES-256 with Copy 0.08× |
 | [`hivepack-tar`](crates/tar#speed) | Go 1.27.2's `archive/tar` | going through entries 1.48–2.61×, reading data 1.02–2.00×, seeking past data 2.05×, writing entries 2.03–3.11×, big entries 1.05× | |
 | [`hivepack-age`](crates/age#speed) | age v1.3.2, in Go | X25519 2.23–2.35×, scrypt 1.02–1.28×, a big file in ASCII armor 1.29× | a big file's payload 0.40× |
+| [`hivepack-rar`](crates/rar#speed) | UnRAR 7.3.2 | RAR 4 and RAR 5 without a password, 0.90–1.47× over three machines | PPMd 0.67–0.70×, a password 0.71–1.09× |
 | [`hivepack-crypto`](crates/crypto#speed) | BearSSL 0.6 | 1.01–1.94× | Go's assembly, by up to 5.7×, on SHA-256 and ChaCha20-Poly1305 |
 
 **Measured on,** in October 2026, with safe code unless it says otherwise:
 
 - `hivepack-zip`, `hivepack-7z`, `hivepack-tar` and `hivepack-age`: AMD Ryzen 9 9950X (16 cores, x86-64), 45 GiB of memory, Ubuntu 26.04 with Linux 7.0 and the `powersave` governor, rustc 1.99.1 in the workspace's release profile; the libraries built with GCC 15.2.
-- Each of them, except `hivepack-crypto`, also on GitHub's runners, Linux x86-64, Windows x86-64 and macOS arm64: see their READMEs. `.github/workflows/bench.yml` runs each format on those three.
+- Each of them, except `hivepack-crypto`, also on GitHub's runners, Linux x86-64, Windows x86-64 and macOS arm64, with and without `unsafe-fast` where a crate has it: see their READMEs. `hivepack-rar` only there, on `testdata/rar`. `.github/workflows/bench.yml` runs each format on those three.
 - `hivepack-bzip2`, `hivepack-deflate`, `hivepack-lz4`, `hivepack-xz` and `hivepack-crypto`: an AMD Ryzen 9 9950X (x86-64, Linux).
 - `hivepack-zstd`: an Apple M1 Pro, and GitHub's runners, an AMD EPYC 7763 and a Neoverse-N2.
 

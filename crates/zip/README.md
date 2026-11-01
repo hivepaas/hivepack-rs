@@ -79,26 +79,43 @@ LZMA and XZ read below liblzma because its x86-64 range decoder is inline assemb
 
 ### On GitHub's runners
 
-Against libzip 1.12.1, each row the mean and the range over its files or workloads.
+Against libzip 1.12.1, as the crate comes by default, each row the mean and the range over its files or workloads.
 
 | Port / reference | Linux x86-64 | Windows x86-64 | macOS arm64 |
 |---|---|---|---|
-| Opening many entries | 0.69× | 4.06× | 1.77× |
-| Opening with `ZIP_CHECKCONS` | 1.94× | 5.71× | 2.13× |
-| Finding entries by name | 0.93× | 1.28× | 0.96× |
-| Reading stored entries | 1.34× (1.30–1.38×) | 1.40× (1.29–1.50×) | 1.17× (0.53–1.80×) |
-| Reading Deflate and bzip2 | 0.98× (0.92–1.01×) | 1.03× (0.99–1.11×) | 0.90× (0.81–0.97×) |
-| Reading LZMA and XZ | 0.76× (0.74–0.77×) | 0.77× (0.77–0.77×) | 1.02× (1.01–1.04×) |
-| Writing stored entries | 1.29× (1.15–1.43×) | 1.53× (1.11–1.95×) | 1.42× (1.39–1.45×) |
-| Writing compressed, every method and level | 0.98× (0.94–1.01×) | 1.06× (0.98–1.15×) | 1.03× (0.92–1.07×) |
-| ZipCrypto, both ways | 1.08× (1.04–1.11×) | 1.11× (1.03–1.19×) | 0.90× (0.74–1.06×) |
-| WinZip AES, both ways | 0.71× (0.61–0.80×) | 0.79× (0.68–0.97×) | 0.55× (0.45–0.69×) |
-| Editing, the data copied | 1.77× (1.75–1.79×) | 1.12× (1.12–1.13×) | 1.81× (1.79–1.82×) |
-| Editing many entries | 2.87× (2.29–3.51×) | 7.48× (5.47–9.20×) | 1.78× (1.27–2.18×) |
+| Opening many entries | 0.61× | 3.71× | 1.70× |
+| Opening with `ZIP_CHECKCONS` | 1.50× | 4.93× | 2.02× |
+| Finding entries by name | 0.99× | 1.18× | 1.07× |
+| Reading stored entries | 1.40× (1.35–1.45×) | 1.31× (1.29–1.32×) | 1.18× (0.51–1.84×) |
+| Reading Deflate and bzip2 | 1.03× (0.98–1.10×) | 1.10× (1.03–1.14×) | 0.91× (0.84–0.98×) |
+| Reading LZMA and XZ | 0.77× (0.74–0.80×) | 0.77× (0.75–0.79×) | 0.99× (0.93–1.04×) |
+| Writing stored entries | 1.28× (1.17–1.39×) | 1.60× (1.13–2.07×) | 1.39× (1.35–1.43×) |
+| Writing compressed, every method and level | 1.00× (0.95–1.04×) | 1.07× (0.97–1.14×) | 1.03× (0.85–1.13×) |
+| ZipCrypto, both ways | 0.94× (0.89–0.99×) | 1.10× (0.91–1.30×) | 0.89× (0.76–1.01×) |
+| WinZip AES, both ways | 0.61× (0.56–0.66×) | 0.56× (0.53–0.58×) | 0.53× (0.42–0.66×) |
+| Editing, the data copied | 6.58× (6.28–6.89×) | 1.27× (1.26–1.27×) | 1.85× (1.84–1.87×) |
+| Editing many entries | 2.99× (2.45–4.06×) | 6.81× (5.13–8.28×) | 1.89× (1.63–2.34×) |
 
-**Measured on** `.github/workflows/bench.yml`, on October 31 and November 1, 2026, with rustc 1.99.1: Linux x86-64 on AMD EPYC 7763 64-Core Processor (4 threads); Windows x86-64 on Intel64 Family 6 Model 207 Stepping 2 (4 threads); macOS arm64 on Apple M1 (Virtual) (3 threads). Each job gets what the runner has that day, so these are not the same processor from format to format, and they are shared machines: the ratios hold better than the speeds. Reading big stored entries on macOS is 0.51–0.61×, in four runs: zlib, built for Apple's processors, uses the CRC instruction there, which the port's safe code cannot call. `zip_stat_index` is left out: libzip's calls `mktime` for each entry, and the row was about 70× on macOS and about 4× on Linux, which says more about `mktime` than about the port. Encrypting draws its random bytes from a stand-in on both sides.
+With the `unsafe-fast` feature, off by default (see [docs/unsafe.md](../../docs/unsafe.md)):
 
-**With the `unsafe-fast` feature**, off by default: WinZip AES at 2.3–4.2× libzip on GitHub's runners. See [docs/unsafe.md](../../docs/unsafe.md#the-processors-instructions).
+| Port / reference | Linux x86-64 | Windows x86-64 | macOS arm64 |
+|---|---|---|---|
+| Opening many entries | 0.88× | 5.33× | 1.77× |
+| Opening with `ZIP_CHECKCONS` | 1.89× | 6.98× | 1.87× |
+| Finding entries by name | 1.05× | 1.07× | 0.95× |
+| Reading stored entries | 1.44× (1.37–1.51×) | 1.36× (1.34–1.39×) | 1.34× (0.64–2.05×) |
+| Reading Deflate and bzip2 | 0.98× (0.91–1.07×) | 1.03× (0.96–1.07×) | 0.97× (0.92–1.00×) |
+| Reading LZMA and XZ | 0.84× (0.83–0.86×) | 0.73× (0.72–0.74×) | 0.99× (0.97–1.01×) |
+| Writing stored entries | 1.27× (1.20–1.34×) | 1.53× (1.02–2.04×) | 1.53× (1.41–1.65×) |
+| Writing compressed, every method and level | 1.00× (0.96–1.04×) | 1.02× (0.97–1.06×) | 1.02× (0.90–1.10×) |
+| ZipCrypto, both ways | 1.07× (0.96–1.18×) | 1.14× (1.10–1.17×) | 1.15× (0.95–1.35×) |
+| WinZip AES, both ways | 2.69× (1.52–3.66×) | 2.79× (1.84–3.52×) | 2.21× (1.16–2.92×) |
+| Editing, the data copied | 9.88× (9.62–10.15×) | 1.23× (1.21–1.24×) | 1.89× (1.87–1.91×) |
+| Editing many entries | 2.63× (2.27–3.17×) | 8.96× (6.57–11.36×) | 1.91× (1.66–2.18×) |
+
+**Measured on** `.github/workflows/bench.yml`, on November 1, 2026, with rustc 1.99.1: Linux x86-64 on AMD EPYC 9V45 (4 threads); Windows x86-64 on AMD64 Family 26 Model 2 Stepping 1 (4 threads); macOS arm64 on Apple M1 (Virtual) (3 threads). Each job gets what the runner has that day, so the two tables, and the formats, are not on the same processor, and they are shared machines: the ratios hold better than the speeds.
+
+Reading big stored entries on macOS stays below 1× as zlib, built for Apple's processors, has the CRC instruction; `unsafe-fast` narrows it. `zip_stat_index` is left out: libzip's calls `mktime` for each entry, which says more about `mktime` than about the port.
 
 ## License
 
