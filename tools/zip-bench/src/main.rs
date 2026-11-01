@@ -575,6 +575,12 @@ impl Bench {
         let _ = std::fs::remove_file(out);
         let start = Instant::now();
         let mut archive = new_archive()?;
+        // The crate's own source is `/dev/urandom`, which Windows does not have.
+        // libzip's side draws from a stand-in too.
+        archive.set_random_source(Some(std::sync::Arc::new(|bytes: &mut [u8]| {
+            bytes.fill(0x5A);
+            Ok(())
+        })));
         for (item, data) in list.items.iter().zip(sources) {
             let index = archive
                 .file_add(item.name.as_bytes(), BufferSource::new(data), Flags::NONE)

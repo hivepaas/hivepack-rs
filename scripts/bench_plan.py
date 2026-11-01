@@ -3,8 +3,8 @@
 the commands, and the machines it runs on. Prints the job matrix as JSON, for the
 formats and machines asked for, comma-separated, or all of them.
 
-zip and 7z compare with C programs that scripts/testdata.py builds with POSIX tools,
-so not on Windows yet.
+zip and 7z compare with C programs that scripts/testdata.py builds, with MinGW's
+compiler on Windows.
 """
 
 import json
@@ -15,7 +15,6 @@ LINUX = "ubuntu-latest"
 WINDOWS = "windows-latest"
 MACOS = "macos-latest"
 ALL = [LINUX, WINDOWS, MACOS]
-UNIX = [LINUX, MACOS]
 
 FORMATS = {
     "tar": {"sets": ["silesia", "tar-bench-go"], "go": True, "machines": ALL,
@@ -34,9 +33,9 @@ FORMATS = {
            "runs": [f"--presets 0,6 {SILESIA}", f"--presets 0,6 --compress {SILESIA}"]},
     "zstd": {"sets": ["silesia"], "go": False, "machines": ALL, "package": "zstd-bench",
              "runs": [f"--levels 1,3,9,19 {SILESIA}"]},
-    "zip": {"sets": ["silesia", "zip-bench-libzip"], "go": False, "machines": UNIX,
+    "zip": {"sets": ["silesia", "zip-bench-libzip"], "go": False, "machines": ALL,
             "package": "zip-bench", "runs": [""]},
-    "7z": {"sets": ["silesia", "7zz", "7z-bench-sdk"], "go": False, "machines": UNIX,
+    "7z": {"sets": ["silesia", "7zz", "7z-bench-sdk"], "go": False, "machines": ALL,
            "package": "sevenz-bench", "runs": [""]},
 }
 

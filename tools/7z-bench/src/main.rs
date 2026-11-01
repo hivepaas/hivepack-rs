@@ -39,6 +39,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitCode, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use hivepack_7z::{Archive, Method, NewEntry, Options, WriteOptions, Writer};
@@ -554,6 +555,11 @@ fn port_write(
         solid_block_size: row.solid.then_some(1 << 32),
         password: row.password.then(|| PASSWORD.to_string()),
         encrypt_headers: row.password,
+        // The crate's own source is `/dev/urandom`, which Windows does not have.
+        random_source: Some(Arc::new(|bytes: &mut [u8]| {
+            bytes.fill(0x5A);
+            Ok(())
+        })),
         ..WriteOptions::default()
     };
     let start = Instant::now();
@@ -835,7 +841,10 @@ fn real_main() -> Result<()> {
         options.many,
     )?;
     let tool = repository
-        .join("target/testdata/7zz/7zz")
+        .join(format!(
+            "target/testdata/7zz/7zz{}",
+            std::env::consts::EXE_SUFFIX
+        ))
         .canonicalize()
         .map_err(|e| {
             format!("7zz: {e}: run `python3 scripts/testdata.py fetch --group generated`")

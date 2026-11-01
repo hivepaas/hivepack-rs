@@ -48,7 +48,7 @@ Each port is timed against the library it comes from, on the same data, and ever
 **Measured on,** in October 2026, with safe code unless it says otherwise:
 
 - `hivepack-zip`, `hivepack-7z`, `hivepack-tar` and `hivepack-age`: AMD Ryzen 9 9950X (16 cores, x86-64), 45 GiB of memory, Ubuntu 26.04 with Linux 7.0 and the `powersave` governor, rustc 1.99.1 in the workspace's release profile; the libraries built with GCC 15.2.
-- Each of them, except `hivepack-crypto`, also on GitHub's runners, Linux x86-64, Windows x86-64 and macOS arm64: see their READMEs. `.github/workflows/bench.yml` runs each format on those three; `hivepack-zip` and `hivepack-7z` are not on Windows yet.
+- Each of them, except `hivepack-crypto`, also on GitHub's runners, Linux x86-64, Windows x86-64 and macOS arm64: see their READMEs. `.github/workflows/bench.yml` runs each format on those three.
 - `hivepack-bzip2`, `hivepack-deflate`, `hivepack-lz4`, `hivepack-xz` and `hivepack-crypto`: an AMD Ryzen 9 9950X (x86-64, Linux).
 - `hivepack-zstd`: an Apple M1 Pro, and GitHub's runners, an AMD EPYC 7763 and a Neoverse-N2.
 

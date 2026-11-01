@@ -74,19 +74,19 @@ The LZMA figures are against C only. AES with Copy is the processor's AES instru
 
 Against the LZMA SDK 26.05 and `7zz`, each row the mean and the range over its files or workloads.
 
-| Port / reference | Linux x86-64 | macOS arm64 |
-|---|---|---|
-| Opening many files, against the SDK | 0.67× (0.61–0.72×) | 0.73× (0.61–0.85×) |
-| Copy, against the SDK | 0.43× | 0.43× |
-| LZMA, LZMA2 and their filters, against the SDK | 1.01× (0.87–1.06×) | 0.90× (0.82–0.92×) |
-| LZMA with `lc + lp` above 4, against the SDK | 0.74× | 0.64× |
-| PPMd, against the SDK | 0.88× (0.84–0.92×) | 0.81× (0.75–0.88×) |
-| Deflate and Deflate64, against `7zz` | 1.10× (0.92–1.29×) | 0.99× (0.79–1.20×) |
-| BZip2 and Swap4, against `7zz` | 0.54× (0.46–0.62×) | 0.50× (0.39–0.61×) |
-| AES-256 with Copy, against `7zz` | 0.07× | 0.06× |
-| AES-256 behind a compressor, against `7zz` | 0.78× (0.76–0.79×) | 0.57× (0.53–0.62×) |
+| Port / reference | Linux x86-64 | Windows x86-64 | macOS arm64 |
+|---|---|---|---|
+| Opening many files, against the SDK | 0.67× (0.61–0.72×) | 0.78× (0.78–0.78×) | 0.73× (0.61–0.85×) |
+| Copy, against the SDK | 0.43× | 0.77× | 0.43× |
+| LZMA, LZMA2 and their filters, against the SDK | 1.01× (0.87–1.06×) | 1.04× (0.90–1.09×) | 0.90× (0.82–0.92×) |
+| LZMA with `lc + lp` above 4, against the SDK | 0.74× | 0.71× | 0.64× |
+| PPMd, against the SDK | 0.88× (0.84–0.92×) | 0.80× (0.75–0.85×) | 0.81× (0.75–0.88×) |
+| Deflate and Deflate64, against `7zz` | 1.10× (0.92–1.29×) | 1.15× (0.90–1.39×) | 0.99× (0.79–1.20×) |
+| BZip2 and Swap4, against `7zz` | 0.54× (0.46–0.62×) | 0.71× (0.68–0.73×) | 0.50× (0.39–0.61×) |
+| AES-256 with Copy, against `7zz` | 0.07× | 0.10× | 0.06× |
+| AES-256 behind a compressor, against `7zz` | 0.78× (0.76–0.79×) | 0.86× (0.80–0.93×) | 0.57× (0.53–0.62×) |
 
-**Measured on** `.github/workflows/bench.yml`, on October 31, 2026, with rustc 1.99.1: Linux x86-64 on AMD EPYC 9V74 80-Core Processor (4 threads); macOS arm64 on Apple M2 Pro (Virtual) (5 threads). Each job gets what the runner has that day, so these are not the same processor from format to format, and they are shared machines: the ratios hold better than the speeds. Not on Windows yet, as the C side is built with POSIX tools.
+**Measured on** `.github/workflows/bench.yml`, on October 31 and November 1, 2026, with rustc 1.99.1: Linux x86-64 on AMD EPYC 9V74 80-Core Processor (4 threads); Windows x86-64 on Intel64 Family 6 Model 106 Stepping 6 (4 threads); macOS arm64 on Apple M2 Pro (Virtual) (5 threads). Each job gets what the runner has that day, so these are not the same processor from format to format, and they are shared machines: the ratios hold better than the speeds. The rows of writing are in the job's output, not here.
 
 ## License
 
