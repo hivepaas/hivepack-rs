@@ -456,6 +456,8 @@ pub struct Writer<W> {
     /// The salt and key of the archive, when encrypting.
     salt_key: Option<([u8; 16], [u8; 32])>,
     buf: Vec<u8>,
+    /// The encoder of the last folder, for the next.
+    spare: Option<Box<Stream>>,
     entries: Vec<Written>,
     /// Whether the last entry is a file, which takes data.
     in_file: bool,
@@ -483,7 +485,11 @@ impl<W: Write + Seek> Writer<W> {
             return Err(Error::Param);
         }
         // Finds a bad preset, level or filter before anything is written.
-        make_compressor(&options)?;
+        let compressor = make_compressor(&options, &mut None)?;
+        let spare = match compressor {
+            Compressor::Xz(stream) => Some(stream),
+            _ => None,
+        };
 
         let salt_key = match &options.password {
             None => None,
@@ -504,6 +510,7 @@ impl<W: Write + Seek> Writer<W> {
             entries: Vec::new(),
             in_file: false,
             folder: None,
+            spare,
             folders: Vec::new(),
             pack_total: 0,
             failed: None,
@@ -563,7 +570,8 @@ impl<W: Write + Seek> Writer<W> {
             }
         }
         if self.folder.is_none() {
-            let compressor = make_compressor(&self.options).map_err(io::Error::other)?;
+            let compressor =
+                make_compressor(&self.options, &mut self.spare).map_err(io::Error::other)?;
             let (mut coders, aes) = (Vec::new(), self.make_aes().map_err(io::Error::other)?);
             let aes = match aes {
                 Some((encoder, props)) => {
@@ -649,6 +657,9 @@ impl<W: Write + Seek> Writer<W> {
         let Some(folder) = self.folder.take() else {
             return Ok(());
         };
+        if let Compressor::Xz(stream) = folder.compressor {
+            self.spare = Some(stream);
+        }
         let mut unpack_sizes = Vec::new();
         if folder.aes.is_some() {
             unpack_sizes.push(folder.compressed);
@@ -902,12 +913,18 @@ fn xz_chain(options: &WriteOptions, last: XzFilter) -> Result<Vec<XzFilter>> {
     Ok(chain)
 }
 
-fn make_compressor(options: &WriteOptions) -> Result<Compressor> {
+/// The compressor of a new folder. `spare`: the encoder of the last one, whose
+/// memory it takes over, which saves much when each file is a folder.
+fn make_compressor(options: &WriteOptions, spare: &mut Option<Box<Stream>>) -> Result<Compressor> {
     let preset = |p| LzmaOptions::preset(p).ok_or(Error::Param);
-    let raw = |filters: Vec<XzFilter>| {
-        Stream::raw_encoder(&filters)
-            .map(|s| Compressor::Xz(Box::new(s)))
-            .map_err(|_| Error::Param)
+    let spare = spare.take();
+    let raw = move |filters: Vec<XzFilter>| {
+        match spare {
+            Some(stream) => stream.raw_encoder_again(&filters),
+            None => Stream::raw_encoder(&filters),
+        }
+        .map(|s| Compressor::Xz(Box::new(s)))
+        .map_err(|_| Error::Param)
     };
     match options.method {
         Method::Copy => Ok(Compressor::Copy),

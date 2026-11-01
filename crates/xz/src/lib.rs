@@ -410,6 +410,19 @@ impl Stream {
         ))
     }
 
+    /// [`Stream::raw_encoder`] with what this one keeps: an encoder of the same
+    /// kind goes on with its memory, as liblzma's does when `lzma_raw_encoder`
+    /// gets the same `lzma_stream` again, and writes what a new one would. This
+    /// one is used up, finished or not.
+    pub fn raw_encoder_again(self, filters: &[Filter]) -> Result<Stream> {
+        let next =
+            filter::raw_encoder_reinit(filters, Some(self.internal.next)).map_err(init_error)?;
+        Ok(Stream::with_actions(
+            next,
+            &[Action::Run, Action::SyncFlush, Action::Finish],
+        ))
+    }
+
     /// `lzma_stream_decoder`: a .xz decoder, with a memory usage limit and
     /// the flags [`TELL_NO_CHECK`], [`TELL_UNSUPPORTED_CHECK`],
     /// [`TELL_ANY_CHECK`], [`IGNORE_CHECK`], [`CONCATENATED`] and
