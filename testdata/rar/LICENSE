@@ -1,0 +1,8 @@
+These archives hold files of this repository, each under the license of what it
+belongs to: the `crates/<name>/src` files under `crates/<name>/LICENSE`, with the
+license that crate's Cargo.toml names, and `docs/` under the repository's LICENSE.
+That includes hivepack-rar's sources, under the UnRAR license in crates/rar/LICENSE.
+
+The other bytes, `data.bin`, come from scripts/make_rar_testdata.py, under the
+repository's LICENSE. The archive format is RARLAB's; see README.md for how they
+were made.
