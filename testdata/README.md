@@ -63,6 +63,7 @@ Each set has a `kind`:
 | `tar-bench-go` | `tools/tar-bench/go`, built with Go 1.27.2's `archive/tar`: Go's side of `tools/tar-bench` | MIT and BSD-3-Clause | generated, `bench` |
 | `unrar-7.3.2-source` | the UnRAR 7.3.2 source, RARLAB's, to build the next set from | UnRAR | fetched, `generated` |
 | `rar-oracle` | `tools/rar-oracle`, built with the UnRAR 7.3.2 sources as UnRAR's library is built: UnRAR's reading of headers, its data and its decompression, for comparing hivepack-rar with it | UnRAR | generated |
+| `rar-bench` | `scripts/make_rar_testdata.py`, with RARLAB's `rar` 7.20 and 6.24: the archives `tools/rar-bench` reads, in RAR 5 and RAR 4 (see `rar/README.md`) | those of this repository's crates | committed, `rar/` |
 | `rar-bench-unrar` | `tools/rar-oracle/bench.cpp`, built with the UnRAR 7.3.2 sources as `rar-oracle` is: UnRAR's speed for `tools/rar-bench` | UnRAR |
 | `libarchive-3.8.10-source` | the libarchive 3.8.10 release, for its RAR, cpio, RPM and XAR test archives and to build `iso-oracle`, `cpio-oracle` and `xar-oracle` from | BSD-2-Clause | fetched, `core` |
 | `libarchive-rar` | libarchive 3.8.10's 131 RAR test archives (`libarchive/test/*rar*.uu`), decoded: RAR 2.9 to 5, solid, volumes, filters, PPMd, links, Unicode names, encryption, self-extracting, damaged | BSD-2-Clause | generated from the previous set, `core` |

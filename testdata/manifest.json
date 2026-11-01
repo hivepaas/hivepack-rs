@@ -403,6 +403,13 @@
       "kind": "tool"
     },
     {
+      "name": "rar-bench",
+      "path": "rar",
+      "source": "scripts/make_rar_testdata.py, with RARLAB's rar 7.20 and 6.24 in their trial versions, from this repository's files (see rar/README.md)",
+      "license": "The licenses of this repository's crates",
+      "kind": "vectors"
+    },
+    {
       "name": "rar-bench-unrar",
       "generate": { "group": "bench", "from": "unrar-7.3.2-source", "tool": "oracle", "sources": ["tools/rar-oracle/bench.cpp"] },
       "source": "tools/rar-oracle/bench.cpp, built with the UnRAR 7.3.2 sources",
