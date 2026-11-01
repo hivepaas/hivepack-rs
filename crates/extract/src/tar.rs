@@ -10,7 +10,7 @@
 //! so that what checks the stream there is made.
 
 use std::collections::HashMap;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -333,8 +333,8 @@ pub(crate) fn plan_links<S>(
 /// only to a file extracted before it ([`ErrorKind::HardLinkTarget`]
 /// otherwise), as a copy with [`Links::AsFile`]; devices and FIFOs are
 /// refused ([`ErrorKind::Special`]); global PAX headers and GNU volume
-/// labels are the archive's, not entries. A sparse file's holes are
-/// written as zeros, and count against the limits.
+/// labels are the archive's, not entries. A sparse file's holes stay holes
+/// where the file system has them, and count against the limits.
 pub fn extract_tar<R: Read, F: FnMut() -> io::Result<R>>(
     mut open: F,
     destination: &Path,
@@ -429,6 +429,7 @@ pub fn extract_tar<R: Read, F: FnMut() -> io::Result<R>>(
                 entry.target.len() as u64,
                 file,
                 remaining,
+                false,
                 &run,
                 options,
             ),
@@ -436,7 +437,12 @@ pub fn extract_tar<R: Read, F: FnMut() -> io::Result<R>>(
                 // A copy of the file it names, with Links::AsFile.
                 copy_of(&destination, target, item, file, remaining, &run, options)
             }
-            _ => write_from(&mut tr, item, item.size, file, remaining, &run, options),
+            _ => {
+                let holes = tr.is_sparse();
+                write_from(
+                    &mut tr, item, item.size, file, remaining, holes, &run, options,
+                )
+            }
         };
         match written {
             Ok(written) => {
@@ -525,19 +531,25 @@ pub(crate) fn bytes_to_write<S>(
 }
 
 /// Writes `size` bytes of `r` into `file`, for `item`, at most `remaining`
-/// in all, then its time and permissions: the bytes written.
+/// in all, then its time and permissions: the bytes written. With `holes`, what
+/// reads as zeros is not written: the file is new or emptied, so it reads as
+/// zeros, and takes no room where the file system has holes.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_from(
     r: &mut impl Read,
     item: &Item,
     size: u64,
     file: cap_std::fs::File,
     remaining: u64,
+    holes: bool,
     run: &Run<'_>,
     options: &Options,
 ) -> Result<u64, ErrorKind> {
     let limits = &options.limits;
     let mut file = file.into_std();
     let mut written: u64 = 0;
+    // Zeros not written yet, which the next write goes past.
+    let mut pending: u64 = 0;
     let mut buffer = vec![0u8; 64 * 1024];
     loop {
         run.check()?;
@@ -557,11 +569,24 @@ pub(crate) fn write_from(
         if written > size {
             return Err(ErrorKind::SizeMismatch);
         }
-        file.write_all(&buffer[..n]).map_err(ErrorKind::Io)?;
+        if holes && buffer[..n].iter().all(|&byte| byte == 0) {
+            pending += n as u64;
+        } else {
+            if pending > 0 {
+                let ahead = i64::try_from(pending).map_err(|_| ErrorKind::SizeMismatch)?;
+                file.seek(SeekFrom::Current(ahead)).map_err(ErrorKind::Io)?;
+                pending = 0;
+            }
+            file.write_all(&buffer[..n]).map_err(ErrorKind::Io)?;
+        }
         run.wrote(n as u64);
     }
     if written != size {
         return Err(ErrorKind::SizeMismatch);
+    }
+    if pending > 0 {
+        // Zeros to the end: the file's length says so.
+        file.set_len(written).map_err(ErrorKind::Io)?;
     }
     finish_file(&file, item, options)?;
     Ok(written)
@@ -588,6 +613,7 @@ pub(crate) fn copy_of(
         size,
         file,
         remaining,
+        false,
         run,
         options,
     )

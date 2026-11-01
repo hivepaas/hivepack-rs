@@ -363,6 +363,101 @@ fn devices_and_fifos_are_not_created() {
     }
 }
 
+/// An old GNU sparse entry of `real` bytes, whose `data` lies at each `offset`,
+/// and the archive around it.
+fn sparse(real: u64, offset: &[u64], data: &[u8]) -> Vec<u8> {
+    let mut b = header(
+        b"big",
+        b'S',
+        offset.len() as u64 * data.len() as u64,
+        0o644,
+        b"",
+    );
+    for (i, at) in offset.iter().enumerate() {
+        let entry = 386 + i * 24;
+        b[entry..entry + 12].copy_from_slice(format!("{at:011o}\0").as_bytes());
+        let length = format!("{:011o}\0", data.len());
+        b[entry + 12..entry + 24].copy_from_slice(length.as_bytes());
+    }
+    b[483..495].copy_from_slice(format!("{real:011o}\0").as_bytes());
+    b[257..265].copy_from_slice(b"ustar  \0");
+    b[148..156].fill(b' ');
+    let sum: u32 = b.iter().map(|&c| u32::from(c)).sum();
+    b[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+    let mut out = b;
+    for _ in offset {
+        out.extend_from_slice(data);
+    }
+    out.resize(out.len().div_ceil(512) * 512 + 1024, 0);
+    out
+}
+
+/// What the file holds, its bytes at `offset` being `data`, and zeros otherwise.
+fn check_sparse(path: &Path, real: u64, offset: &[u64], data: &[u8]) {
+    let got = std::fs::read(path).unwrap();
+    assert_eq!(got.len() as u64, real);
+    let mut want = vec![0; real as usize];
+    for &at in offset {
+        want[at as usize..at as usize + data.len()].copy_from_slice(data);
+    }
+    assert!(got == want);
+}
+
+#[test]
+fn sparse_files_keep_their_holes() {
+    const REAL: u64 = 32 << 20;
+    let data = vec![b'x'; 4096];
+    let scratch = Scratch::new();
+    let out = scratch.out();
+    let archive = sparse(REAL, &[0, REAL - 4096], &data);
+    let summary = extract(&archive, &out, &Options::default()).unwrap();
+    // A hole counts as what the file comes to.
+    assert_eq!(summary.bytes, REAL);
+    check_sparse(&out.join("big"), REAL, &[0, REAL - 4096], &data);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let blocks = std::fs::metadata(out.join("big")).unwrap().blocks();
+        assert!(blocks * 512 < REAL / 2, "{blocks} blocks");
+    }
+}
+
+#[test]
+fn sparse_files_that_end_in_a_hole_have_their_length() {
+    const REAL: u64 = 1 << 20;
+    let data = vec![b'x'; 512];
+    let scratch = Scratch::new();
+    let out = scratch.out();
+    let archive = sparse(REAL, &[4096], &data);
+    extract(&archive, &out, &Options::default()).unwrap();
+    check_sparse(&out.join("big"), REAL, &[4096], &data);
+}
+
+#[test]
+fn a_sparse_file_replacing_another_leaves_nothing_of_it() {
+    const REAL: u64 = 1 << 20;
+    let data = vec![b'x'; 512];
+    let scratch = Scratch::new();
+    let out = scratch.out();
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join("big"), vec![b'o'; 2 << 20]).unwrap();
+    let archive = sparse(REAL, &[4096], &data);
+    extract(&archive, &out, &options(|o| o.overwrite = true)).unwrap();
+    check_sparse(&out.join("big"), REAL, &[4096], &data);
+}
+
+#[test]
+fn holes_count_against_the_limits() {
+    const REAL: u64 = 1 << 20;
+    let data = vec![b'x'; 512];
+    let scratch = Scratch::new();
+    let out = scratch.out();
+    let archive = sparse(REAL, &[4096], &data);
+    let limited = options(|o| o.limits.max_entry_size = REAL - 1);
+    let error = extract(&archive, &out, &limited).unwrap_err();
+    assert!(matches!(error.kind, ErrorKind::EntryTooLarge), "{error}");
+}
+
 #[test]
 fn limits_stop_archive_bombs_before_writing() {
     let limits = |change: fn(&mut Limits)| {
