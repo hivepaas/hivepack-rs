@@ -367,7 +367,8 @@ static void do_list(int enable_broken, const char *hex) {
       bool ok = Arc.IsArchive(enable_broken != 0);
       out += ok ? " archive" : " notarchive";
       put_state(Arc);
-      put_bytes("mark", Arc.MarkHead.Mark, Arc.MarkHead.HeadSize);
+      // IsArchive sets HeadSize only when it finds a signature.
+      put_bytes("mark", Arc.MarkHead.Mark, ok ? Arc.MarkHead.HeadSize : 0);
       if (ok) {
         size_t size;
         while ((size = Arc.ReadHeader()) != 0) {

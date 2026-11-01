@@ -559,8 +559,66 @@ fn real_archives_come_out_as_they_read() {
         }
     }
     eprintln!("{compared} archives extracted as read, {files} files compared");
+    // What libarchive's alone give, all that Windows has: 44 and 97.
     if !archives().is_empty() {
         assert!(compared >= 40, "only {compared}");
-        assert!(files >= 100, "only {files}");
+        assert!(files >= 90, "only {files}");
     }
+}
+
+/// A real archive's one entry picked, in a solid stream too: what it writes is
+/// what is read, and nothing else is written.
+#[test]
+fn select_writes_only_what_it_picks() {
+    let mut picked = 0;
+    for (label, path) in archives() {
+        let data = std::fs::read(&path).unwrap();
+        let Some(want) = as_read(&data, "") else {
+            continue;
+        };
+        if want.len() < 2 {
+            continue;
+        }
+        let Some((name, bytes)) = want.iter().next_back() else {
+            continue;
+        };
+        // A name that does not decode cannot be asked for by the same text.
+        if name.contains('\u{fffd}') {
+            continue;
+        }
+        let target = name.replace('\\', "/");
+        let wanted = target.clone();
+        let chosen = options(|o| {
+            o.limits.max_ratio = u64::MAX;
+            o.select = Some(std::sync::Arc::new(move |p: &[String]| {
+                p.join("/") == wanted
+            }));
+        });
+        let scratch = Scratch::new();
+        if extract(&data, &scratch.out(), &chosen).is_err() {
+            continue;
+        }
+        let on_disk = scratch.out().join(&target);
+        assert_eq!(&read(on_disk), bytes, "{label}: {name}");
+        let files = walked_files(&scratch.out());
+        assert_eq!(files, 1, "{label}");
+        picked += 1;
+    }
+    eprintln!("{picked} archives");
+    if !archives().is_empty() {
+        assert!(picked >= 5, "only {picked}");
+    }
+}
+
+fn walked_files(dir: &Path) -> usize {
+    let mut files = 0;
+    for entry in std::fs::read_dir(dir).unwrap().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            files += walked_files(&path);
+        } else {
+            files += 1;
+        }
+    }
+    files
 }
