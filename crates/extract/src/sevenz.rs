@@ -16,7 +16,7 @@ use hivepack_7z::{Archive, Entry, Files};
 
 use crate::destination::Destination;
 use crate::error::{Error, ErrorKind};
-use crate::name::{NameError, check_name, link_target, prepare};
+use crate::name::{NameError, check_name, link_on_the_way, link_target, prepare};
 use crate::plan::{Item, Kind, Links, Names, OnRefused, Options, check, fold};
 use crate::progress::Run;
 use crate::tar::finish_file;
@@ -207,10 +207,9 @@ fn links<'a, R: Read + Seek>(
         let checked = read.and_then(|target| {
             let resolved = link_target(&target, parent).map_err(ErrorKind::LinkTarget)?;
             // A link on the way, which the system would follow.
-            for end in 1..resolved.len() {
-                if let Some(&other) = paths.get(&fold(&resolved[..end])) {
-                    return Err(ErrorKind::LinkChain { other });
-                }
+            let link_at = |walked: &[String]| paths.get(&fold(walked)).copied();
+            if let Some(other) = link_on_the_way(&target, parent, link_at) {
+                return Err(ErrorKind::LinkChain { other });
             }
             let to_dir = dirs.contains_key(&fold(&resolved));
             // It was resolved, so it is UTF-8.

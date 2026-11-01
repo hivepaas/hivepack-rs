@@ -21,7 +21,7 @@ use hivepack_tar::{
 
 use crate::destination::Destination;
 use crate::error::{Error, ErrorKind};
-use crate::name::{Name, NameError, check_name, link_target, prepare};
+use crate::name::{Name, NameError, check_name, link_on_the_way, link_target, prepare};
 use crate::plan::{Item, Kind, Links, Names, OnRefused, Options, check, fold};
 use crate::progress::Run;
 use crate::zip::{Summary, set_dir_times, set_modified, set_permissions};
@@ -268,10 +268,9 @@ pub(crate) fn plan_links<S>(
                         .map_err(ErrorKind::LinkTarget)
                         .and_then(|resolved| {
                             // A link on the way, which the system would follow.
-                            for end in 1..resolved.len() {
-                                if let Some(&other) = symlinks.get(&fold(&resolved[..end])) {
-                                    return Err(ErrorKind::LinkChain { other });
-                                }
+                            let link_at = |walked: &[String]| symlinks.get(&fold(walked)).copied();
+                            if let Some(other) = link_on_the_way(&entry.target, parent, link_at) {
+                                return Err(ErrorKind::LinkChain { other });
                             }
                             let to_dir = dirs.contains_key(&fold(&resolved));
                             Ok(LinkPlan::Symlink(
