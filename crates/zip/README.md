@@ -98,6 +98,8 @@ Against libzip 1.12.1, each row the mean and the range over its files or workloa
 
 **Measured on** `.github/workflows/bench.yml`, on October 31 and November 1, 2026, with rustc 1.99.1: Linux x86-64 on AMD EPYC 7763 64-Core Processor (4 threads); Windows x86-64 on Intel64 Family 6 Model 207 Stepping 2 (4 threads); macOS arm64 on Apple M1 (Virtual) (3 threads). Each job gets what the runner has that day, so these are not the same processor from format to format, and they are shared machines: the ratios hold better than the speeds. Reading big stored entries on macOS is 0.51–0.61×, in four runs: zlib, built for Apple's processors, uses the CRC instruction there, which the port's safe code cannot call. `zip_stat_index` is left out: libzip's calls `mktime` for each entry, and the row was about 70× on macOS and about 4× on Linux, which says more about `mktime` than about the port. Encrypting draws its random bytes from a stand-in on both sides.
 
+**With the `unsafe-fast` feature**, off by default: WinZip AES at 2.3–4.2× libzip on GitHub's runners. See [docs/unsafe.md](../../docs/unsafe.md#the-processors-instructions).
+
 ## License
 
 BSD-3-Clause, the license of the code it is ported from. See [LICENSE](LICENSE). Copyright (C) 1999-2026 Dieter Baron and Thomas Klausner, and (c) 2026 HivePaaS.

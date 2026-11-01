@@ -11,8 +11,14 @@ cargo-fuzz = true
 
 [features]
 # Fuzz the builds with the unchecked copies: zstd's sequence loop, and
-# lz4's fast loop.
-unsafe-fast = ["hivepack-zstd/unsafe-fast", "hivepack-lz4/unsafe-fast"]
+# lz4's fast loop; and with the processor's instructions: deflate's CRC-32,
+# and crypto's AES, SHA and ChaCha20.
+unsafe-fast = [
+    "hivepack-zstd/unsafe-fast",
+    "hivepack-lz4/unsafe-fast",
+    "hivepack-deflate/unsafe-fast",
+    "hivepack-crypto/unsafe-fast",
+]
 
 [dependencies]
 libfuzzer-sys = "0.4"
@@ -22,6 +28,7 @@ hivepack-zstd = { path = "../crates/zstd" }
 # and its dictionary builder, as the tests build it.
 zstd = { version = "0.14.3", default-features = false, features = ["experimental", "no_asm", "zdict_builder", "zstdmt"] }
 hivepack-deflate = { path = "../crates/deflate" }
+hivepack-crypto = { path = "../crates/crypto" }
 hivepack-zip = { path = "../crates/zip" }
 hivepack-extract = { path = "../crates/extract", features = ["rar"] }
 # zlib 1.3.2, built from libz-sys's bundled sources, as the tests build it.
@@ -164,6 +171,13 @@ bench = false
 [[bin]]
 name = "age_keys"
 path = "fuzz_targets/age_keys.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hw_crypto"
+path = "fuzz_targets/hw_crypto.rs"
 test = false
 doc = false
 bench = false

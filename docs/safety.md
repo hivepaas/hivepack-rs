@@ -6,7 +6,7 @@ These rules hold for every crate in the repository. CI checks the parts a tool c
 
 The workspace sets `unsafe_code = "forbid"`, and every crate inherits it with `[lints] workspace = true`. `forbid` cannot be lifted by an `allow` further in, so no `unsafe` block, `unsafe fn` or `#[no_mangle]` compiles anywhere.
 
-There is one exception, and it is opt-in: the `unsafe-fast` feature of `hivepack-zstd`, which copies without bounds checks in the decoder's main sequence loop, and prefetches in the encoder's row match finder (see [unsafe.md](unsafe.md)). Without the feature, that crate forbids unsafe code too. Adding an exception takes all of these steps:
+The exceptions are all opt-in: the `unsafe-fast` feature of `hivepack-zstd`, `hivepack-lz4`, `hivepack-deflate` and `hivepack-crypto` (see [unsafe.md](unsafe.md)). Without the feature, those crates forbid unsafe code too. Adding an exception takes all of these steps:
 
 1. Show with numbers from `tools/zstd-bench` (same machine, interleaved rounds) that the safe code misses the speed target in [porting.md](porting.md), and that the unsafe code closes the gap.
 2. Keep the unsafe code in one module, as small as it can be. Every block gets a `// SAFETY:` comment that says why it is sound, and preconditions are checked once at the module's entry.

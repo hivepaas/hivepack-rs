@@ -81,13 +81,27 @@
 //! assert_eq!(x25519(&alice, &x25519_base(&bob)), x25519(&bob, &x25519_base(&alice)));
 //! ```
 
+// No unsafe code at all, unless the `unsafe-fast` feature is on: then only
+// where a module allows it (see `docs/unsafe.md`).
+#![cfg_attr(not(feature = "unsafe-fast"), forbid(unsafe_code))]
+
 mod aes_ct64;
 mod aes_ct64_ctr;
 mod aes_ct64_dec;
 mod aes_ct64_enc;
+#[cfg(all(
+    feature = "unsafe-fast",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod aes_hw;
 mod blake2s;
 mod blake2sp;
 mod chacha20_ct;
+#[cfg(all(
+    feature = "unsafe-fast",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod chacha_hw;
 mod clear;
 mod ct;
 mod digest;
@@ -104,6 +118,17 @@ mod scrypt;
 mod sha1;
 mod sha2big;
 mod sha2small;
+#[cfg(all(
+    feature = "unsafe-fast",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod sha_hw;
+
+/// Whether this build has the `unsafe-fast` feature: AES with the processor's
+/// instructions, SHA-1 and SHA-256 too, and ChaCha20 with its vector
+/// instructions, where it has them. Cargo turns a feature on for the whole build
+/// as soon as one crate asks for it, so a program can check which it got.
+pub const UNSAFE_FAST: bool = cfg!(feature = "unsafe-fast");
 
 pub use aes_ct64_ctr::{AES_BLOCK_LENGTH, Aes};
 pub use blake2s::{BLAKE2S_KEY_LENGTH, BLAKE2S_LENGTH, Blake2s};
@@ -129,3 +154,44 @@ pub use sha2small::{SHA256_LENGTH, Sha256};
 
 /// The BearSSL release this crate follows.
 pub const UPSTREAM_VERSION: &str = "0.6";
+
+/// The safe code behind what the `unsafe-fast` feature can replace, and SHA's
+/// rounds, for `fuzz/fuzz_targets/hw_crypto.rs` to compare.
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzz_safe {
+    use crate::{Aes, CHACHA20_KEY_LENGTH, CHACHA20_NONCE_LENGTH};
+
+    pub fn aes_encrypt4(aes: &Aes, blocks: &mut [u8; 64]) {
+        aes.encrypt4_bitsliced(blocks);
+    }
+
+    pub fn aes_decrypt4(aes: &Aes, blocks: &mut [u8; 64]) {
+        aes.decrypt4_bitsliced(blocks);
+    }
+
+    pub fn sha1_block(block: &[u8; 64], val: &mut [u32; 5]) {
+        crate::sha1::round_code(block, val);
+    }
+
+    pub fn sha1_block_any(block: &[u8; 64], val: &mut [u32; 5]) {
+        crate::sha1::round(block, val);
+    }
+
+    pub fn sha256_block(block: &[u8; 64], val: &mut [u32; 8]) {
+        crate::sha2small::round_code(block, val);
+    }
+
+    pub fn sha256_block_any(block: &[u8; 64], val: &mut [u32; 8]) {
+        crate::sha2small::round(block, val);
+    }
+
+    pub fn chacha20(
+        key: &[u8; CHACHA20_KEY_LENGTH],
+        iv: &[u8; CHACHA20_NONCE_LENGTH],
+        cc: u32,
+        data: &mut [u8],
+    ) -> u32 {
+        crate::chacha20_ct::chacha20_safe(key, iv, cc, data)
+    }
+}

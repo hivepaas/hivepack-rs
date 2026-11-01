@@ -68,8 +68,21 @@ const K: [u32; 64] = [
     0x90BE_FFFA, 0xA450_6CEB, 0xBEF9_A3F7, 0xC671_78F2,
 ];
 
-/// `br_sha2small_round`: one block into the state.
-fn round(buf: &[u8; BLOCK_LENGTH], val: &mut [u32; 8]) {
+/// `br_sha2small_round`: one block into the state, with the processor's
+/// instructions where the build and the processor have them.
+#[inline]
+pub(crate) fn round(buf: &[u8; BLOCK_LENGTH], val: &mut [u32; 8]) {
+    #[cfg(all(
+        feature = "unsafe-fast",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    if crate::sha_hw::sha256_round(buf, val, &K) {
+        return;
+    }
+    round_code(buf, val);
+}
+
+pub(crate) fn round_code(buf: &[u8; BLOCK_LENGTH], val: &mut [u32; 8]) {
     let mut w = [0u32; 64];
     for (word, bytes) in w.iter_mut().zip(buf.as_chunks().0) {
         *word = u32::from_be_bytes(*bytes);
@@ -226,5 +239,37 @@ impl std::fmt::Debug for Sha256 {
         f.debug_struct("Sha256")
             .field("count", &self.count)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "unsafe-fast",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod hw_tests {
+    use super::*;
+
+    /// The instructions, where they run, against the code.
+    #[test]
+    fn instructions_same_as_code() {
+        let mut state = 0x0123_4567_89AB_CDEFu64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..2000 {
+            let mut buf = [0u8; 64];
+            buf.fill_with(|| next() as u8);
+            let mut code = [0u32; 8];
+            code.fill_with(|| next() as u32);
+            let mut hw = code;
+            if crate::sha_hw::sha256_round(&buf, &mut hw, &K) {
+                round_code(&buf, &mut code);
+                assert_eq!(hw, code);
+            }
+        }
     }
 }

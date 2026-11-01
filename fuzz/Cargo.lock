@@ -218,6 +218,7 @@ dependencies = [
  "hivepack-age",
  "hivepack-bzip2",
  "hivepack-cpio",
+ "hivepack-crypto",
  "hivepack-deflate",
  "hivepack-extract",
  "hivepack-iso",

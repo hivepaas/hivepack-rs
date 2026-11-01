@@ -56,6 +56,8 @@ Against age v1.3.2, the reference implementation in Go, with `tools/age-bench`. 
 
 Go's ChaCha20-Poly1305 is assembly, which is the big file's gap. On one machine with more detail, an AMD Ryzen 9 9950X, the whole table is in [docs/age.md](../../docs/age.md#the-speed).
 
+**With the `unsafe-fast` feature**, off by default: a big file at 0.42–0.75×, and in armor at 1.40–1.94×, on GitHub's runners. See [docs/unsafe.md](../../docs/unsafe.md#the-processors-instructions).
+
 ## License
 
 BSD-3-Clause, as age is (see [LICENSE](LICENSE)).
