@@ -1,5 +1,5 @@
-//! Decrypting [age](https://age-encryption.org) files in safe Rust, ported
-//! from age v1.3.2, the reference implementation in Go
+//! Decrypting and encrypting [age](https://age-encryption.org) files in safe
+//! Rust, ported from age v1.3.2, the reference implementation in Go
 //! (`filippo.io/age`).
 //!
 //! age encrypts a file to one or more recipients: each recipient stanza in
@@ -21,10 +21,14 @@
 //!   C2SP's test vectors: a malformed header, no matching identity, a
 //!   header MAC that does not match, malformed armor, or a payload that
 //!   fails.
+//! - [`encrypt`] writes a file, as the Go package's `Encrypt`, to
+//!   [`X25519Recipient`]s or a [`ScryptRecipient`], armored through an
+//!   [`ArmoredWriter`], byte for byte as age writes it with the same random
+//!   bytes.
 //!
 //! The cryptography is hivepack-crypto's, ported from BearSSL, in place of
-//! Go's `golang.org/x/crypto`. Encrypting, SSH RSA keys, post-quantum keys
-//! and plugins are not ported yet. How the port follows age, and how it is
+//! Go's `golang.org/x/crypto`. Encrypting to SSH keys, SSH RSA keys,
+//! post-quantum keys and plugins are not ported yet. How the port follows age, and how it is
 //! checked, is in the repository: `docs/age.md`.
 //!
 //! ```no_run
@@ -36,6 +40,18 @@
 //! let mut plaintext = decrypt_file(file, &[&passphrase as &dyn Identity])?;
 //! let mut data = Vec::new();
 //! plaintext.read_to_end(&mut data)?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! ```no_run
+//! use std::io::Write;
+//! use hivepack_age::{Recipient, X25519Recipient, encrypt};
+//!
+//! let key = X25519Recipient::parse("age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p")?;
+//! let file = std::fs::File::create("notes.txt.age")?;
+//! let mut w = encrypt(file, &[&key as &dyn Recipient], None)?;
+//! w.write_all(b"the plaintext")?;
+//! w.finish()?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -59,17 +75,21 @@ mod x25519;
 
 use std::io::{self, BufRead, BufReader, Read};
 
-pub use age::{Decryptor, FileKey, FileKeyIdentity, Identity, UnwrapError, decrypt};
+pub use age::{
+    Decryptor, Encryptor, FileKey, FileKeyIdentity, Identity, Recipient, UnwrapError, decrypt,
+    encrypt,
+};
 pub use agessh::{EncryptedSshIdentity, SshEd25519Identity};
-pub use armor::{ArmoredReader, FOOTER as ARMOR_FOOTER, HEADER as ARMOR_HEADER};
-pub use error::{Error, NoIdentityMatch};
+pub use armor::{ArmoredReader, ArmoredWriter, FOOTER as ARMOR_FOOTER, HEADER as ARMOR_HEADER};
+pub use error::{EncryptError, Error, NoIdentityMatch};
 pub use format::Stanza;
+pub use hivepack_crypto::RandomSource;
 pub use identity_file::{
     LazyScryptIdentity, PassphraseFor, PassphrasePrompt, parse_identities_file,
 };
 pub use parse::{BoxedIdentity, parse_identities};
-pub use scrypt::{DEFAULT_MAX_WORK_FACTOR, ScryptIdentity};
-pub use x25519::X25519Identity;
+pub use scrypt::{DEFAULT_MAX_WORK_FACTOR, DEFAULT_WORK_FACTOR, ScryptIdentity, ScryptRecipient};
+pub use x25519::{X25519Identity, X25519Recipient};
 
 /// The age release this crate follows.
 pub const UPSTREAM_VERSION: &str = "1.3.2";

@@ -56,7 +56,7 @@ libzip clears keys and contexts with `_zip_crypto_clear` when it frees them. The
 
 ## Random numbers
 
-The crate gives none. WinZip AES needs a random salt for each entry and ZipCrypto eleven random bytes for its twelve-byte header; libzip reads them from the system (`zip_random_unix.c` reads `/dev/urandom`). `hivepack-zip` will read `/dev/urandom` with the standard library on Unix, in safe Rust, and take them from the caller elsewhere; an application can use `getrandom` for that, which libraries here do not depend on (see [safety.md](safety.md)).
+The crate makes none: `system_random` reads `/dev/urandom` with the standard library on Unix, in safe Rust, as libzip's `zip_random_unix.c` does, and fails elsewhere. WinZip AES needs a random salt for each entry, ZipCrypto eleven random bytes for its twelve-byte header, 7-Zip's AES a salt and IVs, and age its file keys, nonces and salts. Each takes a `RandomSource` from the caller; an application can use `getrandom` for that, which libraries here do not depend on (see [safety.md](safety.md)). A source that fails stops what encrypts.
 
 ## How it is shown
 

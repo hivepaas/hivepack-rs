@@ -11,9 +11,6 @@
 //! arguments, then a body in base64 lines of 64 columns, the last shorter,
 //! perhaps empty. A closing line with the header's MAC ends it, and the
 //! payload follows.
-//!
-//! Differs from age: reading only, plus what the MAC is computed over
-//! (`MarshalWithoutMAC`).
 
 use std::io::{self, BufRead};
 
@@ -98,14 +95,23 @@ impl Stanza {
 
 impl Header {
     /// `MarshalWithoutMAC`: the header up to the closing line's `---`,
-    /// which the MAC is computed over. The header was parsed strictly, so
-    /// this gives back the bytes it was parsed from.
+    /// which the MAC is computed over. A header parsed strictly gives back
+    /// the bytes it was parsed from.
     pub(crate) fn marshal_without_mac(&self) -> Vec<u8> {
         let mut w = INTRO.to_vec();
         for r in &self.recipients {
             r.marshal(&mut w);
         }
         w.extend_from_slice(FOOTER_PREFIX);
+        w
+    }
+
+    /// `Marshal`: the whole header, with its MAC.
+    pub(crate) fn marshal(&self) -> Vec<u8> {
+        let mut w = self.marshal_without_mac();
+        w.push(b' ');
+        w.extend_from_slice(encode_to_string(&self.mac).as_bytes());
+        w.push(b'\n');
         w
     }
 }
