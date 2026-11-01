@@ -95,6 +95,7 @@ Each rule that is not about writing outside the destination can be relaxed, by n
 | `names` | `Names::Strict` | `Sanitize`: first drops what Python's `zipfile` drops, a leading `/`, a drive (`C:`, a letter and a colon, as Windows reads it) and `.`, `..` and empty components, then refuses what is still refused |
 | `backslash_separator` | `false` | `\` taken for a separator, as PowerShell 5.1's `Compress-Archive` writes it |
 | `select` | none: all entries | Extracts only the entries a function picks by path; the others are not checked, counted or written, and data a picked entry depends on in a solid block is still read |
+| `decode_names` | none: ZIP reads CP437, the others refuse | A `NameDecoder` makes text of names that are not UTF-8, told the bytes and what the format reads them as; `NameDecoder::lossy()` keeps that, or else puts U+FFFD for what is not UTF-8. Its text is checked as any name is |
 | `on_refused` | `OnRefused::Stop` | `Skip`: an entry refused for its name, as a link or as the same path as another is left out, listed in `Summary::skipped` with its reason, and the rest extracted. The limits and overlapping data still stop the extraction: they are about the archive, not one entry |
 | `overwrite` | `false` | Files that are there are replaced, if they are files: opened without following a link and emptied. A link or a directory there still stops it |
 | `permissions` | `Permissions::Masked` | `Preserve`: the entry's bits but setuid, setgid and sticky. `Ignore`: the system's |

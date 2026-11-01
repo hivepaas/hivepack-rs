@@ -48,21 +48,29 @@ fn item<R: ReadAt>(archive: &Archive<R>, i: u64, options: &Options) -> Result<It
         .get_name(i, Flags::ENC_RAW)
         .map_err(archive_error)?
         .to_vec();
-    // The name as it is written: UTF-8, or decoded from CP437.
+    // The name as it is written: UTF-8, or decoded from CP437, or as the
+    // caller's decoder says.
     let decoded = archive.get_name(i, Flags::NONE).map_err(archive_error)?;
+    let as_read = std::str::from_utf8(decoded).ok();
+    let text = match &options.decode_names {
+        Some(decoder) if std::str::from_utf8(&raw_name).is_err() => {
+            decoder.decode(&raw_name, as_read)
+        }
+        _ => as_read.map(str::to_owned),
+    };
     let name = if raw_name.iter().any(u8::is_ascii_control) {
         Err(NameError::Control)
     } else {
-        match std::str::from_utf8(decoded) {
-            Ok(decoded) => {
+        match text {
+            Some(text) => {
                 let prepared = prepare(
-                    decoded,
+                    &text,
                     options.backslash_separator,
                     options.names == Names::Sanitize,
                 );
                 check_name(prepared.as_bytes())
             }
-            Err(_) => Err(NameError::NotUtf8),
+            None => Err(NameError::NotUtf8),
         }
     };
     let error = |e| Error::new(i, &raw_name, ErrorKind::Archive(e));

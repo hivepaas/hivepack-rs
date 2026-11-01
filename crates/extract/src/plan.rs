@@ -128,6 +128,52 @@ pub enum Packages {
 /// whether it is one of them.
 pub type Select = Arc<dyn Fn(&[String]) -> bool + Send + Sync>;
 
+/// Makes text of an entry's name whose bytes are not UTF-8 and that the archive
+/// says nothing certain of: the names of old ZIP, tar, cpio and other archives,
+/// in whatever encoding the system that made them used. Told the bytes, and what
+/// the format itself reads them as, if it has a way: CP437 for ZIP, nothing for
+/// the others. No text refuses the name ([`NameError::NotUtf8`](crate::NameError)).
+///
+/// What it gives is checked as any name is, by [`check_name`](crate::check_name)
+/// and against the other entries, so it cannot lead outside the destination. A
+/// `/` in it separates folders. Links' targets are not given to it: one that is
+/// not UTF-8 stays refused.
+#[derive(Clone)]
+pub struct NameDecoder(Arc<NameDecoderFn>);
+
+type NameDecoderFn = dyn Fn(&[u8], Option<&str>) -> Option<String> + Send + Sync;
+
+impl NameDecoder {
+    /// A decoder of the caller's: one that knows the encoding, or finds it.
+    pub fn new(
+        decode: impl Fn(&[u8], Option<&str>) -> Option<String> + Send + Sync + 'static,
+    ) -> NameDecoder {
+        NameDecoder(Arc::new(decode))
+    }
+
+    /// What the format reads, or else the bytes as UTF-8 with U+FFFD for what is
+    /// not. Every name can then be written, but two that differ only in those
+    /// bytes come to one, which is refused as the same path twice.
+    pub fn lossy() -> NameDecoder {
+        NameDecoder::new(|raw, format_reads| {
+            Some(
+                format_reads
+                    .map_or_else(|| String::from_utf8_lossy(raw).into_owned(), str::to_owned),
+            )
+        })
+    }
+
+    pub(crate) fn decode(&self, raw: &[u8], format_reads: Option<&str>) -> Option<String> {
+        (self.0)(raw, format_reads)
+    }
+}
+
+impl std::fmt::Debug for NameDecoder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NameDecoder")
+    }
+}
+
 /// How to extract.
 #[derive(Clone, Default)]
 #[non_exhaustive]
@@ -137,6 +183,9 @@ pub struct Options {
     pub password: Option<Vec<u8>>,
     pub links: Links,
     pub names: Names,
+    /// Makes text of names that are not UTF-8. By default a ZIP archive's are
+    /// read as CP437, and those of other formats refused.
+    pub decode_names: Option<NameDecoder>,
     /// Takes `\` in names for a separator, as PowerShell 5.1's
     /// `Compress-Archive` writes it; refused otherwise.
     pub backslash_separator: bool,
@@ -176,6 +225,7 @@ impl std::fmt::Debug for Options {
             .field("password", &self.password.as_ref().map(|_| ".."))
             .field("links", &self.links)
             .field("names", &self.names)
+            .field("decode_names", &self.decode_names)
             .field("backslash_separator", &self.backslash_separator)
             .field("on_refused", &self.on_refused)
             .field("overwrite", &self.overwrite)
