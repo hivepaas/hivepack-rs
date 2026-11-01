@@ -15,7 +15,7 @@ on:
         description: "Comma-separated, or all: ubuntu-latest, windows-latest, macos-latest"
         default: all
       features:
-        description: "cargo features for the tool, such as hivepack-zstd/unsafe-fast"
+        description: "cargo features for the tool, such as unsafe-fast"
         default: ""
 
 permissions:
