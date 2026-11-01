@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       formats:
-        description: "Comma-separated, or all: tar, age, deflate, bzip2, lz4, xz, zstd, zip, 7z"
+        description: "Comma-separated, or all: tar, age, deflate, bzip2, lz4, xz, zstd, zip, 7z, rar"
         default: all
       machines:
         description: "Comma-separated, or all: ubuntu-latest, windows-latest, macos-latest"

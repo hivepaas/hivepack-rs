@@ -1,0 +1,14 @@
+[package]
+name = "rar-bench"
+version = "0.0.0"
+description = "Times hivepack-rar against UnRAR on the RAR archives of other projects' tests"
+publish = false
+license = "UnRAR"
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+hivepack-rar.workspace = true
