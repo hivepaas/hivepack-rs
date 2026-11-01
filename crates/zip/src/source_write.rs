@@ -19,6 +19,42 @@ pub(crate) struct Output<W> {
     /// little: asking a `BufWriter` writes out its buffer, and this is asked for
     /// each entry.
     pos: Option<u64>,
+    /// It goes only forwards: what is not known before an entry's data follows it.
+    pub stream: bool,
+}
+
+/// A [`Write`] as `zip_close` asks for one, which can tell where it is and go nowhere
+/// else: what an archive written as a stream is written to.
+pub(crate) struct Forward<W> {
+    w: W,
+    pos: u64,
+}
+
+impl<W> Forward<W> {
+    pub(crate) fn new(w: W) -> Forward<W> {
+        Forward { w, pos: 0 }
+    }
+}
+
+impl<W: Write> Write for Forward<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.w.write(buf)?;
+        self.pos += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.w.flush()
+    }
+}
+
+impl<W> Seek for Forward<W> {
+    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+        match to {
+            SeekFrom::Current(0) => Ok(self.pos),
+            _ => Err(io::ErrorKind::Unsupported.into()),
+        }
+    }
 }
 
 /// The error of a failed system call: `errno`, or 0 if it has none.
@@ -32,6 +68,7 @@ impl<W: Write + Seek> Output<W> {
             w,
             write_crc: None,
             pos: None,
+            stream: false,
         }
     }
 

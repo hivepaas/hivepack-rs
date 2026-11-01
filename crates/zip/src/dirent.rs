@@ -26,9 +26,9 @@ use crate::zipint::{
     CDENTRYSIZE, CENTRAL_MAGIC, CM_WINZIP_AES, DATADES_MAGIC, EF_BOTH, EF_CENTRAL, EF_LOCAL,
     EF_UTF_8_COMMENT, EF_UTF_8_NAME, EF_WINZIP_AES, EF_WINZIP_AES_SIZE, EF_ZIP64, EFZIP64SIZE,
     EOCD_MAGIC, EOCD64_MAGIC, EOCD64LEN, EOCD64LOC_MAGIC, EOCD64LOCLEN, EOCDLEN,
-    EXT_ATTRIB_DEFAULT, Encoding, FL_FORCE_ZIP64, GPBF_DATA_DESCRIPTOR, GPBF_ENCODING_UTF_8,
-    GPBF_ENCRYPTED, GPBF_STRONG_ENCRYPTION, LENTRYSIZE, LOCAL_MAGIC, MAGIC_LEN,
-    MAX_DATA_DESCRIPTOR_LENGTH, TORRENTZIP_COMPRESSION_FLAGS, TORRENTZIP_CRC_LENGTH,
+    EXT_ATTRIB_DEFAULT, Encoding, FL_DATA_FOLLOWS, FL_FORCE_ZIP64, GPBF_DATA_DESCRIPTOR,
+    GPBF_ENCODING_UTF_8, GPBF_ENCRYPTED, GPBF_STRONG_ENCRYPTION, LENTRYSIZE, LOCAL_MAGIC,
+    MAGIC_LEN, MAX_DATA_DESCRIPTOR_LENGTH, TORRENTZIP_COMPRESSION_FLAGS, TORRENTZIP_CRC_LENGTH,
     TORRENTZIP_SIGNATURE, TORRENTZIP_SIGNATURE_LENGTH, changed,
 };
 
@@ -904,13 +904,25 @@ impl Dirent {
             .unwrap_or_else(|| d2u_time(self.last_mod))
     }
 
+    /// The version of WinZip's AES it is written with, if it has that: AE-2 has no CRC.
+    pub(crate) fn winzip_aes_version(&self) -> u16 {
+        match self.encryption_method {
+            // TODO in libzip: WinZip also uses AE-2 for bzip compressed
+            // files and maybe others?
+            em::AES_128 | em::AES_192 | em::AES_256 if self.uncomp_size < 20 => 2,
+            em::AES_128 | em::AES_192 | em::AES_256 => 1,
+            _ => 0,
+        }
+    }
+
     /// Writes the entry as a local header ([`Flags::LOCAL`]) or a central
     /// directory entry ([`Flags::CENTRAL`]), and whether it has the Zip64
     /// extra field; with [`FL_FORCE_ZIP64`], a local header has it in any
     /// case. With `want_torrentzip`, as torrentzip has it: no time, extra
     /// fields or comment. The UTF-8 flag and the Info-ZIP UTF-8 extra
-    /// fields are set from the encodings of the name and comment. Port of
-    /// `_zip_dirent_write`.
+    /// fields are set from the encodings of the name and comment. With
+    /// [`FL_DATA_FOLLOWS`], a local header has no CRC or sizes: its data descriptor
+    /// has them. Port of `_zip_dirent_write`.
     pub(crate) fn write<W: Write + Seek>(
         &mut self,
         out: &mut Output<W>,
@@ -952,13 +964,8 @@ impl Dirent {
 
         let is_really_zip64 = self.needs_zip64(flags);
         let is_zip64 = (local && flags.intersects(FL_FORCE_ZIP64)) || is_really_zip64;
-        let winzip_aes_version: u16 = match self.encryption_method {
-            // TODO in libzip: WinZip also uses AE-2 for bzip compressed
-            // files and maybe others?
-            em::AES_128 | em::AES_192 | em::AES_256 if self.uncomp_size < 20 => 2,
-            em::AES_128 | em::AES_192 | em::AES_256 => 1,
-            _ => 0,
-        };
+        let data_follows = local && flags.intersects(FL_DATA_FOLLOWS);
+        let winzip_aes_version = self.winzip_aes_version();
 
         // Differs from libzip, whose archive does not read back otherwise:
         // a size or offset of exactly 0xffffffff, which the header has as
@@ -974,8 +981,8 @@ impl Dirent {
                     || self.comp_size >= max
                     || self.uncomp_size >= max
                 {
-                    ef_buffer.put_64(self.uncomp_size);
-                    ef_buffer.put_64(self.comp_size);
+                    ef_buffer.put_64(if data_follows { 0 } else { self.uncomp_size });
+                    ef_buffer.put_64(if data_follows { 0 } else { self.comp_size });
                 }
             } else {
                 if self.uncomp_size >= max {
@@ -1031,7 +1038,11 @@ impl Dirent {
         }
         buffer.put_16(
             self.version_needed
-                .max(if is_really_zip64 { 45 } else { 0 }),
+                .max(if is_really_zip64 || (data_follows && is_zip64) {
+                    45
+                } else {
+                    0
+                }),
         );
         buffer.put_16(self.bitflags);
         if winzip_aes_version > 0 {
@@ -1051,14 +1062,17 @@ impl Dirent {
         buffer.put_16(dostime.time);
         buffer.put_16(dostime.date);
 
-        if winzip_aes_version == 2 {
+        if winzip_aes_version == 2 || data_follows {
             buffer.put_32(0);
         } else {
             buffer.put_32(self.crc);
         }
 
         let max = u64::from(u32::MAX);
-        if local && (self.comp_size >= max || self.uncomp_size >= max) {
+        if data_follows && !is_zip64 {
+            buffer.put_32(0);
+            buffer.put_32(0);
+        } else if local && (data_follows || self.comp_size >= max || self.uncomp_size >= max) {
             // In local headers, if a ZIP64 EF is written, it MUST contain
             // both compressed and uncompressed sizes (even if one of the
             // two is smaller than 0xFFFFFFFF); on the other hand, those

@@ -433,6 +433,11 @@ impl Compress {
         })
     }
 
+    /// Whatever the data comes to, it is not stored instead.
+    pub(crate) fn keep_compressing(&mut self) {
+        self.can_store = false;
+    }
+
     /// `ZIP_SOURCE_OPEN`, with the lower source's stat and attributes.
     pub(crate) fn open(&mut self, st: &Stat<'_>, attributes: &FileAttributes) -> Result<()> {
         self.size = 0;
