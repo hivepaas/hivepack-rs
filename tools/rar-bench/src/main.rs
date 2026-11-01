@@ -1,26 +1,24 @@
-//! Times hivepack-rar against UnRAR 7.3.2 on the RAR archives of libarchive's,
-//! rarfile's, junrar's and unrar.rs's tests: testing an archive, from its file.
+//! Times hivepack-rar against UnRAR 7.3.2 on `testdata/rar`: testing an archive,
+//! from its file.
 //!
 //! ```text
-//! python3 scripts/testdata.py fetch --set rar-bench-unrar --set libarchive-rar \
-//!     --set rarfile-tests --set junrar-tests --set unrar-rs-tests
-//! cargo run --release -p rar-bench -- [--rounds 5] [--seconds 0.5] [--top 12]
+//! python3 scripts/testdata.py fetch --set rar-bench-unrar
+//! cargo run --release -p rar-bench -- [--rounds 5] [--seconds 0.5] [--only TEXT]
 //! ```
 //!
-//! RAR is only ever read here, so these are the archives there are, the biggest
-//! about 1 MB. `--top` keeps those that unpack to the most. An archive is left out
-//! if either side cannot go through it without a password, or if they disagree
-//! on the bytes: that is for `crates/rar/tests/oracle.rs` to look into, and it is
-//! said on standard error.
+//! RAR is never written here: `scripts/make_rar_testdata.py` made those archives
+//! with RARLAB's programs, from this repository's files and some bytes of its own.
+//! Those with `password` in their name take the password `hivepack`.
 //!
 //! UnRAR runs in a program of its own, `tools/rar-oracle/bench.cpp`, on one
 //! thread, as the port does. Rounds take turns between the two, and each runs for
-//! at least `--seconds`. The output is a Markdown table of the best speeds, and
-//! the port's over UnRAR's: above 1 the port is faster.
+//! at least `--seconds`. Both must give the same bytes. The output is a Markdown
+//! table of the best speeds, and the port's over UnRAR's: above 1 the port is
+//! faster.
 
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::path::{Path, PathBuf};
+use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
@@ -28,12 +26,8 @@ use hivepack_rar::{Archive, Extract};
 
 type Result<T> = std::result::Result<T, String>;
 
-const SETS: [&str; 4] = [
-    "libarchive-rar",
-    "rarfile-tests",
-    "junrar-tests",
-    "unrar-rs-tests",
-];
+/// The password of those archives that have one.
+const PASSWORD: &str = "hivepack";
 
 /// UnRAR's program.
 struct UnRar {
@@ -65,7 +59,8 @@ impl UnRar {
 
     /// How long testing `path` took and the bytes it gave, if it could.
     fn test(&mut self, path: &Path) -> Result<Option<(Duration, u64)>> {
-        writeln!(self.stdin, "test {}", path.display()).map_err(|e| e.to_string())?;
+        let word = if has_password(path) { "testpw" } else { "test" };
+        writeln!(self.stdin, "{word} {}", path.display()).map_err(|e| e.to_string())?;
         self.stdin.flush().map_err(|e| e.to_string())?;
         let mut line = String::new();
         self.stdout
@@ -95,7 +90,11 @@ impl Drop for UnRar {
 fn port_test(path: &Path) -> Option<(Duration, u64)> {
     let start = Instant::now();
     let file = File::open(path).ok()?;
-    let mut arc = Archive::open(file, true).ok()?;
+    let mut arc = if has_password(path) {
+        Archive::open_with_password(file, true, PASSWORD).ok()?
+    } else {
+        Archive::open(file, true).ok()?
+    };
     let mut extract = Extract::new();
     let mut bytes = 0u64;
     loop {
@@ -116,55 +115,22 @@ fn port_test(path: &Path) -> Option<(Duration, u64)> {
     Some((start.elapsed(), bytes))
 }
 
-/// The files under `dir` that start as a RAR archive does, without the later
-/// volumes of split ones.
-fn archives(dir: &Path, found: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            archives(&path, found);
-            continue;
-        }
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_lowercase())
-            .unwrap_or_default();
-        let volume = name.contains(".part") || name.contains("vols") || name.contains("volume");
-        let mut start = [0; 4];
-        let rar = File::open(&path)
-            .and_then(|mut f| f.read_exact(&mut start))
-            .is_ok()
-            && &start == b"Rar!";
-        if rar && !volume {
-            found.push(path);
-        }
-    }
-}
-
-/// RAR 5 or older, from the signature.
-fn format_of(path: &Path) -> &'static str {
-    let mut start = [0; 8];
-    let five = File::open(path)
-        .and_then(|mut f| f.read_exact(&mut start))
-        .is_ok()
-        && start[6] == 1;
-    if five { "RAR 5" } else { "RAR 1.5 to 4" }
+fn has_password(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|n| n.to_string_lossy().contains("password"))
 }
 
 struct Options {
     rounds: usize,
     seconds: f64,
-    top: usize,
+    only: Option<String>,
 }
 
 fn parse_options() -> Result<Options> {
     let mut options = Options {
         rounds: 5,
         seconds: 0.5,
-        top: 12,
+        only: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -172,7 +138,7 @@ fn parse_options() -> Result<Options> {
         match arg.as_str() {
             "--rounds" => options.rounds = value()?.parse().map_err(|_| "--rounds")?,
             "--seconds" => options.seconds = value()?.parse().map_err(|_| "--seconds")?,
-            "--top" => options.top = value()?.parse().map_err(|_| "--top")?,
+            "--only" => options.only = Some(value()?),
             _ => return Err(format!("what is {arg}?")),
         }
     }
@@ -196,33 +162,19 @@ fn real_main() -> Result<()> {
     let testdata = repository.join("target/testdata");
     let mut unrar = UnRar::spawn(&testdata.join("rar-bench-unrar/oracle"))?;
 
-    let mut found = Vec::new();
-    for set in SETS {
-        archives(&testdata.join(set), &mut found);
-    }
-    found.sort();
-
     let mut usable = Vec::new();
-    for path in found {
-        let port = port_test(&path).map(|(_, bytes)| bytes);
-        let reference = unrar.test(&path)?.map(|(_, bytes)| bytes);
-        match (port, reference) {
-            (Some(a), Some(b)) if a == b && a > 0 => usable.push((a, path)),
-            (Some(a), Some(b)) if a != b => {
-                eprintln!("{}: the port gave {a} bytes, UnRAR {b}", path.display());
-            }
-            _ => {}
+    let folder = repository.join("testdata/rar");
+    let entries = std::fs::read_dir(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+    for entry in entries {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        let name = path.to_string_lossy();
+        if name.ends_with(".rar") && options.only.as_ref().is_none_or(|o| name.contains(o)) {
+            let (_, bytes) =
+                port_test(&path).ok_or_else(|| format!("{}: the port failed", path.display()))?;
+            usable.push((bytes, path));
         }
     }
-    usable.sort_by_key(|(bytes, _)| std::cmp::Reverse(*bytes));
-    let mut seen = Vec::new();
-    usable.retain(|(bytes, path)| {
-        let name = path.file_name().map(|n| n.to_os_string());
-        let new = !seen.contains(&(*bytes, name.clone()));
-        seen.push((*bytes, name));
-        new
-    });
-    usable.truncate(options.top);
+    usable.sort_by(|a, b| a.1.cmp(&b.1));
 
     println!("| Archive | hivepack-rar | UnRAR | Port / UnRAR |\n|---|---|---|---|");
     let mut ratios = Vec::new();
@@ -233,9 +185,13 @@ fn real_main() -> Result<()> {
                 port_test(path).ok_or_else(|| format!("{}: failed", path.display()))
             })?;
             let reference = round(options.seconds, || {
-                unrar
+                let done = unrar
                     .test(path)?
-                    .ok_or_else(|| format!("{}: failed", path.display()))
+                    .ok_or_else(|| format!("{}: UnRAR failed", path.display()))?;
+                if done.1 != *bytes {
+                    return Err(format!("{}: UnRAR gave {} bytes", path.display(), done.1));
+                }
+                Ok(done)
             })?;
             port_best = port_best.max(port);
             unrar_best = unrar_best.max(reference);
@@ -245,8 +201,7 @@ fn real_main() -> Result<()> {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         println!(
-            "| {name}, {}, {:.1} MB | {:.0} MB/s | {:.0} MB/s | {:.2}× |",
-            format_of(path),
+            "| {name}, {:.1} MB | {:.0} MB/s | {:.0} MB/s | {:.2}× |",
             *bytes as f64 / 1e6,
             port_best / 1e6,
             unrar_best / 1e6,
