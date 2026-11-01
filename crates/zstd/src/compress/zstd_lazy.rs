@@ -1365,20 +1365,12 @@ pub(crate) fn row_get_match_mask<const ROW_LOG: u32>(tag_row: &[u8], tag: u8, he
 /// Outlined, as libzstd's search functions are: inlined at each search of
 /// each parser, it would be many copies.
 ///
-/// With prefetching ([`PREFETCH`]), as libzstd: the `CDict`'s row or
-/// bucket is prefetched first, then the candidates of a row are gathered
-/// into a buffer, each prefetched, then `ip` is inserted, then they are
-/// compared.
+/// As libzstd: with prefetching ([`PREFETCH`]), the `CDict`'s row or bucket
+/// is prefetched first; the candidates of a row are gathered into a buffer,
+/// each prefetched, then `ip` is inserted, then they are compared.
 ///
-/// Differs from libzstd: without prefetching, which is faster so, the port
-/// compares each candidate as it finds it, and inserts `ip` last. The
-/// candidates are the same, compared in the same order, and the
-/// comparisons read nothing the insertion writes; the table's reads and
-/// writes come in libzstd's order, but for the reads of candidates after a
-/// match that reaches `i_limit`, which libzstd then leaves unused. Those
-/// candidates were attempts libzstd counts, and the port does not: the
-/// search of the `CDict` then has more attempts left here. It finds nothing
-/// longer either way, its matches ending at `i_limit` at most.
+/// Differs from libzstd: without prefetching, a read of each candidate takes
+/// the place of its prefetch.
 #[inline(never)]
 fn row_find_best_match<const MLS: u32, const ROW_LOG: u32, const DICT_MODE: u8>(
     ms: &mut MatchState,
@@ -1490,67 +1482,51 @@ fn row_find_best_match<const MLS: u32, const ROW_LOG: u32, const DICT_MODE: u8>(
     // The candidates, newest first, up to the first out of the window, and
     // the longest match; and ip into the row too, which saves the next
     // search a turn of the update.
-    if PREFETCH {
-        let mut match_buffer = [0u32; ZSTD_ROW_HASH_MAX_ENTRIES];
-        let mut num_matches = 0;
-        while matches > 0 && nb_attempts > 0 {
-            let match_pos = (head + matches.trailing_zeros()) & row_mask;
-            let match_index = row[match_pos as usize];
-            matches &= matches - 1;
-            if match_pos == 0 {
-                // The head, not an entry.
-                continue;
-            }
-            if match_index < low_limit {
+    //
+    // Without prefetching, a read of each candidate stands in for it: no
+    // branch waits on these, so the processor takes their cache misses side
+    // by side, where comparing one by one takes them in turn.
+    let mut match_buffer = [0u32; ZSTD_ROW_HASH_MAX_ENTRIES];
+    let mut num_matches = 0;
+    let mut read = 0u8;
+    while matches > 0 && nb_attempts > 0 {
+        let match_pos = (head + matches.trailing_zeros()) & row_mask;
+        let match_index = row[match_pos as usize];
+        matches &= matches - 1;
+        if match_pos == 0 {
+            // The head, not an entry.
+            continue;
+        }
+        if match_index < low_limit {
+            break;
+        }
+        let (content, at) = if DICT_MODE != EXT_DICT || match_index >= dict_limit {
+            (src, (i64::from(match_index) - base) as usize)
+        } else {
+            (dict, (i64::from(match_index) - dict_base) as usize)
+        };
+        if PREFETCH {
+            prefetch_l1(content, at);
+        } else {
+            read ^= content[at];
+        }
+        match_buffer[num_matches] = match_index;
+        num_matches += 1;
+        nb_attempts -= 1;
+    }
+    std::hint::black_box(read);
+    row_insert(row, tag_row, row_mask, tag as u8, next_to_update);
+    for &match_index in &match_buffer[..num_matches] {
+        let current_ml = match_length(match_index, ml);
+        if current_ml > ml {
+            ml = current_ml;
+            off_base = offset_to_offbase(curr - match_index);
+            if ip + current_ml == i_limit {
+                // As long as it can be, and the next test would read past
+                // the end.
                 break;
             }
-            if DICT_MODE != EXT_DICT || match_index >= dict_limit {
-                prefetch_l1(src, (i64::from(match_index) - base) as usize);
-            } else {
-                prefetch_l1(dict, (i64::from(match_index) - dict_base) as usize);
-            }
-            match_buffer[num_matches] = match_index;
-            num_matches += 1;
-            nb_attempts -= 1;
         }
-        row_insert(row, tag_row, row_mask, tag as u8, next_to_update);
-        for &match_index in &match_buffer[..num_matches] {
-            let current_ml = match_length(match_index, ml);
-            if current_ml > ml {
-                ml = current_ml;
-                off_base = offset_to_offbase(curr - match_index);
-                if ip + current_ml == i_limit {
-                    break;
-                }
-            }
-        }
-    } else {
-        while matches > 0 && nb_attempts > 0 {
-            let match_pos = (head + matches.trailing_zeros()) & row_mask;
-            let match_index = row[match_pos as usize];
-            matches &= matches - 1;
-            if match_pos == 0 {
-                // The head, not an entry.
-                continue;
-            }
-            if match_index < low_limit {
-                break;
-            }
-            nb_attempts -= 1;
-
-            // The best so far.
-            let current_ml = match_length(match_index, ml);
-            if current_ml > ml {
-                ml = current_ml;
-                off_base = offset_to_offbase(curr - match_index);
-                if ip + current_ml == i_limit {
-                    // As long as it can be, and the next test would read
-                    // past the end.
-                    break;
-                }
-            }
-        }
-        row_insert(row, tag_row, row_mask, tag as u8, next_to_update);
     }
 
     if DICT_MODE == DEDICATED_DICT_SEARCH {
