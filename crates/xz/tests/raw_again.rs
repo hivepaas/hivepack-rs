@@ -1,6 +1,8 @@
 //! [`Stream::raw_encoder_again`] writes what a new encoder writes, after a
 //! finished run and after one given up on.
 
+#![allow(clippy::unwrap_used)]
+
 use hivepack_xz::{Action, Filter, InBuffer, LzmaOptions, OutBuffer, Status, Stream};
 
 /// Text-like data that compresses, different for each `seed`.
