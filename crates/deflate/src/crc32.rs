@@ -139,10 +139,39 @@ fn read_word(buf: &[u8], pos: usize) -> u64 {
 /// The CRC-32 of `buf`, continuing from `crc`: start from 0, the CRC of no
 /// bytes.
 ///
-/// Port of `crc32_z` (and `crc32`), `crc32.c`, without the ARMv8 CRC
-/// instructions, which zlib uses only when built for a processor that has
-/// them.
+/// Port of `crc32_z` (and `crc32`), `crc32.c`. The ARMv8 CRC instructions,
+/// which zlib uses only when built for a processor that has them, are here
+/// with the `unsafe-fast` feature, if the processor has them.
 pub fn crc32(crc: u32, buf: &[u8]) -> u32 {
+    #[cfg(all(feature = "unsafe-fast", target_arch = "aarch64"))]
+    if std::arch::is_aarch64_feature_detected!("crc") {
+        // SAFETY: the processor has the `crc` feature, just checked, which is
+        // all `arm_crc32` asks of its caller.
+        #[allow(unsafe_code)]
+        return unsafe { arm_crc32(crc, buf) };
+    }
+    crc32_braided(crc, buf)
+}
+
+/// `crc32_z`'s `ARMCRC32` branch, without its alignment to words, as loading
+/// a word here does not ask for one.
+#[cfg(all(feature = "unsafe-fast", target_arch = "aarch64"))]
+#[target_feature(enable = "crc")]
+fn arm_crc32(crc: u32, buf: &[u8]) -> u32 {
+    use std::arch::aarch64::{__crc32b, __crc32d};
+    let mut crc = !crc;
+    let (words, rest) = buf.as_chunks::<8>();
+    for word in words {
+        crc = __crc32d(crc, u64::from_le_bytes(*word));
+    }
+    for &byte in rest {
+        crc = __crc32b(crc, byte);
+    }
+    !crc
+}
+
+/// The braided calculation of `crc32_z`.
+fn crc32_braided(crc: u32, buf: &[u8]) -> u32 {
     // Differs from zlib: there is no null pointer to ask for the initial
     // value, which is 0.
     let mut len = buf.len();
@@ -256,6 +285,29 @@ pub fn crc32_combine(crc1: u32, crc2: u32, len2: i64) -> u32 {
 
 #[cfg(test)]
 mod tests {
+
+    /// The instructions, where they run, against the braided calculation.
+    #[test]
+    fn same_as_braided() {
+        let mut state = 0x0123_4567_89AB_CDEFu64;
+        let bytes: Vec<u8> = (0..4096)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect();
+        for start in 0..16 {
+            for len in (0..300).chain([1024, 4000]) {
+                let piece = &bytes[start..start + len];
+                for from in [0, 1, 0xFFFF_FFFF, 0x89AB_CDEF] {
+                    assert_eq!(crc32(from, piece), crc32_braided(from, piece));
+                }
+            }
+        }
+    }
+
     use super::*;
 
     /// The definition, one bit at a time.

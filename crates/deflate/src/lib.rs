@@ -38,7 +38,9 @@
 //! # }
 //! ```
 
-#![forbid(unsafe_code)]
+// No unsafe code at all, unless the `unsafe-fast` feature is on: then only
+// where a module allows it (see `docs/unsafe.md`).
+#![cfg_attr(not(feature = "unsafe-fast"), forbid(unsafe_code))]
 // Loops keep zlib's indices, so the port reads side by side with the C.
 #![allow(clippy::needless_range_loop)]
 
@@ -55,6 +57,11 @@ mod inftree9;
 mod inftrees;
 mod trees;
 mod zutil;
+
+/// Whether this build has the `unsafe-fast` feature: CRC-32 with the
+/// processor's instructions on arm64. Cargo turns a feature on for the whole
+/// build as soon as one crate asks for it, so a program can check which it got.
+pub const UNSAFE_FAST: bool = cfg!(feature = "unsafe-fast");
 
 pub use adler32::{ADLER32_INIT, adler32, adler32_combine};
 pub use crc32::{crc32, crc32_combine, crc32_combine_gen, crc32_combine_op, get_crc_table};
