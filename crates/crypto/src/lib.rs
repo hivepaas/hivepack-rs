@@ -81,10 +81,19 @@
 //! assert_eq!(x25519(&alice, &x25519_base(&bob)), x25519(&bob, &x25519_base(&alice)));
 //! ```
 
+// No unsafe code at all, unless the `unsafe-fast` feature is on: then only
+// where a module allows it (see `docs/unsafe.md`).
+#![cfg_attr(not(feature = "unsafe-fast"), forbid(unsafe_code))]
+
 mod aes_ct64;
 mod aes_ct64_ctr;
 mod aes_ct64_dec;
 mod aes_ct64_enc;
+#[cfg(all(
+    feature = "unsafe-fast",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod aes_hw;
 mod blake2s;
 mod blake2sp;
 mod chacha20_ct;
@@ -104,6 +113,11 @@ mod scrypt;
 mod sha1;
 mod sha2big;
 mod sha2small;
+
+/// Whether this build has the `unsafe-fast` feature: AES with the processor's
+/// instructions, where it has them. Cargo turns a feature on for the whole build
+/// as soon as one crate asks for it, so a program can check which it got.
+pub const UNSAFE_FAST: bool = cfg!(feature = "unsafe-fast");
 
 pub use aes_ct64_ctr::{AES_BLOCK_LENGTH, Aes};
 pub use blake2s::{BLAKE2S_KEY_LENGTH, BLAKE2S_LENGTH, Blake2s};

@@ -14,5 +14,22 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
-[lints]
-workspace = true
+[features]
+# AES with the processor's instructions, on x86-64 and arm64: faster, at the
+# cost of some `unsafe` code, in `src/aes_hw.rs`. Off by default: without it
+# the crate has no unsafe code at all. See docs/unsafe.md.
+unsafe-fast = []
+
+# The workspace's lints, but `unsafe_code` is `deny` rather than `forbid`, so
+# that the `unsafe-fast` feature's code can allow it. Without the
+# feature, lib.rs forbids it again.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"

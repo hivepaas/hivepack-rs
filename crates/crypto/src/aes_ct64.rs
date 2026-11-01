@@ -258,13 +258,10 @@ fn sub_word(x: u32) -> u32 {
     q[0] as u32
 }
 
-/// `br_aes_ct64_keysched`: the number of rounds and the compressed
-/// subkeys, two words per round key, or `None` if the key is not 16, 24 or
-/// 32 bytes long.
-///
-/// Differs from BearSSL: an unsupported length is `None`, where BearSSL
-/// returns 0 rounds.
-pub(crate) fn keysched(key: &[u8]) -> Option<(usize, [u64; 30])> {
+/// The first half of `br_aes_ct64_keysched`: the number of rounds and the
+/// words of the round keys, or `None` if the key is not 16, 24 or 32 bytes
+/// long.
+pub(crate) fn round_words(key: &[u8]) -> Option<(usize, [u32; 60])> {
     let num_rounds = match key.len() {
         16 => 10,
         24 => 12,
@@ -294,6 +291,18 @@ pub(crate) fn keysched(key: &[u8]) -> Option<(usize, [u64; 30])> {
             k += 1;
         }
     }
+    Some((num_rounds, skey))
+}
+
+/// `br_aes_ct64_keysched`: the number of rounds and the compressed
+/// subkeys, two words per round key, or `None` if the key is not 16, 24 or
+/// 32 bytes long.
+///
+/// Differs from BearSSL: an unsupported length is `None`, where BearSSL
+/// returns 0 rounds.
+pub(crate) fn keysched(key: &[u8]) -> Option<(usize, [u64; 30])> {
+    let (num_rounds, mut skey) = round_words(key)?;
+    let nkf = (num_rounds + 1) << 2;
 
     let mut comp_skey = [0u64; 30];
     for (round, pair) in skey[..nkf]
