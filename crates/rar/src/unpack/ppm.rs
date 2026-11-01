@@ -155,6 +155,8 @@ pub(super) struct ModelPpm {
     prev_success: u8,
     hi_bits_flag: u8,
     bin_summ: [[u16; 64]; 128],
+    /// `ps` of `decodeSymbol2`, which is not cleared for each symbol here.
+    ps: [u32; 256],
 }
 
 impl ModelPpm {
@@ -198,6 +200,7 @@ impl ModelPpm {
             prev_success: 0,
             hi_bits_flag: 0,
             bin_summ: [[0; 64]; 128],
+            ps: [0; 256],
         }
     }
 
@@ -215,35 +218,64 @@ impl ModelPpm {
         }
     }
 
+    /// `N` bytes at `at`, where all of them are in the heap: one bounds check
+    /// for them all.
+    #[inline(always)]
+    fn bytes<const N: usize>(&self, at: u32) -> Option<&[u8; N]> {
+        self.mem.get(at as usize..)?.first_chunk()
+    }
+
+    /// As [`ModelPpm::bytes`], to write.
+    #[inline(always)]
+    fn bytes_mut<const N: usize>(&mut self, at: u32) -> Option<&mut [u8; N]> {
+        self.mem.get_mut(at as usize..)?.first_chunk_mut()
+    }
+
     #[inline(always)]
     fn r16(&self, at: u32) -> u16 {
-        u16::from_le_bytes([self.r8(at), self.r8(at.wrapping_add(1))])
+        match self.bytes(at) {
+            Some(bytes) => u16::from_le_bytes(*bytes),
+            None => u16::from_le_bytes([self.r8(at), self.r8(at.wrapping_add(1))]),
+        }
     }
 
     #[inline(always)]
     fn w16(&mut self, at: u32, value: u16) {
         let [a, b] = value.to_le_bytes();
-        self.w8(at, a);
-        self.w8(at.wrapping_add(1), b);
+        match self.bytes_mut(at) {
+            Some(bytes) => *bytes = [a, b],
+            None => {
+                self.w8(at, a);
+                self.w8(at.wrapping_add(1), b);
+            }
+        }
     }
 
     #[inline(always)]
     fn r32(&self, at: u32) -> u32 {
-        u32::from_le_bytes([
-            self.r8(at),
-            self.r8(at.wrapping_add(1)),
-            self.r8(at.wrapping_add(2)),
-            self.r8(at.wrapping_add(3)),
-        ])
+        match self.bytes(at) {
+            Some(bytes) => u32::from_le_bytes(*bytes),
+            None => u32::from_le_bytes([
+                self.r8(at),
+                self.r8(at.wrapping_add(1)),
+                self.r8(at.wrapping_add(2)),
+                self.r8(at.wrapping_add(3)),
+            ]),
+        }
     }
 
     #[inline(always)]
     fn w32(&mut self, at: u32, value: u32) {
         let [a, b, c, d] = value.to_le_bytes();
-        self.w8(at, a);
-        self.w8(at.wrapping_add(1), b);
-        self.w8(at.wrapping_add(2), c);
-        self.w8(at.wrapping_add(3), d);
+        match self.bytes_mut(at) {
+            Some(bytes) => *bytes = [a, b, c, d],
+            None => {
+                self.w8(at, a);
+                self.w8(at.wrapping_add(1), b);
+                self.w8(at.wrapping_add(2), c);
+                self.w8(at.wrapping_add(3), d);
+            }
+        }
     }
 
     // A state.
@@ -1224,29 +1256,54 @@ impl ModelPpm {
         let see = self.make_esc_freq2(ctx, i);
         let stats = self.stats(ctx);
         let end = stats.wrapping_add((num_stats as u32).wrapping_mul(STATE_SIZE));
-        let mut ps = [0u32; 256];
         let mut pps = 0;
-        let mut p = stats.wrapping_sub(STATE_SIZE);
+        let mut p;
         let mut hi_cnt = 0i32;
-        loop {
-            loop {
-                p = p.wrapping_add(STATE_SIZE);
-                if p >= end {
+        if let Some(states) = self.mem.get(stats as usize..end as usize) {
+            // All the states are in the heap: one bounds check for them.
+            let mut done = false;
+            let (chunks, _) = states.as_chunks::<{ STATE_SIZE as usize }>();
+            for (n, state) in chunks.iter().enumerate() {
+                if self.char_mask[usize::from(state[0])] == self.esc_count {
+                    continue;
+                }
+                hi_cnt += i32::from(state[1]);
+                if pps >= self.ps.len() {
                     return false;
                 }
-                if self.char_mask[usize::from(self.symbol(p))] != self.esc_count {
+                self.ps[pps] = stats + n as u32 * STATE_SIZE;
+                pps += 1;
+                i -= 1;
+                if i == 0 {
+                    done = true;
                     break;
                 }
             }
-            hi_cnt += i32::from(self.freq(p));
-            if pps >= ps.len() {
+            if !done {
                 return false;
             }
-            ps[pps] = p;
-            pps += 1;
-            i -= 1;
-            if i == 0 {
-                break;
+        } else {
+            p = stats.wrapping_sub(STATE_SIZE);
+            loop {
+                loop {
+                    p = p.wrapping_add(STATE_SIZE);
+                    if p >= end {
+                        return false;
+                    }
+                    if self.char_mask[usize::from(self.symbol(p))] != self.esc_count {
+                        break;
+                    }
+                }
+                hi_cnt += i32::from(self.freq(p));
+                if pps >= self.ps.len() {
+                    return false;
+                }
+                self.ps[pps] = p;
+                pps += 1;
+                i -= 1;
+                if i == 0 {
+                    break;
+                }
             }
         }
         self.scale = self.scale.wrapping_add(hi_cnt as u32);
@@ -1255,7 +1312,7 @@ impl ModelPpm {
             return false;
         }
         pps = 0;
-        p = ps[0];
+        p = self.ps[0];
         if count < hi_cnt {
             hi_cnt = 0;
             loop {
@@ -1264,10 +1321,10 @@ impl ModelPpm {
                     break;
                 }
                 pps += 1;
-                if pps >= ps.len() {
+                if pps >= self.ps.len() {
                     return false;
                 }
-                p = ps[pps];
+                p = self.ps[pps];
             }
             self.high_count = hi_cnt as u32;
             self.low_count = self.high_count.wrapping_sub(u32::from(self.freq(p)));
@@ -1281,10 +1338,10 @@ impl ModelPpm {
             self.high_count = self.scale;
             i = num_stats - self.num_masked;
             loop {
-                if pps >= ps.len() {
+                if pps >= self.ps.len() {
                     return false;
                 }
-                self.char_mask[usize::from(self.symbol(ps[pps]))] = self.esc_count;
+                self.char_mask[usize::from(self.symbol(self.ps[pps]))] = self.esc_count;
                 pps += 1;
                 i -= 1;
                 if i == 0 {
