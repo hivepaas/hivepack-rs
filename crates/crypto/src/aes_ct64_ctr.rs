@@ -125,23 +125,24 @@ impl Aes {
     /// the last whole block are left as they are.
     pub fn cbc_decrypt(&self, iv: &mut [u8; AES_BLOCK_LENGTH], data: &mut [u8]) {
         let whole = data.len() / AES_BLOCK_LENGTH * AES_BLOCK_LENGTH;
+        let mut blocks = [0u8; 4 * AES_BLOCK_LENGTH];
         for chunk in data[..whole].chunks_mut(4 * AES_BLOCK_LENGTH) {
-            let mut blocks = [0u8; 4 * AES_BLOCK_LENGTH];
             blocks[..chunk.len()].copy_from_slice(chunk);
             let cipher = blocks;
             self.decrypt4(&mut blocks);
-            for (i, byte) in chunk.iter_mut().enumerate() {
-                *byte = blocks[i]
-                    ^ if i < AES_BLOCK_LENGTH {
-                        iv[i]
-                    } else {
-                        cipher[i - AES_BLOCK_LENGTH]
-                    };
+            // Each block, XORed with the cipher block before it.
+            let mut before = *iv;
+            let plain = blocks.as_chunks::<AES_BLOCK_LENGTH>().0;
+            let ciphers = cipher.as_chunks::<AES_BLOCK_LENGTH>().0;
+            let blocks_out = chunk.as_chunks_mut::<AES_BLOCK_LENGTH>().0;
+            for ((out, plain), cipher) in blocks_out.iter_mut().zip(plain).zip(ciphers) {
+                let word = u128::from_ne_bytes(*plain) ^ u128::from_ne_bytes(before);
+                *out = word.to_ne_bytes();
+                before = *cipher;
             }
-            let last = chunk.len() - AES_BLOCK_LENGTH;
-            iv.copy_from_slice(&cipher[last..last + AES_BLOCK_LENGTH]);
-            clear(&mut blocks);
+            *iv = before;
         }
+        clear(&mut blocks);
     }
 
     /// Encrypts one block in place: [`Aes::encrypt4`], with the other three

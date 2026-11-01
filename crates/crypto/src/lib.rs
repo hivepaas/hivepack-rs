@@ -113,9 +113,14 @@ mod scrypt;
 mod sha1;
 mod sha2big;
 mod sha2small;
+#[cfg(all(
+    feature = "unsafe-fast",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod sha_hw;
 
 /// Whether this build has the `unsafe-fast` feature: AES with the processor's
-/// instructions, where it has them. Cargo turns a feature on for the whole build
+/// instructions, and SHA-1 and SHA-256 too, where it has them. Cargo turns a feature on for the whole build
 /// as soon as one crate asks for it, so a program can check which it got.
 pub const UNSAFE_FAST: bool = cfg!(feature = "unsafe-fast");
 

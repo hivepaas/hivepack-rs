@@ -14,6 +14,10 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[features]
+# Faster SHA-256 from hivepack-crypto. See docs/unsafe.md.
+unsafe-fast = ["hivepack-crypto/unsafe-fast"]
+
 [lints]
 workspace = true
 

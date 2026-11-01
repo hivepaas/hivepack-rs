@@ -10,5 +10,8 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+unsafe-fast = ["hivepack-age/unsafe-fast"]
+
 [dependencies]
 hivepack-age.workspace = true
