@@ -40,14 +40,16 @@ Against liblzma 5.8.4, with `tools/xz-bench`, on the 12 Silesia files with CRC64
 
 ### On GitHub's runners
 
-Against liblzma 5.8.4, each row the mean and the range over its files or workloads.
+Against liblzma 5.8.4, as the crate comes by default, each row the mean and the range over its files or workloads.
 
 | Port / reference | Linux x86-64 | Windows x86-64 | macOS arm64 |
 |---|---|---|---|
-| Decompression | 0.79× (0.71–0.87×) | 1.04× (0.96–1.13×) | 1.01× (0.89–1.18×) |
-| Compression, presets 0 and 6 | 1.00× (0.89–1.06×) | 1.01× (0.91–1.08×) | 1.04× (0.91–1.16×) |
+| Decompression | 0.79× (0.71–0.88×) | 1.03× (0.95–1.13×) | 1.00× (0.90–1.11×) |
+| Compression, presets 0 and 6 | 1.00× (0.95–1.05×) | 1.03× (0.94–1.09×) | 1.01× (0.89–1.16×) |
 
-**Measured on** `.github/workflows/bench.yml`, on October 31, 2026, with rustc 1.99.1: Linux x86-64 on AMD EPYC 7763 64-Core Processor (4 threads); Windows x86-64 on AMD64 Family 25 Model 1 Stepping 1 (4 threads); macOS arm64 on Apple M1 (Virtual) (3 threads). Each job gets what the runner has that day, so these are not the same processor from format to format, and they are shared machines: the ratios hold better than the speeds. Linux's decompression is below 1× as liblzma has x86-64 assembly for it there; why Windows, with x86-64 too, is near 1× has not been looked into.
+**Measured on** `.github/workflows/bench.yml`, on November 1, 2026, with rustc 1.99.1: Linux x86-64 on AMD EPYC 7763 (4 threads); Windows x86-64 on AMD64 Family 25 Model 1 Stepping 1 (4 threads); macOS arm64 on Apple M1 (Virtual) (3 threads). Each job gets what the runner has that day, so the two tables, and the formats, are not on the same processor, and they are shared machines: the ratios hold better than the speeds.
+
+Linux's decompression is below 1× as liblzma has x86-64 assembly for it there; why Windows, with x86-64 too, is near 1× has not been looked into.
 
 ## License
 

@@ -38,20 +38,21 @@ How the port follows Go, and how it is checked, is in [docs/tar.md](../../docs/t
 
 ## Speed
 
-Against Go 1.27.2's `archive/tar`, with `tools/tar-bench`. Above 1× the port is faster.
+Against Go 1.27.2's `archive/tar`, as the crate comes by default, each row the mean and the range over its files or workloads.
 
-| Port / Go | Linux x86-64 | Windows x86-64 | macOS arm64 |
+| Port / reference | Linux x86-64 | Windows x86-64 | macOS arm64 |
 |---|---|---|---|
-| Going through entries, USTAR and PAX, from memory | 2.88–3.03× | 2.20–2.28× | 2.52× |
-| Going through entries, GNU long names, from memory | 1.81× | 1.43× | 1.75× |
-| Going through entries, from a file | 1.89–2.47× | 1.48–2.01× | 1.49–2.08× |
-| Going through sparse entries, from memory | 2.38–2.47× | no GNU tar | no holes |
-| Reading data, from memory | 0.96–2.00× | 2.12–2.16× | 1.61–2.46× |
-| Reading data, from a file | 1.05–1.09× | 1.12–1.15× | 0.99–1.08× |
-| Skipping data, through a buffer | 1.04× | 0.96× | 1.26× |
-| Skipping data, seeking in a file | 1.78–1.92× | 1.41–1.49× | 1.51–1.53× |
+| Going through entries, USTAR and PAX, from memory | 2.95× (2.83–3.06×) | 2.02× (2.02–2.03×) | 2.42× (2.34–2.51×) |
+| Going through entries, GNU long names, from memory | 1.74× | 1.32× | 1.82× |
+| Going through sparse entries, from memory | 2.92× (2.69–3.16×) | – | – |
+| Going through entries, from a file | 2.21× (1.79–2.63×) | 1.71× (1.52–1.89×) | 1.81× (1.53–2.10×) |
+| Reading data, from memory | 1.45× (0.91–1.99×) | 1.46× (1.03–1.89×) | 2.04× (1.52–2.57×) |
+| Reading sparse data, from memory | 1.35× (1.31–1.40×) | – | – |
+| Reading data, from a file | 1.06× (1.04–1.09×) | 1.10× (1.08–1.11×) | 1.10× (1.04–1.16×) |
+| Skipping data, through a buffer | 1.07× | 1.07× | 1.05× |
+| Skipping data, seeking in a file | 1.79× (1.74–1.84×) | 1.47× (1.41–1.53×) | 1.54× (1.52–1.55×) |
 
-**Measured on** GitHub's runners with `.github/workflows/bench.yml`, on October 31, 2026, the best of five rounds taken in turn: Linux on an AMD EPYC 9V45 (4 threads), Windows Server 2025 on an Intel processor (family 6, model 173) (4 threads), and macOS 26 on a virtual Apple M1 (3 threads). All with rustc 1.99.1 and Go 1.27.2. These are shared machines, so the ratios hold better than the speeds, and a runner's processor can differ from one run to the next.
+**Measured on** `.github/workflows/bench.yml`, on November 1, 2026, with rustc 1.99.1: Linux x86-64 on AMD EPYC 9V45 (4 threads); Windows x86-64 on AMD64 Family 25 Model 17 Stepping 1 (4 threads); macOS arm64 on Apple M2 Pro (Virtual) (5 threads). Each job gets what the runner has that day, so the two tables, and the formats, are not on the same processor, and they are shared machines: the ratios hold better than the speeds.
 
 The sparse rows are missing on macOS because GNU tar writes those files whole there, so the archives have no holes to read, and on Windows because the runners have no GNU tar. On one machine with more detail, an AMD Ryzen 9 9950X, the whole table and the reasons are in [docs/tar.md](../../docs/tar.md#the-speed).
 

@@ -40,17 +40,27 @@ Against libzstd 1.5.7, with `tools/zstd-bench`, on the 12 Silesia files, in one 
 
 ### On GitHub's runners
 
-Against libzstd 1.5.7, without `unsafe-fast`, each row the mean and the range over its files or workloads.
+Against libzstd 1.5.7, as the crate comes by default, each row the mean and the range over its files or workloads.
 
 | Port / reference | Linux x86-64 | Windows x86-64 | macOS arm64 |
 |---|---|---|---|
-| Decompression | 0.73× (0.70–0.81×) | 0.90× (0.86–0.96×) | 0.91× (0.67–1.24×) |
-| Compression, level 1 | 0.84× (0.77–0.89×) | 0.90× (0.86–0.95×) | 0.88× (0.72–1.00×) |
-| Compression, level 3 | 0.88× (0.83–0.92×) | 0.85× (0.80–0.89×) | 0.90× (0.79–1.02×) |
-| Compression, level 9 | 0.55× (0.46–0.69×) | 0.58× (0.46–0.69×) | 0.60× (0.48–0.72×) |
-| Compression, level 19 | 0.85× (0.77–0.90×) | 0.92× (0.85–1.05×) | 0.92× (0.69–1.17×) |
+| Decompression | 0.72× (0.69–0.80×) | 0.92× (0.87–1.00×) | 0.91× (0.76–1.19×) |
+| Compression, level 1 | 0.83× (0.78–0.89×) | 0.95× (0.91–0.98×) | 0.88× (0.75–0.92×) |
+| Compression, level 3 | 0.88× (0.84–0.92×) | 0.91× (0.84–0.96×) | 0.88× (0.75–1.01×) |
+| Compression, level 9 | 0.53× (0.43–0.68×) | 0.64× (0.53–0.85×) | 0.62× (0.42–0.77×) |
+| Compression, level 19 | 0.85× (0.76–0.94×) | 0.97× (0.91–1.04×) | 0.95× (0.74–1.11×) |
 
-**Measured on** `.github/workflows/bench.yml`, on October 31, 2026, with rustc 1.99.1: Linux x86-64 on AMD EPYC 7763 64-Core Processor (4 threads); Windows x86-64 on AMD64 Family 25 Model 17 Stepping 1 (4 threads); macOS arm64 on Apple M1 (Virtual) (3 threads). Each job gets what the runner has that day, so these are not the same processor from format to format, and they are shared machines: the ratios hold better than the speeds.
+With the `unsafe-fast` feature, off by default (see [docs/unsafe.md](../../docs/unsafe.md)):
+
+| Port / reference | Linux x86-64 | Windows x86-64 | macOS arm64 |
+|---|---|---|---|
+| Decompression | 0.81× (0.77–0.85×) | 1.03× (0.93–1.21×) | 0.95× (0.74–1.25×) |
+| Compression, level 1 | 0.82× (0.78–0.85×) | 0.94× (0.92–0.97×) | 0.90× (0.81–1.07×) |
+| Compression, level 3 | 0.87× (0.83–0.92×) | 0.91× (0.85–0.95×) | 0.87× (0.71–1.00×) |
+| Compression, level 9 | 0.77× (0.71–0.89×) | 0.90× (0.84–0.96×) | 0.88× (0.79–0.97×) |
+| Compression, level 19 | 0.85× (0.76–0.91×) | 1.00× (0.94–1.05×) | 0.91× (0.84–1.00×) |
+
+**Measured on** `.github/workflows/bench.yml`, on November 1, 2026, with rustc 1.99.1: Linux x86-64 on AMD EPYC 7763 (4 threads); Windows x86-64 on AMD64 Family 25 Model 1 Stepping 1 (4 threads); macOS arm64 on Apple M1 (Virtual) (3 threads). Each job gets what the runner has that day, so the two tables, and the formats, are not on the same processor, and they are shared machines: the ratios hold better than the speeds.
 
 ## License
 
