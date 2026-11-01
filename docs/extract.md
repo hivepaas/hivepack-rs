@@ -229,6 +229,10 @@ The `extract_tar` fuzz target does the same for tar, seeded with Go's test archi
 | CVE-2023-38831, exploited | WinRAR | a file and a folder of one name, `report.pdf ` and `report.pdf /` | the trailing space; without it, the same path | `cve_2023_38831_a_file_and_a_folder_of_one_name` |
 | CVE-2013-4787 (Master Key) | Android | one name twice, one checked and the other used | libzip's consistency check at opening; without it, the same path | `cve_2013_4787_one_name_twice` |
 | CVE-2021-37712 | node-tar | a link and a directory whose names are one once normalized | names compared by their key (`Duplicate`) | `cve_2021_37712_a_link_and_a_directory_one_by_normalization` |
+| CVE-2025-4517 | CPython's `tarfile` | links to long directories, past `PATH_MAX`, where the filter's `realpath` gave up, then a climb through them, and a file through that | no path is asked of the system: an entry under a link is the same path as the link (`Duplicate`); skipped, the climb goes through a link (`LinkChain`), and the last link names no file (`HardLinkTarget`) | `tar.rs`: `cve_2025_4517_a_climb_through_links_past_path_max` |
+| CVE-2025-4138, CVE-2025-4330 | CPython's `tarfile` | a target inside by its text, `a/up/../secret`, that goes through another link and out | links on the way looked at as they are reached, before a `..` takes them back off (`LinkChain`), in every format. `Links::Inside` let these through until this test was written | `cve_2025_4138_a_target_inside_by_its_text_only`, here and in `tar.rs` |
+| CVE-2024-12718 | CPython's `tarfile` | a file's mode and time set outside, through a link | the same path twice (`Duplicate`) | `tar.rs`: `cve_2024_12718_metadata_through_a_link` |
+| CVE-2025-4435 | CPython's `tarfile` | members a filter refused, extracted all the same with `errorlevel=0` | one skipped stays out, and so does what depends on it | `tar.rs`: `cve_2025_4435_what_is_skipped_stays_out` |
 | CVE-2025-8088, exploited | WinRAR | NTFS streams whose names climb with `..\` to the Startup folder | the backslash, and the colon with backslashes as separators or names cleaned up | `cve_2025_8088_streams_that_climb`, and the same in `rar.rs` as RAR 4 and RAR 5 archives |
 | CVE-2025-6218 | WinRAR | a name that climbs out with `..\` | RAR 4, the climb; RAR 5 from Unix, the backslash; RAR 5 from Windows reads it as one name with `_`, inside | `rar.rs`: `cve_2025_6218_a_path_that_climbs` |
 | CVE-2026-58052 | 7-Zip | streams `:Zone.Identifier:$DATA` and `::$DATA`, over the file's mark and data | the colon; skipped, the file alone is written | `cve_2026_58052_streams_that_replace_the_mark` |
@@ -236,9 +240,9 @@ The `extract_tar` fuzz target does the same for tar, seeded with Go's test archi
 | CVE-2021-1810 | macOS's Archive Utility | no quarantine on paths longer than 886 characters | the mark set on each file's descriptor, whatever its path (macOS) | `cve_2021_1810_the_quarantine_on_long_paths` |
 | CVE-2022-42821 (Achilles) | macOS | an AppleDouble file beside an app, whose ACL kept the quarantine from being set | AppleDouble files written as the files they are, never applied (macOS) | `cve_2022_42821_appledouble_is_not_applied` |
 
-Two are not made again: macOS's CVE-2026-28849 ("a maliciously crafted ZIP archive may bypass Gatekeeper checks") says no more than that, and Python's tarfile CVEs of June 2025 (CVE-2025-4517 and the others) are tar's, and come next.
+One is not made again: macOS's CVE-2026-28849 ("a maliciously crafted ZIP archive may bypass Gatekeeper checks") says no more than that.
 
 ## What comes next
 
 - **Sparse files written with holes**, rather than zeros.
-- **The tar archives behind Python's tarfile CVEs** of June 2025, made again as these are.
+- **Links that lead out through what is already in the destination.** With `Links::Inside`, a target is checked against the archive's own links; one through a link that was there before, in a destination that is not empty, is not looked at. Nothing is written through it, as directories are opened without following links.

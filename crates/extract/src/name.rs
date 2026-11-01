@@ -218,6 +218,33 @@ pub(crate) fn link_target(target: &[u8], parent: &[String]) -> Result<Vec<String
     Ok(resolved)
 }
 
+/// The first link the system would follow on the way along a target that
+/// [`link_target`] took, if `link_at` knows one. Each place is looked at as it
+/// is reached, before a `..` takes it back off: `a/up/../x` reads as `a/x`, but
+/// where `a/up` is a link to `..`, the system goes to the destination, and then
+/// out of it.
+pub(crate) fn link_on_the_way(
+    target: &[u8],
+    parent: &[String],
+    link_at: impl Fn(&[String]) -> Option<u64>,
+) -> Option<u64> {
+    let text = std::str::from_utf8(target).ok()?;
+    let mut walked = parent.to_vec();
+    for component in text.split('/').filter(|c| !matches!(*c, "" | ".")) {
+        if !walked.is_empty()
+            && let Some(other) = link_at(&walked)
+        {
+            return Some(other);
+        }
+        if component == ".." {
+            walked.pop();
+        } else if let Ok(name) = check_name(component.as_bytes()) {
+            walked.extend(name.components);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,6 +373,22 @@ mod tests {
         assert_eq!(link_target(b"..\\x", &parent), Err(NameError::Backslash));
         assert_eq!(link_target(b"nul", &parent), Err(NameError::Device));
         assert_eq!(link_target(b"", &parent), Err(NameError::Empty));
+    }
+
+    #[test]
+    fn links_on_the_way_are_found_before_a_climb_hides_them() {
+        let link_at = |walked: &[String]| (walked == ["a", "up"]).then_some(7);
+        let way = |target: &[u8]| link_on_the_way(target, &[], link_at);
+        assert_eq!(way(b"a/up/x"), Some(7));
+        assert_eq!(way(b"a/up/../x"), Some(7));
+        assert_eq!(way(b"a/./up//../../../x"), Some(7));
+        // At the end, the system goes no further than the link.
+        assert_eq!(way(b"a/up"), None);
+        assert_eq!(way(b"a/x/../y"), None);
+        // From the link's own directory.
+        let parent = vec!["a".to_string()];
+        assert_eq!(link_on_the_way(b"up/../x", &parent, link_at), Some(7));
+        assert_eq!(link_on_the_way(b"../a/up/x", &parent, link_at), Some(7));
     }
 
     /// Names are the archive's: any bytes are checked without panicking.

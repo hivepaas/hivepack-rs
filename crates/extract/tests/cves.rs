@@ -516,3 +516,24 @@ fn cve_2022_42821_appledouble_is_not_applied() {
     let appledouble_file = scratch.out().join("._Some.app");
     assert_eq!(std::fs::read(appledouble_file).unwrap(), appledouble);
 }
+
+/// Python's CVE-2025-4138 in a ZIP archive: a target inside by its text, where
+/// the system goes through another link of the archive and out.
+#[cfg(unix)]
+#[test]
+fn cve_2025_4138_a_target_inside_by_its_text_only() {
+    let scratch = Scratch::new();
+    std::fs::write(scratch.path().join("secret"), b"outside").unwrap();
+    let data = zip(&[
+        Entry::Dir(b"a/"),
+        link(b"a/up", b".."),
+        link(b"esc", b"a/up/../secret"),
+    ]);
+    let inside = options(|o| o.links = Links::Inside);
+    let error = extract(&data, &scratch.out(), &inside).unwrap_err();
+    assert!(
+        matches!(error.kind, ErrorKind::LinkChain { other: 1 }),
+        "{error}"
+    );
+    assert!(!scratch.out().exists());
+}
