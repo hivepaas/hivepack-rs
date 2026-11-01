@@ -64,6 +64,9 @@ mod zutil;
 pub const UNSAFE_FAST: bool = cfg!(feature = "unsafe-fast");
 
 pub use adler32::{ADLER32_INIT, adler32, adler32_combine};
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub use crc32::fuzz_crc32_braided;
 pub use crc32::{crc32, crc32_combine, crc32_combine_gen, crc32_combine_op, get_crc_table};
 pub use deflate::{
     DEF_MEM_LEVEL, Deflate, MAX_MEM_LEVEL, Z_DEFAULT_COMPRESSION, Z_DEFAULT_STRATEGY, Z_FILTERED,

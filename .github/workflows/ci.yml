@@ -496,6 +496,8 @@ jobs:
           PY
       # With the `unsafe-fast` feature: the decoder's unchecked fast loop.
       - run: cargo fuzz run --target x86_64-unknown-linux-gnu --features unsafe-fast lz4 -- -max_total_time=60 -rss_limit_mb=4096
+      # The processor's instructions against the safe code.
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu --features unsafe-fast hw_crypto -- -max_total_time=120 -rss_limit_mb=4096
       - name: Seed the 7z corpus
         run: |
           mkdir -p fuzz/corpus/sevenz

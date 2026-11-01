@@ -154,3 +154,44 @@ pub use sha2small::{SHA256_LENGTH, Sha256};
 
 /// The BearSSL release this crate follows.
 pub const UPSTREAM_VERSION: &str = "0.6";
+
+/// The safe code behind what the `unsafe-fast` feature can replace, and SHA's
+/// rounds, for `fuzz/fuzz_targets/hw_crypto.rs` to compare.
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzz_safe {
+    use crate::{Aes, CHACHA20_KEY_LENGTH, CHACHA20_NONCE_LENGTH};
+
+    pub fn aes_encrypt4(aes: &Aes, blocks: &mut [u8; 64]) {
+        aes.encrypt4_bitsliced(blocks);
+    }
+
+    pub fn aes_decrypt4(aes: &Aes, blocks: &mut [u8; 64]) {
+        aes.decrypt4_bitsliced(blocks);
+    }
+
+    pub fn sha1_block(block: &[u8; 64], val: &mut [u32; 5]) {
+        crate::sha1::round_code(block, val);
+    }
+
+    pub fn sha1_block_any(block: &[u8; 64], val: &mut [u32; 5]) {
+        crate::sha1::round(block, val);
+    }
+
+    pub fn sha256_block(block: &[u8; 64], val: &mut [u32; 8]) {
+        crate::sha2small::round_code(block, val);
+    }
+
+    pub fn sha256_block_any(block: &[u8; 64], val: &mut [u32; 8]) {
+        crate::sha2small::round(block, val);
+    }
+
+    pub fn chacha20(
+        key: &[u8; CHACHA20_KEY_LENGTH],
+        iv: &[u8; CHACHA20_NONCE_LENGTH],
+        cc: u32,
+        data: &mut [u8],
+    ) -> u32 {
+        crate::chacha20_ct::chacha20_safe(key, iv, cc, data)
+    }
+}

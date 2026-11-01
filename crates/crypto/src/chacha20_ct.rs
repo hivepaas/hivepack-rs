@@ -48,6 +48,25 @@ pub fn chacha20(
     cc
 }
 
+/// [`chacha20`] without the processor's vector instructions, to compare with.
+#[cfg(fuzzing)]
+pub(crate) fn chacha20_safe(
+    key: &[u8; CHACHA20_KEY_LENGTH],
+    iv: &[u8; CHACHA20_NONCE_LENGTH],
+    cc: u32,
+    data: &mut [u8],
+) -> u32 {
+    let mut kw = [0u32; 8];
+    let mut ivw = [0u32; 3];
+    for (word, bytes) in kw.iter_mut().zip(key.as_chunks().0) {
+        *word = u32::from_le_bytes(*bytes);
+    }
+    for (word, bytes) in ivw.iter_mut().zip(iv.as_chunks().0) {
+        *word = u32::from_le_bytes(*bytes);
+    }
+    one_block_at_a_time(&kw, &ivw, cc, data)
+}
+
 /// The blocks of `data` one at a time, starting at block `cc`; the number of the
 /// block after the last one.
 fn one_block_at_a_time(kw: &[u32; 8], ivw: &[u32; 3], mut cc: u32, data: &mut [u8]) -> u32 {

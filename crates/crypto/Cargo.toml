@@ -26,6 +26,8 @@ unsafe-fast = []
 # feature, lib.rs forbids it again.
 [lints.rust]
 unsafe_code = "deny"
+# `cargo fuzz` builds with `--cfg fuzzing`.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
 
 [lints.clippy]
 unwrap_used = "deny"

@@ -38,7 +38,7 @@ const IV: [u32; 5] = [
 /// `br_sha1_round`: one block into the state, with the processor's
 /// instructions where the build and the processor have them.
 #[inline]
-fn round(buf: &[u8; BLOCK_LENGTH], val: &mut [u32; 5]) {
+pub(crate) fn round(buf: &[u8; BLOCK_LENGTH], val: &mut [u32; 5]) {
     #[cfg(all(
         feature = "unsafe-fast",
         any(target_arch = "x86_64", target_arch = "aarch64")
@@ -49,7 +49,7 @@ fn round(buf: &[u8; BLOCK_LENGTH], val: &mut [u32; 5]) {
     round_code(buf, val);
 }
 
-fn round_code(buf: &[u8; BLOCK_LENGTH], val: &mut [u32; 5]) {
+pub(crate) fn round_code(buf: &[u8; BLOCK_LENGTH], val: &mut [u32; 5]) {
     let mut m = [0u32; 80];
     let [mut a, mut b, mut c, mut d, mut e] = *val;
     for (word, bytes) in m.iter_mut().zip(buf.as_chunks().0) {

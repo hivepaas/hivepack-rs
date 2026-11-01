@@ -60,7 +60,9 @@ Secrets:
 - **ChaCha20** has no tables and no branches on its data, in either form.
 - **SHA-1 and SHA-256** work on what HMAC and key derivation give them, in the same order as the code.
 
-Not checked: **Miri cannot run these intrinsics**, and they are not fuzzed apart. The output is compared with the safe code in the unit tests above, which CI's Linux jobs run on x86-64 and arm64. The bench tools also compare results with the reference on Linux, Windows and macOS. Timing was not measured.
+`fuzz/fuzz_targets/hw_crypto.rs` compares the instructions with the safe code on fuzzed keys, states and data, with AddressSanitizer: on x86-64 only, in CI's fuzz job. The unit tests above do the same on x86-64 and arm64 in CI's Linux jobs, and the bench tools compare results with the reference on Linux, Windows and macOS.
+
+Not checked: **Miri cannot run these intrinsics**, arm64's are not fuzzed, and timing was not measured.
 
 Port / reference, on GitHub's runners, on November 1, 2026, each job on the processor it got. Before is without the feature, from the crates' READMEs and earlier runs, on the processors those got, so a row compares loosely:
 

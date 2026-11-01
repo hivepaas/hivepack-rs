@@ -170,6 +170,13 @@ fn arm_crc32(crc: u32, buf: &[u8]) -> u32 {
     !crc
 }
 
+/// [`crc32`] without the processor's instructions, to compare with.
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub fn fuzz_crc32_braided(crc: u32, buf: &[u8]) -> u32 {
+    crc32_braided(crc, buf)
+}
+
 /// The braided calculation of `crc32_z`.
 fn crc32_braided(crc: u32, buf: &[u8]) -> u32 {
     // Differs from zlib: there is no null pointer to ask for the initial

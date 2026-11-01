@@ -67,7 +67,7 @@ impl Aes {
         self.encrypt4_bitsliced(blocks);
     }
 
-    fn encrypt4_bitsliced(&self, blocks: &mut [u8; 4 * AES_BLOCK_LENGTH]) {
+    pub(crate) fn encrypt4_bitsliced(&self, blocks: &mut [u8; 4 * AES_BLOCK_LENGTH]) {
         let mut w = [0u32; 16];
         for (word, bytes) in w.iter_mut().zip(blocks.as_chunks().0) {
             *word = u32::from_le_bytes(*bytes);
@@ -100,7 +100,7 @@ impl Aes {
         self.decrypt4_bitsliced(blocks);
     }
 
-    fn decrypt4_bitsliced(&self, blocks: &mut [u8; 4 * AES_BLOCK_LENGTH]) {
+    pub(crate) fn decrypt4_bitsliced(&self, blocks: &mut [u8; 4 * AES_BLOCK_LENGTH]) {
         let mut w = [0u32; 16];
         for (word, bytes) in w.iter_mut().zip(blocks.as_chunks().0) {
             *word = u32::from_le_bytes(*bytes);
