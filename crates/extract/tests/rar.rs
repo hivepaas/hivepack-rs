@@ -559,8 +559,9 @@ fn real_archives_come_out_as_they_read() {
         }
     }
     eprintln!("{compared} archives extracted as read, {files} files compared");
+    // What libarchive's alone give, all that Windows has: 44 and 97.
     if !archives().is_empty() {
         assert!(compared >= 40, "only {compared}");
-        assert!(files >= 100, "only {files}");
+        assert!(files >= 90, "only {files}");
     }
 }
