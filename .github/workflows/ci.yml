@@ -155,8 +155,9 @@ jobs:
     name: Test (${{ matrix.target }})
     runs-on: ubuntu-latest
     # The encoders' tests are slow under emulation: s390x took most of an
-    # hour once the dictionary builder, lz4 and bzip2 had theirs.
-    timeout-minutes: 90
+    # hour once the dictionary builder, lz4 and bzip2 had theirs, and passed
+    # 90 minutes, still passing test after test, with the writers' and RAR's.
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
@@ -224,7 +225,7 @@ jobs:
   fuzz:
     name: Fuzz (unsafe-fast)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
         with:
