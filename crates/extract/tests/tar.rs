@@ -772,3 +772,159 @@ fn go_test_archives_extract_or_stop_with_their_reason() {
         .collect();
     assert_eq!(outcomes, expected);
 }
+
+/// A tar archive of symbolic links and directories with names of any length,
+/// in PAX records as Python's tarfile writes them.
+fn long_tar(entries: &[(u8, Vec<u8>, Vec<u8>)]) -> Vec<u8> {
+    let mut writer = hivepack_tar::Writer::new(Vec::new());
+    for (typeflag, name, linkname) in entries {
+        let header = hivepack_tar::Header {
+            typeflag: *typeflag,
+            name: name.clone(),
+            linkname: linkname.clone(),
+            mode: 0o755,
+            ..Default::default()
+        };
+        writer.write_header(&header).unwrap();
+    }
+    writer.close().unwrap();
+    writer.into_inner()
+}
+
+/// Python's CVE-2025-4517, as its finders built it: links to directories of
+/// long names, past `PATH_MAX`, where `os.path.realpath` gave up and the
+/// filter saw a path inside, then a link that climbs through them and out, and
+/// a file through that. Nothing here asks the system where a path leads.
+#[cfg(unix)]
+#[test]
+fn cve_2025_4517_a_climb_through_links_past_path_max() {
+    let long = vec![b'd'; 247];
+    let mut entries = Vec::new();
+    let mut path = Vec::<u8>::new();
+    for step in b'a'..=b'p' {
+        let mut dir = path.clone();
+        dir.extend_from_slice(&long);
+        entries.push((b'5', dir, Vec::new()));
+        let mut link = path.clone();
+        link.push(step);
+        entries.push((b'2', link.clone(), long.clone()));
+        path = link;
+        path.push(b'/');
+    }
+    let mut up = path.clone();
+    up.extend_from_slice(&[b'l'; 254]);
+    entries.push((b'2', up.clone(), b"../".repeat(16)));
+    let mut out = up;
+    out.extend_from_slice(b"/../../../../../../../secret");
+    entries.push((b'2', b"escape".to_vec(), out));
+    entries.push((b'1', b"flag".to_vec(), b"escape".to_vec()));
+    let data = long_tar(&entries);
+
+    let inside = options(|o| o.links = Links::Inside);
+    let s = Scratch::new();
+    std::fs::write(s.path().join("secret"), b"outside").unwrap();
+    // A path under a link is the same path as the link.
+    let error = extract(&data, &s.out(), &inside).unwrap_err();
+    assert!(
+        matches!(error.kind, ErrorKind::Duplicate { first: 1 }),
+        "{error}"
+    );
+    assert!(!s.out().exists());
+
+    // Going on past what is refused: no link there leads out.
+    let skipping = options(|o| {
+        o.links = Links::Inside;
+        o.on_refused = OnRefused::Skip;
+    });
+    let s = Scratch::new();
+    std::fs::write(s.path().join("secret"), b"outside").unwrap();
+    let summary = extract(&data, &s.out(), &skipping).unwrap();
+    let last = summary.skipped.last().unwrap();
+    assert!(matches!(last.kind, ErrorKind::HardLinkTarget), "{last:?}");
+    let escape = &summary.skipped[summary.skipped.len() - 2];
+    assert!(
+        matches!(escape.kind, ErrorKind::LinkChain { other: 1 }),
+        "{escape:?}"
+    );
+    assert!(std::fs::read(s.out().join("escape")).is_err());
+    assert!(std::fs::read(s.out().join("flag")).is_err());
+    assert_eq!(std::fs::read(s.path().join("secret")).unwrap(), b"outside");
+}
+
+/// Python's CVE-2025-4138 and CVE-2025-4330: a link's target checked by its
+/// text, which stays inside, where the system goes through another link of the
+/// archive and out. `a/up/../secret` reads as `a/secret`.
+#[cfg(unix)]
+#[test]
+fn cve_2025_4138_a_target_inside_by_its_text_only() {
+    let data = tar(&[
+        E::Dir(b"a"),
+        E::Symlink(b"a/up", b".."),
+        E::Symlink(b"esc", b"a/up/../secret"),
+    ]);
+    let s = Scratch::new();
+    std::fs::write(s.path().join("secret"), b"outside").unwrap();
+    let inside = options(|o| o.links = Links::Inside);
+    let error = extract(&data, &s.out(), &inside).unwrap_err();
+    assert!(
+        matches!(error.kind, ErrorKind::LinkChain { other: 1 }),
+        "{error}"
+    );
+    assert!(!s.out().exists());
+
+    let skipping = options(|o| {
+        o.links = Links::Inside;
+        o.on_refused = OnRefused::Skip;
+    });
+    let summary = extract(&data, &s.out(), &skipping).unwrap();
+    assert_eq!(summary.skipped.len(), 1);
+    assert!(std::fs::symlink_metadata(s.out().join("esc")).is_err());
+    assert!(std::fs::read(s.out().join("a/up")).is_err());
+}
+
+/// Python's CVE-2024-12718: a file's metadata set outside, through a link to a
+/// file there, then an entry of the link's name with its mode and time.
+#[cfg(unix)]
+#[test]
+fn cve_2024_12718_metadata_through_a_link() {
+    use std::os::unix::fs::PermissionsExt;
+    let data = tar(&[E::Symlink(b"l", b"../secret"), E::Mode(b"l", b"", 0o777)]);
+    let s = Scratch::new();
+    let secret = s.path().join("secret");
+    std::fs::write(&secret, b"outside").unwrap();
+    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let before = std::fs::metadata(&secret).unwrap().modified().unwrap();
+    for links in [Links::Refuse, Links::Inside, Links::AsFile] {
+        let chosen = options(|o| o.links = links);
+        assert!(extract(&data, &s.out(), &chosen).is_err(), "{links:?}");
+        assert!(!s.out().exists(), "{links:?}");
+    }
+    let meta = std::fs::metadata(&secret).unwrap();
+    assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    assert_eq!(meta.modified().unwrap(), before);
+}
+
+/// Python's CVE-2025-4435: with `errorlevel=0` the members a filter refused
+/// were extracted all the same, and those after one could depend on it.
+/// Here one left out stays out, and what comes after is under a real directory.
+#[test]
+fn cve_2025_4435_what_is_skipped_stays_out() {
+    let data = tar(&[
+        E::Symlink(b"l", b"../outside"),
+        E::File(b"after.txt", b"after"),
+        E::File(b"../climbs.txt", b"out"),
+        E::HardLink(b"hard", b"l"),
+    ]);
+    let s = Scratch::new();
+    let inside = options(|o| {
+        o.links = Links::Inside;
+        o.on_refused = OnRefused::Skip;
+    });
+    let summary = extract(&data, &s.out(), &inside).unwrap();
+    assert_eq!(summary.skipped.len(), 3);
+    assert_eq!(std::fs::read(s.out().join("after.txt")).unwrap(), b"after");
+    assert!(std::fs::symlink_metadata(s.out().join("l")).is_err());
+    assert!(std::fs::symlink_metadata(s.out().join("hard")).is_err());
+    assert!(!s.path().join("climbs.txt").exists());
+    assert!(!s.path().join("outside").exists());
+}
