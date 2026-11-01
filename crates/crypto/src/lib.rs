@@ -97,6 +97,11 @@ mod aes_hw;
 mod blake2s;
 mod blake2sp;
 mod chacha20_ct;
+#[cfg(all(
+    feature = "unsafe-fast",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod chacha_hw;
 mod clear;
 mod ct;
 mod digest;
@@ -120,7 +125,8 @@ mod sha2small;
 mod sha_hw;
 
 /// Whether this build has the `unsafe-fast` feature: AES with the processor's
-/// instructions, and SHA-1 and SHA-256 too, where it has them. Cargo turns a feature on for the whole build
+/// instructions, SHA-1 and SHA-256 too, and ChaCha20 with its vector
+/// instructions, where it has them. Cargo turns a feature on for the whole build
 /// as soon as one crate asks for it, so a program can check which it got.
 pub const UNSAFE_FAST: bool = cfg!(feature = "unsafe-fast");
 

@@ -30,12 +30,33 @@ pub fn chacha20(
     for (word, bytes) in ivw.iter_mut().zip(iv.as_chunks().0) {
         *word = u32::from_le_bytes(*bytes);
     }
+    #[cfg(all(
+        feature = "unsafe-fast",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    let data = {
+        let mut input = [0u32; 16];
+        input[..4].copy_from_slice(&CW);
+        input[4..12].copy_from_slice(&kw);
+        input[13..].copy_from_slice(&ivw);
+        let rest = crate::chacha_hw::blocks(&input, &mut cc, data);
+        clear(&mut input);
+        rest
+    };
+    cc = one_block_at_a_time(&kw, &ivw, cc, data);
+    clear(&mut kw);
+    cc
+}
+
+/// The blocks of `data` one at a time, starting at block `cc`; the number of the
+/// block after the last one.
+fn one_block_at_a_time(kw: &[u32; 8], ivw: &[u32; 3], mut cc: u32, data: &mut [u8]) -> u32 {
     for buf in data.chunks_mut(64) {
         let mut state = [0u32; 16];
         state[..4].copy_from_slice(&CW);
-        state[4..12].copy_from_slice(&kw);
+        state[4..12].copy_from_slice(kw);
         state[12] = cc;
-        state[13..].copy_from_slice(&ivw);
+        state[13..].copy_from_slice(ivw);
 
         macro_rules! qround {
             ($a:expr, $b:expr, $c:expr, $d:expr) => {
@@ -91,6 +112,49 @@ pub fn chacha20(
         }
         cc = cc.wrapping_add(1);
     }
-    clear(&mut kw);
     cc
+}
+
+#[cfg(all(
+    test,
+    feature = "unsafe-fast",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod tests {
+    use super::*;
+
+    /// The instructions, where they run, against the code above: on either
+    /// side of a group, and with the counter wrapping inside one.
+    #[test]
+    fn instructions_same_as_code() {
+        let mut state = 0x0123_4567_89AB_CDEFu64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for len in (0..1400).step_by(7).chain([256, 512, 768, 1024, 4096]) {
+            for cc in [0, 1, u32::MAX - 2, u32::MAX] {
+                let mut key = [0u8; 32];
+                let mut iv = [0u8; 12];
+                key.fill_with(|| next() as u8);
+                iv.fill_with(|| next() as u8);
+                let mut a = vec![0u8; len];
+                a.fill_with(|| next() as u8);
+                let mut b = a.clone();
+                let got = chacha20(&key, &iv, cc, &mut a);
+                let mut kw = [0u32; 8];
+                let mut ivw = [0u32; 3];
+                for (word, bytes) in kw.iter_mut().zip(key.as_chunks().0) {
+                    *word = u32::from_le_bytes(*bytes);
+                }
+                for (word, bytes) in ivw.iter_mut().zip(iv.as_chunks().0) {
+                    *word = u32::from_le_bytes(*bytes);
+                }
+                assert_eq!(got, one_block_at_a_time(&kw, &ivw, cc, &mut b));
+                assert_eq!(a, b, "{len} bytes from block {cc}");
+            }
+        }
+    }
 }
