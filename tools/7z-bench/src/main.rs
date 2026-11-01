@@ -39,9 +39,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitCode, Stdio};
-use std::time::{Duration, Instant};
-
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use hivepack_7z::{Archive, Method, NewEntry, Options, WriteOptions, Writer};
 
