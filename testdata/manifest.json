@@ -403,6 +403,20 @@
       "kind": "tool"
     },
     {
+      "name": "rar-bench",
+      "path": "rar",
+      "source": "scripts/make_rar_testdata.py, with RARLAB's rar 7.20 and 6.24 in their trial versions, from this repository's files (see rar/README.md)",
+      "license": "The licenses of this repository's crates",
+      "kind": "vectors"
+    },
+    {
+      "name": "rar-bench-unrar",
+      "generate": { "group": "bench", "from": "unrar-7.3.2-source", "tool": "oracle", "sources": ["tools/rar-oracle/bench.cpp"] },
+      "source": "tools/rar-oracle/bench.cpp, built with the UnRAR 7.3.2 sources",
+      "license": "UnRAR",
+      "kind": "tool"
+    },
+    {
       "name": "libarchive-3.8.10-source",
       "fetch": { "group": "core", "files": [{ "url": "https://github.com/libarchive/libarchive/releases/download/v3.8.10/libarchive-3.8.10.tar.gz", "sha256": "a1bffbe5152cfe869751179e7b16648c87c461cb8c46eee75062efbe164cc57c", "unpack": "tar.gz" }] },
       "source": "https://github.com/libarchive/libarchive/releases/tag/v3.8.10",

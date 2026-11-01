@@ -228,6 +228,28 @@ jobs:
   # liblz4, and the xz decoders and encoders against liblzma, under
   # AddressSanitizer. A few minutes per target; longer runs are done by hand
   # (see fuzz/README.md).
+  # The arm64 instructions of the `unsafe-fast` feature against the safe code,
+  # which the job below does on x86-64.
+  fuzz-arm:
+    name: Fuzz (unsafe-fast, arm64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Rust (nightly)
+        run: |
+          rustup toolchain install "$NIGHTLY" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$NIGHTLY" >> "$GITHUB_ENV"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - run: cargo fuzz run --target aarch64-unknown-linux-gnu --features unsafe-fast hw_crypto -- -max_total_time=120 -rss_limit_mb=4096
+
   fuzz:
     name: Fuzz (unsafe-fast)
     runs-on: ubuntu-latest

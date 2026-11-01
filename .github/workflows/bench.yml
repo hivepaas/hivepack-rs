@@ -9,13 +9,13 @@ on:
   workflow_dispatch:
     inputs:
       formats:
-        description: "Comma-separated, or all: tar, age, deflate, bzip2, lz4, xz, zstd, zip, 7z"
+        description: "Comma-separated, or all: tar, age, deflate, bzip2, lz4, xz, zstd, zip, 7z, rar"
         default: all
       machines:
         description: "Comma-separated, or all: ubuntu-latest, windows-latest, macos-latest"
         default: all
       features:
-        description: "cargo features for the tool, such as hivepack-zstd/unsafe-fast"
+        description: "cargo features for the tool, such as unsafe-fast"
         default: ""
 
 permissions:

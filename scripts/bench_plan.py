@@ -35,6 +35,8 @@ FORMATS = {
              "runs": [f"--levels 1,3,9,19 {SILESIA}"]},
     "zip": {"sets": ["silesia", "zip-bench-libzip"], "go": False, "machines": ALL,
             "package": "zip-bench", "runs": [""]},
+    "rar": {"sets": ["rar-bench-unrar"],
+            "go": False, "machines": ALL, "package": "rar-bench", "runs": [""]},
     "7z": {"sets": ["silesia", "7zz", "7z-bench-sdk"], "go": False, "machines": ALL,
            "package": "sevenz-bench", "runs": [""]},
 }

@@ -10,6 +10,9 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+unsafe-fast = ["hivepack-deflate/unsafe-fast"]
+
 [dependencies]
 hivepack-deflate.workspace = true
 libz-sys.workspace = true
