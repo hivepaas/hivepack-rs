@@ -9,9 +9,11 @@ on:
 permissions:
   contents: read
 
+# A push to a pull request replaces its run. A run on main goes to its end, or a
+# merge soon after another would leave main without a whole run.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
