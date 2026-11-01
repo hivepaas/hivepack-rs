@@ -42,6 +42,8 @@ In safe Rust, against BearSSL 0.6, built with `gcc -O2`, and Go 1.27.2's `golang
 
 **Measured on:** AMD Ryzen 9 9950X (x86-64, Linux), in October 2026, 64 MiB at a time. More is in [docs/crypto.md](../../docs/crypto.md#speed).
 
+**With the `unsafe-fast` feature**, off by default: AES, SHA-1, SHA-256 and ChaCha20 with the processor's instructions. See [docs/unsafe.md](../../docs/unsafe.md#the-processors-instructions).
+
 ## License
 
 The MIT license, the license of the code it is ported from. See [LICENSE](LICENSE). Copyright (c) 2016 Thomas Pornin, and (c) 2026 HivePaaS.

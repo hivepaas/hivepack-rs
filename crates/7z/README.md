@@ -88,6 +88,8 @@ Against the LZMA SDK 26.05 and `7zz`, each row the mean and the range over its f
 
 **Measured on** `.github/workflows/bench.yml`, on October 31 and November 1, 2026, with rustc 1.99.1: Linux x86-64 on AMD EPYC 9V74 80-Core Processor (4 threads); Windows x86-64 on Intel64 Family 6 Model 106 Stepping 6 (4 threads); macOS arm64 on Apple M2 Pro (Virtual) (5 threads). Each job gets what the runner has that day, so these are not the same processor from format to format, and they are shared machines: the ratios hold better than the speeds. The rows of writing are in the job's output, not here.
 
+**With the `unsafe-fast` feature**, off by default: AES-256 at 0.70–0.81× with Copy on GitHub's runners. See [docs/unsafe.md](../../docs/unsafe.md#the-processors-instructions).
+
 ## License
 
 MIT, as hivepack is. The code it is ported from, the LZMA SDK's C files, is in the public domain, by Igor Pavlov, and PPMd var.H by Dmitry Shkarin. See [LICENSE](../../LICENSE). Copyright (c) 2026 HivePaaS.
