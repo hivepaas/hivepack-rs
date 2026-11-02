@@ -1,6 +1,6 @@
 # Porting age
 
-`hivepack-age` decrypts and encrypts files of [age](https://age-encryption.org), the encryption tool and format by Filippo Valsorda, in safe Rust. age files are often archives: `tar | zstd | age > backup.tar.zst.age`. An application reads the decrypted stream as it would read the file underneath.
+`hivepack-age` decrypts and encrypts files of [age](https://age-encryption.org), the encryption tool and format by Filippo Valsorda, in safe Rust, with its cryptography from `hivepack-crypto`. age files are often archives: `tar | zstd | age > backup.tar.zst.age`. An application reads the decrypted stream as it would read the file underneath.
 
 ## The source
 
@@ -30,9 +30,9 @@ Each Go file ported is a module, its functions keep their names in snake case, a
 | `decrypt` in `cmd/age/age.go` | `lib.rs` (`decrypt_file`) | what `age --decrypt` does first: armor told apart from a binary file by its first line, after up to 1 KiB of white space; files whose intro PowerShell's redirection mangled refused |
 | Go's `encoding/base64`, `Strict()` | `base64.rs` | strict base64, without padding in headers and with it in the armor |
 
-The cryptography is `hivepack-crypto`'s ([crypto.md](crypto.md)): SHA-256, SHA-512, HKDF-SHA256, HMAC-SHA256, ChaCha20-Poly1305, X25519, scrypt and AES, ported from BearSSL or written from their RFCs, in place of Go's standard library and `golang.org/x/crypto`. MACs and tags are compared in constant time. Blowfish and bcrypt_pbkdf, which only SSH keys need, are ported from `golang.org/x/crypto` into this crate. Blowfish looks its S-boxes up with the data, so its time depends on the passphrase, as bcrypt is defined; it runs once, when a key is decrypted. 16 rounds, `ssh-keygen`'s default, take 72 ms, as long as Go takes (Ryzen 9 9950X).
+The cryptography is `hivepack-crypto`'s ([crypto.md](crypto.md)): SHA-256, SHA-512, HKDF-SHA256, HMAC-SHA256, ChaCha20-Poly1305, X25519, scrypt and AES, from RustCrypto's crates and `curve25519-dalek`, in place of Go's standard library and `golang.org/x/crypto`. MACs and tags are compared in constant time. Blowfish and bcrypt_pbkdf, which only SSH keys need, are ported from `golang.org/x/crypto` into this crate. Blowfish looks its S-boxes up with the data, so its time depends on the passphrase, as bcrypt is defined; it runs once, when a key is decrypted. 16 rounds, `ssh-keygen`'s default, take 72 ms, as long as Go takes (Ryzen 9 9950X).
 
-To decrypt, no Edwards arithmetic is needed: age turns an Ed25519 private key into an X25519 one with the SHA-512 of its seed, and the X25519 public key is computed from that. To encrypt to a public key, and to read one that protects a private key, `hivepack-crypto` checks that it is a point of the curve and maps it to X25519 ([crypto.md](crypto.md)).
+To decrypt, no Edwards arithmetic is needed: age turns an Ed25519 private key into an X25519 one with the SHA-512 of its seed, and the X25519 public key is computed from that. To encrypt to a public key, and to read one that protects a private key, `curve25519-dalek` checks that it is a point of the curve and maps it to X25519 ([crypto.md](crypto.md)).
 
 ## What differs
 
@@ -95,7 +95,7 @@ AMD Ryzen 9 9950X (16 cores, x86-64), 45 GiB of memory, Ubuntu 26.04 with Linux 
 
 With the `unsafe-fast` feature, a big file is written at 1,715 MB/s (0.51×), and in ASCII armor at 1,091 MB/s (0.95×), three rounds. Files written go to a writer that only counts, and the port's random bytes come from `getrandom`.
 
-The big file's gap is ChaCha20-Poly1305, which Go runs in AVX2 assembly and the port in constant-time safe Rust ([crypto.md](crypto.md#speed)). ASCII armor went from 0.27× to 1.29×: a full line of 64 columns already in the reader's buffer is now decoded in place, with a table, where each line was two allocations and a `match` on each character. Anything else about a line goes the old way, with nothing consumed, so that errors stay as they were. The armor row was measured after that work, the others before it, which does not touch them. Parsing keys is X25519, for each key's public half. The rows with X25519 went from 0.72–0.92× to 2.02–2.35× with 51-bit words on 64-bit machines, measured after that work. Other work started on the machine towards the end of the run, though the best of the rounds should hide most of it.
+The big file's gap is ChaCha20-Poly1305, which Go runs in one AVX2 assembly routine for both. ASCII armor went from 0.27× to 1.29×: a full line of 64 columns already in the reader's buffer is now decoded in place, with a table, where each line was two allocations and a `match` on each character. Anything else about a line goes the old way, with nothing consumed, so that errors stay as they were. The armor row was measured after that work, the others before it, which does not touch them. Parsing keys is X25519, for each key's public half. The rows with X25519 went from 0.72–0.92× to 2.02–2.35× with 51-bit words on 64-bit machines, measured after that work. Other work started on the machine towards the end of the run, though the best of the rounds should hide most of it.
 
 ## How it is shown
 
@@ -111,7 +111,7 @@ A new release of age is compared with the port's files, and its changes to them 
 
 ## Next
 
-`ssh-rsa`, with RSA-OAEP from BearSSL; `aes256-cbc` keys, with AES decryption; the post-quantum recipients, once ML-KEM is ported; encrypting.
+`ssh-rsa`, with RSA-OAEP from BearSSL; `aes256-cbc` keys, with AES decryption; the post-quantum recipients, once ML-KEM is ported.
 
 ## Licenses
 

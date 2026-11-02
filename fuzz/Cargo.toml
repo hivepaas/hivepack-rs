@@ -17,7 +17,6 @@ unsafe-fast = [
     "hivepack-zstd/unsafe-fast",
     "hivepack-lz4/unsafe-fast",
     "hivepack-deflate/unsafe-fast",
-    "hivepack-crypto/unsafe-fast",
 ]
 
 [dependencies]
@@ -190,8 +189,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "hw_crypto"
-path = "fuzz_targets/hw_crypto.rs"
+name = "hw_crc"
+path = "fuzz_targets/hw_crc.rs"
 test = false
 doc = false
 bench = false

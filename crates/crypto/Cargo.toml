@@ -1,10 +1,10 @@
 [package]
 name = "hivepack-crypto"
 version = "0.0.0"
-description = "The cryptography of ZIP encryption and age, in safe Rust, ported from BearSSL"
+description = "The cryptography of hivepack's formats, behind one small interface, from crates many others depend on"
 license = "MIT"
 readme = "README.md"
-keywords = ["aes", "chacha20", "x25519", "scrypt", "bearssl"]
+keywords = ["aes", "chacha20", "x25519", "scrypt"]
 categories = ["cryptography"]
 # Nothing to publish yet.
 publish = false
@@ -14,25 +14,21 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
-[features]
-# AES, SHA-1, SHA-256 and ChaCha20 with the processor's instructions, on x86-64
-# and arm64: faster, at the cost of some `unsafe` code, in `src/aes_hw.rs`,
-# `src/sha_hw.rs` and `src/chacha_hw.rs`. Off by default: without it
-# the crate has no unsafe code at all. See docs/unsafe.md.
-unsafe-fast = []
+[lints]
+workspace = true
 
-# The workspace's lints, but `unsafe_code` is `deny` rather than `forbid`, so
-# that the `unsafe-fast` feature's code can allow it. Without the
-# feature, lib.rs forbids it again.
-[lints.rust]
-unsafe_code = "deny"
-# `cargo fuzz` builds with `--cfg fuzzing`.
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
-
-[lints.clippy]
-unwrap_used = "deny"
-expect_used = "deny"
-panic = "deny"
-todo = "deny"
-unimplemented = "deny"
-dbg_macro = "deny"
+[dependencies]
+# The cryptography itself, in crates many others depend on. Their `unsafe` code
+# stays in them: see docs/safety.md and docs/crypto.md.
+aes = { version = "0.9", features = ["zeroize"] }
+blake2s_simd = "1"
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["zeroize"] }
+curve25519-dalek = { version = "5", default-features = false, features = ["precomputed-tables", "zeroize"] }
+hkdf = "0.13"
+hmac = "0.13"
+md-5 = { version = "0.11", default-features = false }
+pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
+scrypt = { version = "0.12", default-features = false }
+sha1 = { version = "0.11", default-features = false }
+sha2 = { version = "0.11", default-features = false }
+subtle = { version = "2", default-features = false }

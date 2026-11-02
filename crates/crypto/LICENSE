@@ -1,16 +1,6 @@
-hivepack-crypto is a port of BearSSL (https://bearssl.org) to Rust and is
-distributed under the license of the code it is derived from, below. The C
-source has been translated to Rust, and the changes are marked in the source
-with comments that start with "Differs from BearSSL:".
+MIT License
 
-Its BLAKE2s and BLAKE2sp (src/blake2s.rs, src/blake2sp.rs) are ported instead
-from the BLAKE2 reference implementation, Copyright 2012 Samuel Neves, which
-may be used under the CC0 1.0, the OpenSSL license or the Apache License 2.0,
-here CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/).
-
-Copyright (c) 2026 HivePaaS.
-
-Copyright (c) 2016 Thomas Pornin <pornin@bolet.org>
+Copyright (c) 2026 HivePaaS
 
 Permission is hereby granted, free of charge, to any person obtaining
 a copy of this software and associated documentation files (the

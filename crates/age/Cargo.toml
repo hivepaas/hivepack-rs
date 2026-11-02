@@ -14,16 +14,12 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
-[features]
-# Faster SHA-256 and ChaCha20 from hivepack-crypto. See docs/unsafe.md.
-unsafe-fast = ["hivepack-crypto/unsafe-fast"]
-
 [lints]
 workspace = true
 
 [dependencies]
-# SHA-256, HMAC, HKDF, ChaCha20-Poly1305, X25519 and scrypt, ported from
-# BearSSL, in place of Go's standard library and golang.org/x/crypto.
+# SHA-256, HMAC, HKDF, ChaCha20-Poly1305, X25519 and scrypt, in place of Go's
+# standard library and golang.org/x/crypto.
 hivepack-crypto.workspace = true
 
 [dev-dependencies]

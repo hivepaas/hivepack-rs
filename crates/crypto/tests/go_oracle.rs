@@ -27,8 +27,8 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use hivepack_crypto::{
-    Blake2s, Digest, Hkdf, Hmac, HmacKey, Sha256, Sha512, chacha20, chacha20_poly1305, equal,
-    pbkdf2, scrypt, x25519,
+    Blake2s, Digest, Hmac, HmacKey, Sha256, Sha512, chacha20_poly1305_open, chacha20_poly1305_seal,
+    hkdf, pbkdf2, scrypt, x25519,
 };
 use support::{Oracle, Rng, hex, repository, unhex};
 
@@ -101,39 +101,15 @@ fn answer(request: &str, rng: &mut Rng) -> String {
         }
         ["hkdf", salt, ikm, info, length] => {
             let salt = (salt != "none").then(|| unhex(salt));
-            let mut extract = Hkdf::<Sha256>::new(salt.as_deref());
-            for piece in pieces(rng, &unhex(ikm)) {
-                extract.inject(piece);
-            }
-            let mut expand = extract.flip();
-            let info = unhex(info);
             let mut out = vec![0; length.parse().unwrap()];
-            let mut produced = 0;
-            let mut rest = &mut out[..];
-            while !rest.is_empty() {
-                let n = (1 + rng.below(100) as usize).min(rest.len());
-                let (piece, tail) = rest.split_at_mut(n);
-                produced += expand.produce(&info, piece);
-                rest = tail;
-            }
-            if produced < out.len() {
+            if !hkdf::<Sha256>(salt.as_deref(), &unhex(ikm), &unhex(info), &mut out) {
                 return "err".into();
             }
             ok(&out)
         }
-        ["chacha20", key, nonce, counter, data] => {
-            let mut data = unhex(data);
-            chacha20(
-                &array(key),
-                &array(nonce),
-                counter.parse().unwrap(),
-                &mut data,
-            );
-            ok(&data)
-        }
         ["seal", key, nonce, aad, data] => {
             let mut data = unhex(data);
-            let tag = chacha20_poly1305(&array(key), &array(nonce), &mut data, &unhex(aad), true);
+            let tag = chacha20_poly1305_seal(&array(key), &array(nonce), &mut data, &unhex(aad));
             data.extend_from_slice(&tag);
             ok(&data)
         }
@@ -142,10 +118,8 @@ fn answer(request: &str, rng: &mut Rng) -> String {
             let Some(at) = data.len().checked_sub(16) else {
                 return "err".into();
             };
-            let tag = data.split_off(at);
-            let computed =
-                chacha20_poly1305(&array(key), &array(nonce), &mut data, &unhex(aad), false);
-            if !equal(&computed, &tag) {
+            let tag: [u8; 16] = data.split_off(at).try_into().unwrap();
+            if !chacha20_poly1305_open(&array(key), &array(nonce), &mut data, &unhex(aad), &tag) {
                 return "err".into();
             }
             ok(&data)
@@ -327,22 +301,6 @@ fn requests(rng: &mut Rng, count: usize, max: usize) -> Vec<String> {
             hex(&bytes(rng, info_len))
         ));
 
-        // Go stops at the end of the counter; BearSSL goes round. Both
-        // agree before it.
-        let len = length(rng, 64, max);
-        let blocks = len.div_ceil(64).max(1) as u64;
-        let counter = if rng.below(4) == 0 {
-            u64::from(u32::MAX) + 1 - blocks
-        } else {
-            rng.below(1 << 32) % (u64::from(u32::MAX) + 1 - blocks)
-        };
-        requests.push(format!(
-            "chacha20 {} {} {counter} {}",
-            hex(&bytes(rng, 32)),
-            hex(&bytes(rng, 12)),
-            hex(&bytes(rng, len))
-        ));
-
         let key = hex(&bytes(rng, 32));
         let nonce = hex(&bytes(rng, 12));
         let aad_len = rng.pick(&[0, 0, 1, 15, 16, 17, 40]);
@@ -353,13 +311,7 @@ fn requests(rng: &mut Rng, count: usize, max: usize) -> Vec<String> {
         // Something sealed with the key, as it is or with a bit changed,
         // or anything at all.
         let mut sealed = data;
-        let tag = chacha20_poly1305(
-            &array(&key),
-            &array(&nonce),
-            &mut sealed,
-            &unhex(&aad),
-            true,
-        );
+        let tag = chacha20_poly1305_seal(&array(&key), &array(&nonce), &mut sealed, &unhex(&aad));
         sealed.extend_from_slice(&tag);
         match rng.below(4) {
             0 => {

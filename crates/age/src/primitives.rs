@@ -2,7 +2,10 @@
 //! `primitives.go`, on hivepack-crypto in place of
 //! `golang.org/x/crypto`.
 
-use hivepack_crypto::{Hkdf, Hmac, HmacKey, POLY1305_TAG_LENGTH, Sha256, chacha20_poly1305, equal};
+use hivepack_crypto::{
+    Hmac, HmacKey, POLY1305_TAG_LENGTH, Sha256, chacha20_poly1305_open, chacha20_poly1305_seal,
+    hkdf,
+};
 
 use crate::format::Header;
 
@@ -19,7 +22,7 @@ pub(crate) enum AeadError {
 /// safe as each key wraps one file key only.
 pub(crate) fn aead_encrypt(key: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {
     let mut sealed = plaintext.to_vec();
-    let tag = chacha20_poly1305(key, &[0; 12], &mut sealed, &[], true);
+    let tag = chacha20_poly1305_seal(key, &[0; 12], &mut sealed, &[]);
     sealed.extend_from_slice(&tag);
     sealed
 }
@@ -36,10 +39,9 @@ pub(crate) fn aead_decrypt(
         return Err(AeadError::Size);
     }
     let (data, tag) = ciphertext.split_at(size);
+    let tag: &[u8; POLY1305_TAG_LENGTH] = tag.try_into().map_err(|_| AeadError::Size)?;
     let mut plaintext = data.to_vec();
-    let computed = chacha20_poly1305(key, &[0; 12], &mut plaintext, &[], false);
-    if !equal(&computed, tag) {
-        plaintext.fill(0);
+    if !chacha20_poly1305_open(key, &[0; 12], &mut plaintext, &[], tag) {
         return Err(AeadError::Tag);
     }
     Ok(plaintext)
@@ -48,10 +50,9 @@ pub(crate) fn aead_decrypt(
 /// HKDF-SHA256 of `ikm` with `salt` and `info`, 32 bytes of it, as age
 /// derives every key.
 pub(crate) fn hkdf_32(ikm: &[u8], salt: Option<&[u8]>, info: &[u8]) -> [u8; 32] {
-    let mut h = Hkdf::<Sha256>::new(salt);
-    h.inject(ikm);
     let mut out = [0; 32];
-    h.flip().produce(info, &mut out);
+    // 32 bytes are within what HKDF gives.
+    hkdf::<Sha256>(salt, ikm, info, &mut out);
     out
 }
 

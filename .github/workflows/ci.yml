@@ -36,11 +36,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo clippy --workspace --all-targets --locked --features hivepack-zstd/unsafe-fast,hivepack-lz4/unsafe-fast,hivepack-deflate/unsafe-fast,hivepack-crypto/unsafe-fast,hivepack-extract/rar -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked --features hivepack-zstd/unsafe-fast,hivepack-lz4/unsafe-fast,hivepack-deflate/unsafe-fast,hivepack-extract/rar -- -D warnings
       - run: cargo doc --workspace --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
-      - run: cargo doc --workspace --no-deps --locked --features hivepack-zstd/unsafe-fast,hivepack-lz4/unsafe-fast,hivepack-deflate/unsafe-fast,hivepack-crypto/unsafe-fast,hivepack-extract/rar
+      - run: cargo doc --workspace --no-deps --locked --features hivepack-zstd/unsafe-fast,hivepack-lz4/unsafe-fast,hivepack-deflate/unsafe-fast,hivepack-extract/rar
         env:
           RUSTDOCFLAGS: -D warnings
       - run: python3 -m py_compile scripts/testdata.py
@@ -68,7 +68,6 @@ jobs:
       - run: cargo check -p hivepack-crypto --lib --locked
       - run: cargo check -p hivepack-deflate --lib --locked
       - run: cargo check -p hivepack-deflate --lib --locked --features unsafe-fast
-      - run: cargo check -p hivepack-crypto --lib --locked --features unsafe-fast
       - run: cargo check -p hivepack-extract --lib --locked
       - run: cargo check -p hivepack-iso --lib --locked
       - run: cargo check -p hivepack-lz4 --lib --locked
@@ -156,8 +155,6 @@ jobs:
         run: cargo test -p hivepack-lz4 --locked --features unsafe-fast
       - if: matrix.unsafe-fast
         run: cargo test -p hivepack-deflate --locked --features unsafe-fast
-      - if: matrix.unsafe-fast
-        run: cargo test -p hivepack-crypto --locked --features unsafe-fast
 
   cross:
     name: Test (${{ matrix.target }})
@@ -250,7 +247,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fuzz
-      - run: cargo fuzz run --target aarch64-unknown-linux-gnu --features unsafe-fast hw_crypto -- -max_total_time=120 -rss_limit_mb=4096
+      - run: cargo fuzz run --target aarch64-unknown-linux-gnu --features unsafe-fast hw_crc -- -max_total_time=120 -rss_limit_mb=4096
 
   fuzz:
     name: Fuzz (unsafe-fast)
@@ -523,7 +520,7 @@ jobs:
       # With the `unsafe-fast` feature: the decoder's unchecked fast loop.
       - run: cargo fuzz run --target x86_64-unknown-linux-gnu --features unsafe-fast lz4 -- -max_total_time=60 -rss_limit_mb=4096
       # The processor's instructions against the safe code.
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu --features unsafe-fast hw_crypto -- -max_total_time=120 -rss_limit_mb=4096
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu --features unsafe-fast hw_crc -- -max_total_time=120 -rss_limit_mb=4096
       - name: Seed the 7z corpus
         run: |
           mkdir -p fuzz/corpus/sevenz

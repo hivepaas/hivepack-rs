@@ -29,8 +29,8 @@
 //!   `age -R` take, [`identities_to_recipients`] what encrypts to the keys of
 //!   `age -i`, and [`X25519Identity::generate`] makes a key, as `age-keygen`.
 //!
-//! The cryptography is hivepack-crypto's, ported from BearSSL, in place of
-//! Go's `golang.org/x/crypto`. SSH RSA keys, post-quantum keys and plugins
+//! The cryptography is hivepack-crypto's, in place of Go's
+//! `golang.org/x/crypto`. SSH RSA keys, post-quantum keys and plugins
 //! are not ported yet. How the port follows age, and how it is
 //! checked, is in the repository: `docs/age.md`.
 //!
