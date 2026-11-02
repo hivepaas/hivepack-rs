@@ -114,5 +114,13 @@ opt-level = 3
 [profile.dev.package.hivepack-iso]
 opt-level = 3
 
+# scrypt's work is the same at any level of the tests: age's and signing's key
+# files take seconds with this, and minutes under emulation without it.
+[profile.dev.package.scrypt]
+opt-level = 3
+
+[profile.dev.package.salsa20]
+opt-level = 3
+
 [profile.release]
 debug = "line-tables-only"

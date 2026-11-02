@@ -1,6 +1,8 @@
 //! Signing files with SSH Ed25519 keys, in the format of `ssh-keygen -Y sign`
 //! (OpenSSH's `PROTOCOL.sshsig`), so that `ssh-keygen -Y verify` checks what this
-//! crate signs and this crate checks what it signs.
+//! crate signs and this crate checks what it signs; or with hybrid keys of
+//! Ed25519 and ML-DSA-65 ([`PrivateKey::generate_hybrid`]), in the same frame, which
+//! only this crate checks and which a quantum computer alone does not forge.
 //!
 //! A signature covers every byte of a file, whatever the file is, and is kept
 //! beside it, as `<file>.sig`. The rules, and why each is there, are in the

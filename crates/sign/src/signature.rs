@@ -3,12 +3,13 @@
 use std::io::{self, Read};
 
 use hivepack_crypto::{
-    ED25519_PUBLIC_LENGTH, ED25519_SIGNATURE_LENGTH, Sha256, Sha512, ed25519_sign, ed25519_verify,
+    ED25519_SIGNATURE_LENGTH, MLDSA65_SIGNATURE_LENGTH, Sha256, Sha512, ed25519_sign,
+    ed25519_verify, mldsa65_sign, mldsa65_verify,
 };
 
 use crate::base64;
 use crate::error::Error;
-use crate::key::{KEY_TYPE, PrivateKey, PublicKey, put_string};
+use crate::key::{HYBRID_TYPE, PrivateKey, PrivateKind, PublicKey, PublicKind, put_string};
 
 /// The namespace for signing files, as `PROTOCOL.sshsig` suggests. A signature for
 /// one namespace does not pass for another, so that a key's signatures for one use
@@ -16,6 +17,10 @@ use crate::key::{KEY_TYPE, PrivateKey, PublicKey, put_string};
 pub const FILE_NAMESPACE: &str = "file";
 
 const MAGIC: &[u8; 6] = b"SSHSIG";
+/// What a hybrid signature's signed data starts with in place of [`MAGIC`], so that
+/// neither half can be taken for a signature of another kind: its Ed25519 half for
+/// `ssh-keygen`'s, by a key that also signs that way.
+const HYBRID_MAGIC: &[u8] = b"hivepack-hybrid-signature-v1";
 const VERSION: u32 = 1;
 const BEGIN: &[u8] = b"-----BEGIN SSH SIGNATURE-----";
 const END: &[u8] = b"-----END SSH SIGNATURE-----";
@@ -70,14 +75,30 @@ pub struct Signature {
     public: PublicKey,
     namespace: String,
     hash: HashAlgorithm,
-    signature: [u8; ED25519_SIGNATURE_LENGTH],
+    signature: Bytes,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Bytes {
+    Ed25519([u8; ED25519_SIGNATURE_LENGTH]),
+    Hybrid {
+        ed25519: [u8; ED25519_SIGNATURE_LENGTH],
+        mldsa: Box<[u8; MLDSA65_SIGNATURE_LENGTH]>,
+    },
 }
 
 /// What is signed: never the file itself, so that a signature cannot be taken for
-/// one over something else the key signs.
-fn signed_data(namespace: &str, hash: HashAlgorithm, digest: &[u8]) -> Vec<u8> {
+/// one over something else the key signs. A hybrid key's also names the key, both
+/// halves of it, so that neither half of its signature can stand for another key.
+fn signed_data(public: &PublicKey, namespace: &str, hash: HashAlgorithm, digest: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(32 + namespace.len() + digest.len());
-    out.extend_from_slice(MAGIC);
+    match public.0 {
+        PublicKind::Ed25519(_) => out.extend_from_slice(MAGIC),
+        PublicKind::Hybrid { .. } => {
+            out.extend_from_slice(HYBRID_MAGIC);
+            put_string(&mut out, &public.blob());
+        }
+    }
     put_string(&mut out, namespace.as_bytes());
     // `reserved`, empty when signing and when checking, whatever the file says.
     put_string(&mut out, b"");
@@ -99,9 +120,18 @@ pub fn sign<R: Read>(key: &PrivateKey, namespace: &str, data: R) -> Result<Signa
     check_namespace(namespace)?;
     let hash = HashAlgorithm::Sha512;
     let digest = hash.hash(data).map_err(Error::Io)?;
-    let signature = ed25519_sign(&key.seed, &signed_data(namespace, hash, &digest));
+    let signed = signed_data(key.public(), namespace, hash, &digest);
+    let signature = match &key.kind {
+        PrivateKind::Ed25519(seed) => Bytes::Ed25519(ed25519_sign(seed, &signed)),
+        PrivateKind::Hybrid { ed25519, mldsa } => Bytes::Hybrid {
+            ed25519: ed25519_sign(ed25519, &signed),
+            mldsa: Box::new(
+                mldsa65_sign(mldsa, &signed, HYBRID_TYPE.as_bytes()).ok_or(Error::BadNamespace)?,
+            ),
+        },
+    };
     Ok(Signature {
-        public: *key.public(),
+        public: key.public().clone(),
         namespace: namespace.to_owned(),
         hash,
         signature,
@@ -129,8 +159,23 @@ pub fn verify<R: Read>(
         return Err(Error::WrongKey);
     }
     let digest = signature.hash.hash(data).map_err(Error::Io)?;
-    let signed = signed_data(namespace, signature.hash, &digest);
-    if ed25519_verify(trusted.as_bytes(), &signed, &signature.signature) {
+    let signed = signed_data(trusted, namespace, signature.hash, &digest);
+    let holds = match (&trusted.0, &signature.signature) {
+        (PublicKind::Ed25519(key), Bytes::Ed25519(bytes)) => ed25519_verify(key, &signed, bytes),
+        // Both, or a break of one would be enough.
+        (
+            PublicKind::Hybrid { ed25519, mldsa },
+            Bytes::Hybrid {
+                ed25519: ed25519_bytes,
+                mldsa: mldsa_bytes,
+            },
+        ) => {
+            ed25519_verify(ed25519, &signed, ed25519_bytes)
+                && mldsa65_verify(mldsa, &signed, HYBRID_TYPE.as_bytes(), mldsa_bytes)
+        }
+        _ => false,
+    };
+    if holds {
         Ok(())
     } else {
         Err(Error::BadSignature)
@@ -138,7 +183,7 @@ pub fn verify<R: Read>(
 }
 
 /// Reading the wire format.
-struct Wire<'a>(&'a [u8]);
+pub(crate) struct Wire<'a>(pub(crate) &'a [u8]);
 
 impl<'a> Wire<'a> {
     fn take(&mut self, length: usize, why: &'static str) -> Result<&'a [u8], Error> {
@@ -155,12 +200,23 @@ impl<'a> Wire<'a> {
         Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 
-    fn string(&mut self, why: &'static str) -> Result<&'a [u8], Error> {
+    pub(crate) fn string(&mut self, why: &'static str) -> Result<&'a [u8], Error> {
         let length = self.u32(why)?;
         self.take(length as usize, why)
     }
 
-    fn end(&self) -> Result<(), Error> {
+    /// A string of exactly `N` bytes.
+    pub(crate) fn array<const N: usize>(
+        &mut self,
+        why: &'static str,
+        size: &'static str,
+    ) -> Result<[u8; N], Error> {
+        self.string(why)?
+            .try_into()
+            .map_err(|_| Error::Malformed(size))
+    }
+
+    pub(crate) fn end(&self) -> Result<(), Error> {
         if self.0.is_empty() {
             Ok(())
         } else {
@@ -197,18 +253,7 @@ impl Signature {
             return Err(Error::UnsupportedVersion(version));
         }
 
-        let mut key = Wire(wire.string("no public key")?);
-        let kind = key.string("no key type")?;
-        if kind != KEY_TYPE.as_bytes() {
-            return Err(Error::UnsupportedKey(
-                String::from_utf8_lossy(kind).into_owned(),
-            ));
-        }
-        let public: [u8; ED25519_PUBLIC_LENGTH] = key
-            .string("no key")?
-            .try_into()
-            .map_err(|_| Error::Malformed("a key of the wrong size"))?;
-        key.end()?;
+        let public = PublicKey::from_blob(wire.string("no public key")?)?;
 
         let namespace = wire.string("no namespace")?;
         let namespace = std::str::from_utf8(namespace)
@@ -229,22 +274,31 @@ impl Signature {
             }
         };
 
+        // Hybrid signatures have no past to read: one hash, one form.
+        if hash != HashAlgorithm::Sha512 && matches!(public.0, PublicKind::Hybrid { .. }) {
+            return Err(Error::UnsupportedHash(hash.name().to_owned()));
+        }
+
         let mut inner = Wire(wire.string("no signature")?);
         wire.end()?;
         let kind = inner.string("no signature type")?;
-        if kind != KEY_TYPE.as_bytes() {
+        if kind != public.key_type().as_bytes() {
             return Err(Error::UnsupportedKey(
                 String::from_utf8_lossy(kind).into_owned(),
             ));
         }
-        let signature: [u8; ED25519_SIGNATURE_LENGTH] = inner
-            .string("no signature bytes")?
-            .try_into()
-            .map_err(|_| Error::Malformed("a signature of the wrong size"))?;
+        let size = "a signature of the wrong size";
+        let signature = match public.0 {
+            PublicKind::Ed25519(_) => Bytes::Ed25519(inner.array("no signature bytes", size)?),
+            PublicKind::Hybrid { .. } => Bytes::Hybrid {
+                ed25519: inner.array("no signature bytes", size)?,
+                mldsa: Box::new(inner.array("no signature bytes", size)?),
+            },
+        };
         inner.end()?;
 
         Ok(Signature {
-            public: PublicKey(public),
+            public,
             namespace: namespace.to_owned(),
             hash,
             signature,
@@ -254,8 +308,14 @@ impl Signature {
     /// In the binary form its armor holds.
     pub fn to_blob(&self) -> Vec<u8> {
         let mut inner = Vec::with_capacity(83);
-        put_string(&mut inner, KEY_TYPE.as_bytes());
-        put_string(&mut inner, &self.signature);
+        put_string(&mut inner, self.public.key_type().as_bytes());
+        match &self.signature {
+            Bytes::Ed25519(bytes) => put_string(&mut inner, bytes),
+            Bytes::Hybrid { ed25519, mldsa } => {
+                put_string(&mut inner, ed25519);
+                put_string(&mut inner, &mldsa[..]);
+            }
+        }
         let mut out = Vec::with_capacity(160 + self.namespace.len());
         out.extend_from_slice(MAGIC);
         out.extend_from_slice(&VERSION.to_be_bytes());
@@ -267,7 +327,7 @@ impl Signature {
         out
     }
 
-    /// In armor, as `ssh-keygen -Y sign` writes it, byte for byte.
+    /// In armor, as `ssh-keygen -Y sign` writes it, byte for byte, for an Ed25519 key.
     pub fn to_armored(&self) -> String {
         let text = base64::encode(&self.to_blob());
         let mut out = String::with_capacity(text.len() + 80);

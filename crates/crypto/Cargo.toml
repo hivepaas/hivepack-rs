@@ -29,6 +29,9 @@ hkdf = "0.13"
 # X-Wing under HPKE, age's post-quantum keys. Not independently audited: see
 # docs/crypto.md.
 hpke = { version = "0.15", default-features = false, features = ["alloc", "mlkem", "x25519", "chacha"] }
+# ML-DSA, signatures that hold against a quantum computer. Not independently
+# audited: see docs/crypto.md.
+ml-dsa = { version = "0.1", default-features = false, features = ["alloc", "zeroize"] }
 rand_core = { version = "0.10", default-features = false }
 hmac = "0.13"
 md-5 = { version = "0.11", default-features = false }
