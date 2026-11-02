@@ -1,5 +1,5 @@
 //! CRC-32 with the processor's instructions, the `unsafe-fast` feature of
-//! hivepack-deflate, against the safe code: a difference is a bug, and the
+//! hivepack::deflate, against the safe code: a difference is a bug, and the
 //! sanitizer takes any read or write out of bounds.
 //!
 //! Without the feature both sides are the safe code. Run it with
@@ -18,7 +18,7 @@ fuzz_target!(|data: &[u8]| {
     bytes[..start.len()].copy_from_slice(start);
     let start = u32::from_le_bytes(bytes);
     assert_eq!(
-        hivepack_deflate::crc32(start, data),
-        hivepack_deflate::fuzz_crc32_braided(start, data)
+        hivepack::deflate::crc32(start, data),
+        hivepack::deflate::fuzz_crc32_braided(start, data)
     );
 });

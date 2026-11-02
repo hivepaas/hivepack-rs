@@ -1,5 +1,5 @@
 // tools/rar-oracle: UnRAR 7.3.2's own reading of RAR archives, for comparing
-// hivepack-rar with it. Built by scripts/testdata.py with UnRAR's sources,
+// hivepack::rar with it. Built by scripts/testdata.py with UnRAR's sources,
 // as UnRAR's library is built (-DRARDLL), and linked with them.
 //
 // It reads requests from standard input, one a line, and answers each on one
@@ -18,7 +18,7 @@
 // its FNV-1a hash, whether its hash failed, where the archive is and the exit
 // code.
 //
-// hivepack-rar answers the same requests in crates/rar/tests/oracle.rs, and
+// hivepack::rar answers the same requests in crates/hivepack/tests/rar_oracle.rs, and
 // the answers are compared as text.
 //
 //   hash <type> <chunk> <hex>
@@ -511,7 +511,7 @@ static void do_test(const char *hex, unsigned long long limit) {
         put("next", (unsigned long long)Arc.NextBlockPos);
         // What UnRAR's mask refuses is passed over on both sides: "*" does not match a name that
         // starts with "*" and goes on, as match() takes that "*" for a plain
-        // character. That is choosing files, and hivepack-rar has no masks.
+        // character. That is choosing files, and hivepack::rar has no masks.
         if (size != 0 && Arc.GetHeaderType() == HEAD_FILE) {
           FileHeader &h = Arc.FileHead;
           if (!Cmd.IsProcessFile(h, NULL, MATCH_WILDSUBPATH, false, NULL)) {

@@ -1,20 +1,20 @@
 # Porting liblz4
 
-`hivepack-lz4` is a port of the official LZ4 library, [liblz4](https://github.com/lz4/lz4), to safe Rust: `.lz4` files, `.tar.lz4` once tar comes, and any other format that holds LZ4 blocks or frames. ZIP has no method for LZ4 (APPNOTE lists none, and libzip has none), so `hivepack-zip` does not use it. The goal is the one [porting.md](porting.md) sets for zstd: the same results as liblz4, at the same speed.
+`hivepack::lz4` is a port of the official LZ4 library, [liblz4](https://github.com/lz4/lz4), to safe Rust: `.lz4` files, `.tar.lz4` once tar comes, and any other format that holds LZ4 blocks or frames. ZIP has no method for LZ4 (APPNOTE lists none, and libzip has none), so `hivepack::zip` does not use it. The goal is the one [porting.md](porting.md) sets for zstd: the same results as liblz4, at the same speed.
 
 Decompression and compression are both ported: blocks (`LZ4_decompress_safe` and its forms, `LZ4_compress_fast` and its forms, and `lz4hc.c` at every level), streams of blocks with dictionaries, frames (`LZ4F_decompress`, and `LZ4F_compressBegin` to `LZ4F_compressEnd`, with dictionaries digested or not), and `.lz4` files as `std::io` readers and writers.
 
 ## The version
 
-The port follows lz4 **1.10.0** (22 July 2024, tag `v1.10.0`, commit `ebb370ca83af193212df4dcbadcc5d87bc0de2f0`), still the latest release as of October 2026: `lz4-1.10.0.tar.gz` from the release's page, SHA-256 `537512904744b35e232912055ccf8ec66d768639ff3abe5788d90d792ec5f48b`, the checksum the release gives beside it (lz4's releases are not signed). Its `lib/` is the same, file for file, as the `liblz4/lib` that `lz4-sys` 1.11.1 bundles. `hivepack_lz4::UPSTREAM_VERSION` names it, and `block::version_number()` and `block::version_string()` give what `LZ4_versionNumber()` and `LZ4_versionString()` give, 11000 and `"1.10.0"`.
+The port follows lz4 **1.10.0** (22 July 2024, tag `v1.10.0`, commit `ebb370ca83af193212df4dcbadcc5d87bc0de2f0`), still the latest release as of October 2026: `lz4-1.10.0.tar.gz` from the release's page, SHA-256 `537512904744b35e232912055ccf8ec66d768639ff3abe5788d90d792ec5f48b`, the checksum the release gives beside it (lz4's releases are not signed). Its `lib/` is the same, file for file, as the `liblz4/lib` that `lz4-sys` 1.11.1 bundles. `hivepack::lz4::UPSTREAM_VERSION` names it, and `block::version_number()` and `block::version_string()` give what `LZ4_versionNumber()` and `LZ4_versionString()` give, 11000 and `"1.10.0"`.
 
-Only `lib/` is ported: it is under the BSD 2-Clause license, and the rest of lz4 (the `lz4` program, its tests and tools) under the GPL. `hivepack-lz4` is under the BSD 2-Clause license too, with liblz4's and xxHash's notices ([LICENSE](../crates/lz4/LICENSE)).
+Only `lib/` is ported: it is under the BSD 2-Clause license, and the rest of lz4 (the `lz4` program, its tests and tools) under the GPL. `hivepack::lz4` is under the BSD 2-Clause license too, with liblz4's and xxHash's notices ([LICENSE](../crates/hivepack/src/lz4/LICENSE)).
 
 ## What following the official code means
 
 The rules of [porting.md](porting.md):
 
-- **The same layout.** Each file of `lib/` becomes a module of the same name: `lz4.c` becomes `crates/lz4/src/lz4.rs` (decoding) and `lz4_compress.rs` (encoding), `lz4hc.c` `lz4hc.rs`, `lz4frame.c` `lz4frame.rs` (decoding) and `lz4frame_compress.rs` (encoding), and the 32-bit half of `xxhash.c` (xxHash 0.6.5, which liblz4 ships) `xxhash.rs`. The public items are in three modules after liblz4's three headers: `hivepack_lz4::block` (`lz4.h`), `hivepack_lz4::hc` (`lz4hc.h`) and `hivepack_lz4::frame` (`lz4frame.h`).
+- **The same layout.** Each file of `lib/` becomes a module of the same name: `lz4.c` becomes `crates/hivepack/src/lz4/lz4.rs` (decoding) and `lz4_compress.rs` (encoding), `lz4hc.c` `lz4hc.rs`, `lz4frame.c` `lz4frame.rs` (decoding) and `lz4frame_compress.rs` (encoding), and the 32-bit half of `xxhash.c` (xxHash 0.6.5, which liblz4 ships) `xxhash.rs`. The public items are in three modules after liblz4's three headers: `hivepack::lz4::block` (`lz4.h`), `hivepack::lz4::hc` (`lz4hc.h`) and `hivepack::lz4::frame` (`lz4frame.h`).
 - **The same names**, in snake case, with the C name in every doc comment: `LZ4_decompress_safe_partial` becomes `block::decompress_safe_partial`, `LZ4F_decompress` `DecompressionContext::decompress`.
 - **The same results.** A block function returns liblz4's result: the size decoded, or a `DecodeError` whose `number()` is liblz4's negative result, `-(position) - 1`, the position in the block where the decoder found the error. A frame call returns liblz4's hint, or its error code, as `frame::Error` with the same numbers and the names `LZ4F_getErrorName()` gives (`"ERROR_frameType_unknown"`).
 - **The same writes.** liblz4 decodes with wild copies, 8, 16 or 32 bytes at a time, writing past the end of a literal run or a match where the block's rules leave room. The port makes the same copies, so the output holds the same bytes as liblz4's, past what was decoded too, and a malformed block (an offset of 0, which liblz4 does not refuse) decodes to the same bytes.
@@ -35,9 +35,9 @@ The rules of [porting.md](porting.md):
 
 ### `.lz4` files
 
-`hivepack_lz4::Encoder` writes one frame as an `std::io::Write`, as `lz4file.c`'s writer does (`LZ4F_writeOpen`, `LZ4F_write`, `LZ4F_writeClose`): the input goes to `LZ4F_compressUpdate` a block at most at a time, `flush` is `LZ4F_flush`, and `finish` ends the frame, so the frame is liblz4's for the same writes and flushes.
+`hivepack::lz4::Encoder` writes one frame as an `std::io::Write`, as `lz4file.c`'s writer does (`LZ4F_writeOpen`, `LZ4F_write`, `LZ4F_writeClose`): the input goes to `LZ4F_compressUpdate` a block at most at a time, `flush` is `LZ4F_flush`, and `finish` ends the frame, so the frame is liblz4's for the same writes and flushes.
 
-`hivepack_lz4::Decoder` reads what `lz4 -d` reads, as an `std::io::Read`: frames one after another, skippable frames skipped, and the legacy format (`lz4 -l`, which the Linux kernel's images use: blocks of 8 MB, the last ended by the end of the input or by a magic number). `lz4 -d` itself, `programs/lz4io.c`, is under the GPL; `Decoder` is the port's own, from the frame format's description (`doc/lz4_Frame_format.md`) and what `lz4 -d` 1.10.0 does with each case:
+`hivepack::lz4::Decoder` reads what `lz4 -d` reads, as an `std::io::Read`: frames one after another, skippable frames skipped, and the legacy format (`lz4 -l`, which the Linux kernel's images use: blocks of 8 MB, the last ended by the end of the input or by a magic number). `lz4 -d` itself, `programs/lz4io.c`, is under the GPL; `Decoder` is the port's own, from the frame format's description (`doc/lz4_Frame_format.md`) and what `lz4 -d` 1.10.0 does with each case:
 
 - An empty input is an empty stream; data that is not a frame, at the start or after the frames, is an error (`lz4 -d` says "Stream followed by undecodable data" for the latter, and fails); so is a frame or magic number cut short, or damaged data.
 - Unlike `lz4 -d` 1.10.0, a legacy frame may follow a frame of the frame format, as the description says (`lz4 -d` reads its magic number as a frame header and fails with `ERROR_frameType_unknown`), and a skippable frame cut short at the end of the input is an error (`lz4 -d` seeks past the end of its file).
@@ -71,14 +71,14 @@ The safe build is below the target, the `unsafe-fast` one at it. AMD Ryzen 9 995
 
 | | Mean | Range | At 0.95× or more |
 |---|---|---|---|
-| hivepack-lz4 | 0.75× liblz4 | 0.70–0.83× | 0 of 24 |
+| hivepack::lz4 | 0.75× liblz4 | 0.70–0.83× | 0 of 24 |
 | lz4_flex 0.14.0, its safe code (its default) | 0.77× | 0.64–0.89× | 0 of 24 |
 
 With the `unsafe-fast` feature (off by default; see [unsafe.md](unsafe.md)), the fast loop reads and writes its pieces without bounds checks, as liblz4 does:
 
 | | Mean | Range | At 0.95× or more |
 |---|---|---|---|
-| hivepack-lz4, `unsafe-fast` | 0.96× liblz4 | 0.92–0.99× | 15 of 24 |
+| hivepack::lz4, `unsafe-fast` | 0.96× liblz4 | 0.92–0.99× | 15 of 24 |
 | lz4_flex 0.14.0, its safe code, in the same runs | 0.81× | | |
 
 lz4_flex with its unsafe code was at 0.68–0.98× on five of the files (`dickens`, `mozilla`, `nci`, `reymont`, `x-ray`), where the port was at 0.73–0.85× safe and 0.92–0.99× with the feature.
@@ -91,14 +91,14 @@ The same machine and corpus, blocks compressed in one call each with room for al
 
 | | Level 1 | Acceleration 9 | Level 2 | Level 9 | Level 12 |
 |---|---|---|---|---|---|
-| hivepack-lz4 | 0.92–0.98× liblz4 (mean 0.95×) | 0.81–0.95× | 0.81–0.95× | 0.74–0.90× | 0.81–0.98× |
+| hivepack::lz4 | 0.92–0.98× liblz4 (mean 0.95×) | 0.81–0.95× | 0.81–0.95× | 0.74–0.90× | 0.81–0.98× |
 | lz4_flex 0.14.0, its safe code | 0.91–0.96×, 1.23× on `x-ray` | | | | |
 
 Frames of 4 MB linked blocks with a content checksum, written through each library's writer (`--compress --frame`), best of three rounds:
 
 | | Level 1 | Level 9 |
 |---|---|---|
-| hivepack-lz4 | 0.87–1.30× liblz4 | 0.76–0.91× |
+| hivepack::lz4 | 0.87–1.30× liblz4 | 0.76–0.91× |
 | lz4_flex 0.14.0, its safe code | 1.09–1.92× | |
 
 liblz4 compresses frames more slowly than blocks (its linked blocks go through `LZ4_compress_fast_continue`, then `LZ4_saveDict`); the port, whose stream functions are specialised as its block functions are, is faster on four files. lz4_flex makes its own blocks, not liblz4's. As first ported, the fast compressor was at 0.49–0.90×: `LZ4_compress_generic` is now inlined at each call, as liblz4's, each with its directives constant, and its search reads through a window of the input whose end is the search's own limit. High compression's strategies are inlined as liblz4's are, which made level 2 about 5% faster; reading the chains without bounds checks, tried in a scratch copy, gained 4–7% at level 9, and the safe ways to get there tried so far moved the speed by as much in either direction as the code's layout does.

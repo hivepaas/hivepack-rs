@@ -1,4 +1,4 @@
-//! Decodes the input as a Deflate64 stream with hivepack-deflate's
+//! Decodes the input as a Deflate64 stream with hivepack::deflate's
 //! `InflateBack9`, all given at the start and in pieces, and checks that
 //! both agree: the same result and message, the same input used, and the
 //! same output in the same calls. Then decodes it with `Inflate9`, in
@@ -7,13 +7,13 @@
 //! full window at a time before an error, and in full at the end). A panic
 //! or a difference is a bug. zlib's
 //! `contrib/infback9`, which the port follows, is not in libz-sys:
-//! `crates/deflate/tests/deflate64.rs` compares the two through the oracle.
+//! `crates/hivepack/tests/deflate_deflate64.rs` compares the two through the oracle.
 //!
 //! The first eight bytes seed the piece sizes, and the rest is the stream.
 
 #![no_main]
 
-use hivepack_deflate::{
+use hivepack::deflate::{
     Back9, BackIn, BackOut, ErrorCode, InBuffer, Inflate9, InflateBack9, OutBuffer, Status,
 };
 use libfuzzer_sys::fuzz_target;

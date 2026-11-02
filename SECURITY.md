@@ -14,6 +14,6 @@ The latest minor release (0.1.x for now).
 
 ## Scope
 
-- In scope: every crate in `crates/`.
-- `ml-dsa` (in `hivepack-sign`'s hybrid keys) has not been audited independently, as [docs/crypto.md](docs/crypto.md) says; it never signs alone.
+- In scope: the `hivepack` crate, every module.
+- `ml-dsa` (in `hivepack::sign`'s hybrid keys) has not been audited independently, as [docs/crypto.md](docs/crypto.md) says; it never signs alone.
 - Flaws in the libraries hivepack is ported from belong to them, but tell us too if the port has the same flaw.

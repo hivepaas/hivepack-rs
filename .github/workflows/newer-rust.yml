@@ -36,7 +36,7 @@ jobs:
         with:
           key: ${{ matrix.toolchain }}
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo clippy --workspace --all-targets --locked --features hivepack-zstd/unsafe-fast -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked --all-features -- -D warnings
       # Only the committed sets, as the cross-compiled tests in ci.yml.
       - run: cargo test --workspace --locked
-      - run: cargo test -p hivepack-zstd --locked --features unsafe-fast
+      - run: cargo test -p hivepack --locked --no-default-features --features zstd,zstd-unsafe-fast

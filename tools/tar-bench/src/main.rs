@@ -1,4 +1,4 @@
-//! Times hivepack-tar against Go's archive/tar (Go 1.27.2), which it ports, on the
+//! Times hivepack::tar against Go's archive/tar (Go 1.27.2), which it ports, on the
 //! same archives, in each thing a tar reader does: going through the entries of
 //! each format, reading their data, and writing them.
 //!
@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
-use hivepack_tar::{Format, Header, Reader, TYPE_REG, Time, Writer};
+use hivepack::tar::{Format, Header, Reader, TYPE_REG, Time, Writer};
 
 type Result<T> = std::result::Result<T, String>;
 

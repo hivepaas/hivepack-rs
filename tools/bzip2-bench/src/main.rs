@@ -1,4 +1,4 @@
-//! Times hivepack-bzip2 against libbzip2 on the same inputs: decompressing
+//! Times hivepack::bzip2 against libbzip2 on the same inputs: decompressing
 //! the streams libbzip2 wrote at each block size, fast or, with `--small`,
 //! small, or, with `--compress`, compressing at each block size. The
 //! compressed streams must be the same, byte for byte.
@@ -87,7 +87,7 @@ impl Codec for Libbzip2 {
     }
 }
 
-/// hivepack-bzip2.
+/// hivepack::bzip2.
 struct Port;
 
 impl Codec for Port {
@@ -104,7 +104,7 @@ impl Codec for Port {
     ) -> Result<()> {
         output.clear();
         output.resize(size, 0);
-        match hivepack_bzip2::buff_to_buff_decompress(output, input, small) {
+        match hivepack::bzip2::buff_to_buff_decompress(output, input, small) {
             Ok(len) if len == size => Ok(()),
             other => Err(format!("port: {other:?}")),
         }
@@ -113,7 +113,7 @@ impl Codec for Port {
     fn compress(&mut self, level: u32, input: &[u8], output: &mut Vec<u8>) -> Result<()> {
         output.clear();
         output.resize(bound(input.len()), 0);
-        let len = hivepack_bzip2::buff_to_buff_compress(output, input, level as i32, 0)
+        let len = hivepack::bzip2::buff_to_buff_compress(output, input, level as i32, 0)
             .map_err(|e| format!("port: {e}"))?;
         output.truncate(len);
         Ok(())

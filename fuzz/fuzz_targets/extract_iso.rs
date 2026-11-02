@@ -1,4 +1,4 @@
-//! Extracts the input as an ISO 9660 image with hivepack-extract, as the
+//! Extracts the input as an ISO 9660 image with hivepack::extract, as the
 //! `extract` target does a ZIP archive: its first byte choosing the
 //! options, into a scratch folder beside a file that must stay as it was,
 //! and cancelled after some progress if it says so. A panic is a bug, and
@@ -6,7 +6,7 @@
 //! it, a count of files the summary does not give, or a file left cut off:
 //! the files left hold the bytes of the entries written in full, however
 //! the extraction ends. A hard link's file counts once.
-//! `crates/extract/tests/iso.rs` has the cases made by hand.
+//! `crates/hivepack/tests/extract_iso.rs` has the cases made by hand.
 
 #![no_main]
 
@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use std::io::Cursor;
 use std::os::unix::fs::MetadataExt;
 
-use hivepack_extract::{Cancel, Links, Names, OnRefused, Options, Progress, extract_iso};
+use hivepack::extract::{Cancel, Links, Names, OnRefused, Options, Progress, extract_iso};
 use libfuzzer_sys::fuzz_target;
 
 /// The paths under `dir`: the files, and the links with their targets.

@@ -1,14 +1,14 @@
-//! hivepack-tar's writer on any header: every entry the input reads to is written
+//! hivepack::tar's writer on any header: every entry the input reads to is written
 //! again, as it came or changed as the first eight bytes' hash picks, and read
 //! back. What the writer takes, the reader finds, with the same names, size and
-//! data; a panic is a bug (`crates/tar/tests/writer.rs` compares every byte with
+//! data; a panic is a bug (`crates/hivepack/tests/tar_writer.rs` compares every byte with
 //! Go's archive/tar).
 
 #![no_main]
 
 use std::io::{Read, Write};
 
-use hivepack_tar::{Error, Format, Reader, TYPE_GNU_SPARSE, TYPE_REG, TYPE_X_GLOBAL_HEADER, Writer};
+use hivepack::tar::{Error, Format, Reader, TYPE_GNU_SPARSE, TYPE_REG, TYPE_X_GLOBAL_HEADER, Writer};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_DATA: u64 = 1 << 20;

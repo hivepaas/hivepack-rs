@@ -1,7 +1,7 @@
 [package]
 name = "hivepack-fuzz"
 version = "0.0.0"
-description = "Fuzzers that compare hivepack-zstd with libzstd, hivepack-deflate with zlib, hivepack-bzip2 with libbzip2, hivepack-lz4 with liblz4, and hivepack-xz with liblzma, and that feed hivepack-zip, hivepack-extract, hivepack-age, hivepack-tar, hivepack-iso, hivepack-cpio, hivepack-open, hivepack-7z, hivepack-udf and hivepack-xar any input"
+description = "Fuzzers that compare hivepack::zstd with libzstd, hivepack::deflate with zlib, hivepack::bzip2 with libbzip2, hivepack::lz4 with liblz4, and hivepack::xz with liblzma, and that feed hivepack::zip, hivepack::extract, hivepack::age, hivepack::tar, hivepack::iso, hivepack::cpio, hivepack::open, hivepack::sevenz, hivepack::udf and hivepack::xar any input"
 publish = false
 license = "MIT"
 edition = "2024"
@@ -13,45 +13,24 @@ cargo-fuzz = true
 # Fuzz the builds with the unchecked copies: zstd's sequence loop, and
 # lz4's fast loop; and with the processor's instructions: deflate's CRC-32,
 # and crypto's AES, SHA and ChaCha20.
-unsafe-fast = [
-    "hivepack-zstd/unsafe-fast",
-    "hivepack-lz4/unsafe-fast",
-    "hivepack-deflate/unsafe-fast",
-]
+unsafe-fast = ["hivepack/unsafe-fast"]
 
 [dependencies]
 libfuzzer-sys = "0.4"
-hivepack-7z = { path = "../crates/7z" }
-hivepack-zstd = { path = "../crates/zstd" }
+hivepack = { path = "../crates/hivepack", features = ["rar"] }
 # libzstd 1.5.7, without the x86-64 Huffman assembly, with its worker threads
 # and its dictionary builder, as the tests build it.
 zstd = { version = "0.14.3", default-features = false, features = ["experimental", "no_asm", "zdict_builder", "zstdmt"] }
-hivepack-deflate = { path = "../crates/deflate" }
-hivepack-crypto = { path = "../crates/crypto" }
-hivepack-zip = { path = "../crates/zip" }
-hivepack-extract = { path = "../crates/extract", features = ["rar"] }
 # zlib 1.3.2, built from libz-sys's bundled sources, as the tests build it.
 libz-sys = { version = "=1.1.31", features = ["static"] }
 flate2 = { version = "1.1", default-features = false, features = ["zlib"] }
-hivepack-bzip2 = { path = "../crates/bzip2" }
-hivepack-age = { path = "../crates/age" }
-hivepack-tar = { path = "../crates/tar" }
-hivepack-iso = { path = "../crates/iso" }
-hivepack-cpio = { path = "../crates/cpio" }
-hivepack-sign = { path = "../crates/sign" }
-hivepack-rar = { path = "../crates/rar" }
-hivepack-open = { path = "../crates/open" }
-hivepack-udf = { path = "../crates/udf" }
-hivepack-xar = { path = "../crates/xar" }
 # libbzip2 1.0.8, built from bzip2-sys's bundled sources, as the tests build
 # it.
 bzip2 = { version = "0.6.1", default-features = false, features = ["bzip2-sys", "static"] }
-hivepack-lz4 = { path = "../crates/lz4" }
 # liblz4 1.10.0, built from lz4-sys's bundled sources, as the tests build
 # it.
 lz4 = "=1.28.1"
 lz4-sys = "=1.11.1"
-hivepack-xz = { path = "../crates/xz" }
 # liblzma 5.8.4, built from liblzma-sys's bundled sources, not the system's.
 liblzma = { version = "0.4.9", features = ["static", "parallel"] }
 liblzma-sys = { version = "=0.4.9", features = ["static", "parallel"] }

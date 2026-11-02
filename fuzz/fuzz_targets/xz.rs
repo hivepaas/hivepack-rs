@@ -1,4 +1,4 @@
-//! hivepack-xz against liblzma, call by call. A panic or a difference is a
+//! hivepack::xz against liblzma, call by call. A panic or a difference is a
 //! bug.
 //!
 //! The first byte chooses the decoder: the .xz decoder, the auto decoder,
@@ -15,7 +15,7 @@
 
 #![no_main]
 
-use hivepack_xz::{
+use hivepack::xz::{
     Action, CONCATENATED, FAIL_FAST, FILTER_LZMA1, FILTER_LZMA2, Filter, FilterOptions,
     IGNORE_CHECK, InBuffer, LzmaOptions, MtOptions, OutBuffer, Status, Stream, TELL_ANY_CHECK,
     TELL_NO_CHECK, TELL_UNSUPPORTED_CHECK,
@@ -23,7 +23,7 @@ use hivepack_xz::{
 use libfuzzer_sys::fuzz_target;
 
 /// What a call returned, in liblzma's numbers.
-fn port_code(ret: hivepack_xz::Result<Status>) -> i32 {
+fn port_code(ret: hivepack::xz::Result<Status>) -> i32 {
     match ret {
         Ok(status) => status.number(),
         Err(e) => e.number(),

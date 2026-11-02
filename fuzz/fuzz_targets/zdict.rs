@@ -13,7 +13,7 @@
 
 #![no_main]
 
-use hivepack_zstd::{CCtx, CDict, DCtx, DDict, ErrorCode};
+use hivepack::zstd::{CCtx, CDict, DCtx, DDict, ErrorCode};
 use libfuzzer_sys::fuzz_target;
 use zstd::zstd_safe;
 
@@ -82,7 +82,7 @@ fuzz_target!(|data: &[u8]| {
     let capacity = usize::from(u16::from_le_bytes([*low, *high])) >> (high >> 6);
     let sizes = cut(*how, rest);
     let mut got = vec![0u8; capacity];
-    let got_size = hivepack_zstd::train_from_buffer(&mut got, rest, &sizes);
+    let got_size = hivepack::zstd::train_from_buffer(&mut got, rest, &sizes);
     if libzstd_reads_past(&sizes, capacity) {
         assert_eq!(got_size.map_err(|e| e.code()), Err(ErrorCode::SrcSizeWrong));
         return;
@@ -94,13 +94,13 @@ fuzz_target!(|data: &[u8]| {
             assert_eq!(&got[..got_size], &want[..want_size], "the dictionaries differ");
             let dict = &got[..got_size];
             assert_eq!(
-                hivepack_zstd::get_dict_id(dict),
+                hivepack::zstd::get_dict_id(dict),
                 zstd_safe::get_dict_id(dict).map_or(0, |id| id.get())
             );
             // The dictionary at work, on the last sample.
             let sample = &rest[rest.len() - sizes.last().copied().unwrap_or(0)..];
             let cdict = CDict::new(dict, 3).expect("the port loads its dictionary");
-            let mut frame = vec![0u8; hivepack_zstd::compress_bound(sample.len()).unwrap_or(0)];
+            let mut frame = vec![0u8; hivepack::zstd::compress_bound(sample.len()).unwrap_or(0)];
             let size = CCtx::new()
                 .compress_using_cdict(&mut frame, sample, &cdict)
                 .expect("compresses");

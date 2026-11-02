@@ -1,8 +1,8 @@
 #!/bin/bash
-# Records what Linux reads of the images crates/udf/tests/crafted.rs
+# Records what Linux reads of the images crates/hivepack/tests/udf_crafted.rs
 # writes, in testdata/udf/crafted: from the repository,
 #
-#   UDF_CRAFTED=$PWD/target/udf-crafted cargo test -p hivepack-udf \
+#   UDF_CRAFTED=$PWD/target/udf-crafted cargo test -p hivepack --all-features \
 #       --test crafted write_crafted_images -- --ignored
 #   docker run --rm --privileged -v "$PWD":/repo -w /repo ubuntu:24.04 \
 #       tools/udf-images/crafted.sh target/udf-crafted testdata/udf/crafted

@@ -1,12 +1,12 @@
 # Porting NetBSD's UDF file system
 
-`hivepack-udf` reads UDF volumes in safe Rust: DVD and Blu-ray images, Windows' installation images, packet-written CDs and DVDs, and disks formatted with UDF. It is a port of the reading half of NetBSD's UDF file system (`sys/fs/udf`), by Reinoud Zandijk, under the BSD-2-Clause license. NetBSD's is the most complete UDF reader under a permissive license: UDF 1.02 to 2.60, on physical, sparable, virtual (VAT) and metadata partitions.
+`hivepack::udf` reads UDF volumes in safe Rust: DVD and Blu-ray images, Windows' installation images, packet-written CDs and DVDs, and disks formatted with UDF. It is a port of the reading half of NetBSD's UDF file system (`sys/fs/udf`), by Reinoud Zandijk, under the BSD-2-Clause license. NetBSD's is the most complete UDF reader under a permissive license: UDF 1.02 to 2.60, on physical, sparable, virtual (VAT) and metadata partitions.
 
-[hivepack-iso](iso.md) reads the ISO 9660 side of an image that has both ("UDF bridge").
+[hivepack::iso](iso.md) reads the ISO 9660 side of an image that has both ("UDF bridge").
 
 ## The source
 
-The port follows `sys/fs/udf` of NetBSD's netbsd-11 branch at commit `83fb854bf81a` (2026-10-29), which `hivepack_udf::UPSTREAM_COMMIT` names, and `clock_ymdhms_to_secs` of `sys/dev/clock_subr.c`. As in the other ports ([porting.md](porting.md)), each C file is a module, functions keep their names, and each doc comment names its C original. Only what reads is ported: NetBSD's UDF also writes.
+The port follows `sys/fs/udf` of NetBSD's netbsd-11 branch at commit `83fb854bf81a` (2026-10-29), which `hivepack::udf::UPSTREAM_COMMIT` names, and `clock_ymdhms_to_secs` of `sys/dev/clock_subr.c`. As in the other ports ([porting.md](porting.md)), each C file is a module, functions keep their names, and each doc comment names its C original. Only what reads is ported: NetBSD's UDF also writes.
 
 | NetBSD | Port | What |
 |---|---|---|

@@ -8,7 +8,7 @@ use std::hash::{BuildHasher, Hasher};
 use std::io::{self, Cursor, Write};
 use std::sync::Arc;
 
-use hivepack_zip::{Archive, Closed, Error, ErrorCode, OpenFlags, ReadAt};
+use hivepack::zip::{Archive, Closed, Error, ErrorCode, OpenFlags, ReadAt};
 
 /// `ENOENT`, which libzip's file source gives for a file that is not
 /// there.

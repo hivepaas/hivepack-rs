@@ -1,7 +1,7 @@
-//! hivepack-tar on any input: every entry of the archive and all of its
+//! hivepack::tar on any input: every entry of the archive and all of its
 //! data read, twice, in pieces of different sizes the first eight bytes'
 //! hash picks. Both reads must give the same headers, data and end, and a
-//! panic is a bug (`crates/tar/tests/oracle.rs` compares the answers with
+//! panic is a bug (`crates/hivepack/tests/tar_oracle.rs` compares the answers with
 //! Go's archive/tar). Going through the entries without their data gives the
 //! same whether the reader seeks past it or not.
 //!
@@ -12,7 +12,7 @@
 
 use std::io::{Cursor, Read};
 
-use hivepack_tar::{Header, Reader};
+use hivepack::tar::{Header, Reader};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_DATA: usize = 4 << 20;

@@ -1,7 +1,7 @@
 [package]
 name = "bzip2-bench"
 version = "0.0.0"
-description = "Times hivepack-bzip2 against libbzip2 on the same inputs"
+description = "Times hivepack::bzip2 against libbzip2 on the same inputs"
 publish = false
 license.workspace = true
 edition.workspace = true
@@ -11,5 +11,5 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-hivepack-bzip2.workspace = true
+hivepack = { workspace = true, features = ["bzip2"] }
 bzip2.workspace = true

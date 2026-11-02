@@ -6,7 +6,7 @@
 #   tools/7z-archives/make.sh testdata/7z [path/to/7zz]
 #
 # Each archive holds the same few files, made here with fixed times and
-# modes, so that crates/extract/tests/sevenz.rs knows what each must
+# modes, so that crates/hivepack/tests/extract_sevenz.rs knows what each must
 # extract to.
 
 set -euo pipefail

@@ -12,7 +12,7 @@
 #![no_main]
 #![allow(deprecated)]
 
-use hivepack_zstd::{
+use hivepack::zstd::{
     CCtx, CParameter as P, DCtx, ErrorCode, ParamSwitch, SEQUENCE_PRODUCER_ERROR, Sequence,
     SequenceFormat, SequenceProducer, Strategy, merge_block_delimiters, sequence_bound,
 };
@@ -39,7 +39,7 @@ fn round_trip(pick: u8, src: &[u8]) {
         return;
     };
     seqs.truncate(n);
-    let capacity = hivepack_zstd::compress_bound(src.len()).unwrap_or(0);
+    let capacity = hivepack::zstd::compress_bound(src.len()).unwrap_or(0);
     let mut frame = vec![0u8; capacity];
     let compress = |format, seqs: &[Sequence], frame: &mut [u8]| {
         let mut cctx = CCtx::new();
@@ -156,18 +156,18 @@ fn arbitrary(pick: u8, data: &[u8]) {
     if pick & 0x10 != 0 {
         let _ = cctx.set_parameter(P::MaxBlockSize(1024));
     }
-    let capacity = hivepack_zstd::compress_bound(src.len()).unwrap_or(0) + 64;
+    let capacity = hivepack::zstd::compress_bound(src.len()).unwrap_or(0) + 64;
     let mut frame = vec![0u8; capacity];
     if pick & 0x02 == 0 {
         for format in [
             SequenceFormat::ExplicitBlockDelimiters,
             SequenceFormat::NoBlockDelimiters,
         ] {
-            let _ = cctx.reset(hivepack_zstd::ResetDirective::SessionOnly);
+            let _ = cctx.reset(hivepack::zstd::ResetDirective::SessionOnly);
             let _ = cctx.set_parameter(P::BlockDelimiters(format));
             let _ = cctx.compress_sequences(&mut frame, &seqs, src);
         }
-        let _ = cctx.reset(hivepack_zstd::ResetDirective::SessionOnly);
+        let _ = cctx.reset(hivepack::zstd::ResetDirective::SessionOnly);
         let _ = cctx.set_parameter(P::ValidateSequences(false));
         let _ = cctx.set_parameter(P::BlockDelimiters(SequenceFormat::ExplicitBlockDelimiters));
         let half = src.len() / 2;
@@ -185,7 +185,7 @@ fn arbitrary(pick: u8, data: &[u8]) {
             fail_every: usize::from(pick >> 6),
         })));
         let _ = cctx.compress2(&mut frame, src);
-        let _ = cctx.reset(hivepack_zstd::ResetDirective::SessionOnly);
+        let _ = cctx.reset(hivepack::zstd::ResetDirective::SessionOnly);
         let mut out_seqs = vec![Sequence::default(); sequence_bound(src.len())];
         let _ = cctx.generate_sequences(&mut out_seqs, src);
     }

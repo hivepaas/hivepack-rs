@@ -1,4 +1,4 @@
-//! Extracts the input as a XAR archive with hivepack-extract, as the
+//! Extracts the input as a XAR archive with hivepack::extract, as the
 //! `extract_cpio` target does a cpio archive, its payloads expanded or
 //! not: its first byte choosing the
 //! options, into a scratch folder beside a file that must stay as it was,
@@ -7,7 +7,7 @@
 //! it, a count of files the summary does not give, or a file left cut off:
 //! the files left hold the bytes of the entries written in full, however
 //! the extraction ends. A hard link's file counts once.
-//! `crates/extract/tests/xar.rs` has the cases made by hand.
+//! `crates/hivepack/tests/extract_xar.rs` has the cases made by hand.
 
 #![no_main]
 
@@ -18,7 +18,7 @@ use std::collections::HashSet;
 use std::io::Cursor;
 use std::os::unix::fs::MetadataExt;
 
-use hivepack_extract::{Cancel, Links, Names, OnRefused, Options, Packages, Progress, extract_xar};
+use hivepack::extract::{Cancel, Links, Names, OnRefused, Options, Packages, Progress, extract_xar};
 use libfuzzer_sys::fuzz_target;
 
 /// The paths under `dir`: the files, and the links with their targets.

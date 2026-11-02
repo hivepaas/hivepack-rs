@@ -1,18 +1,18 @@
 # Safety rules
 
-These rules hold for every crate in the repository. CI checks the parts a tool can check.
+These rules hold for every module of the crate. CI checks the parts a tool can check.
 
 ## No unsafe code
 
-The workspace sets `unsafe_code = "forbid"`, and every crate inherits it with `[lints] workspace = true`. `forbid` cannot be lifted by an `allow` further in, so no `unsafe` block, `unsafe fn` or `#[no_mangle]` compiles anywhere.
+Each module's `mod.rs` starts with `#![forbid(unsafe_code)]`; the crate as a whole sets `unsafe_code = "deny"`, for the modules with an `unsafe-fast` feature. `forbid` cannot be lifted by an `allow` further in, so no `unsafe` block, `unsafe fn` or `#[no_mangle]` compiles anywhere.
 
-The exceptions are all opt-in: the `unsafe-fast` feature of `hivepack-zstd`, `hivepack-lz4` and `hivepack-deflate` (see [unsafe.md](unsafe.md)). Without the feature, those crates forbid unsafe code too. Adding an exception takes all of these steps:
+The exceptions are all opt-in: the `unsafe-fast` feature of `hivepack::zstd`, `hivepack::lz4` and `hivepack::deflate` (see [unsafe.md](unsafe.md)). Without the feature, those modules forbid unsafe code too. Adding an exception takes all of these steps:
 
 1. Show with numbers from `tools/zstd-bench` (same machine, interleaved rounds) that the safe code misses the speed target in [porting.md](porting.md), and that the unsafe code closes the gap.
 2. Keep the unsafe code in one module, as small as it can be. Every block gets a `// SAFETY:` comment that says why it is sound, and preconditions are checked once at the module's entry.
 3. Cover it with tests, fuzzing and Miri.
 4. Record it in [unsafe.md](unsafe.md): where it is, why, the numbers, and how it is checked.
-5. HivePaaS approves it before it merges. Only that crate then moves from `forbid` to `deny`, with `#[allow(unsafe_code)]` on that one module. Where it can be, it is a feature that is off by default, and the crate forbids unsafe code without it.
+5. HivePaaS approves it before it merges. Only that module then moves from `forbid` to the crate's `deny`, with `#[allow(unsafe_code)]` on that one module. Where it can be, it is a feature that is off by default, and the crate forbids unsafe code without it.
 
 These are the places in libzstd where safe Rust is known to fall short. Each one is measured first, while the safe code is tried; two are exceptions so far, behind a feature.
 
@@ -31,11 +31,11 @@ A library may depend on a crate that has `unsafe` code only where there is no ot
 
 | Dependency | In | For | Why | Replaced by |
 |---|---|---|---|---|
-| `cap-std`, `cap-fs-ext` (Bytecode Alliance; with `rustix` on Unix, `windows-sys` and `winx` on Windows) | `hivepack-extract` | Opening each directory under the destination from its parent's handle without following a symbolic link, and creating files there: `openat2` with `RESOLVE_BENEATH` on Linux, `openat` with `O_NOFOLLOW` a component at a time elsewhere on Unix, handles relative to a directory's on Windows | The standard library's directory handles (`std::fs::Dir`, tracking issue rust-lang/rust#120426) are not stable. Without them, a path is checked and then opened again, and a link put in between is followed | `std::fs::Dir`, once stable |
-| `aes`, `sha1`, `sha2`, `md-5`, `hmac`, `hkdf`, `pbkdf2`, `chacha20poly1305`, `scrypt`, `ml-dsa` (RustCrypto), `curve25519-dalek`, `ed25519-dalek` (dalek-cryptography), `blake2s_simd`, `subtle`, `hpke`, `x-wing`, `ml-kem` | `hivepack-crypto`, the only crate that names them | All cryptography (see [crypto.md](crypto.md)) | Fast constant-time cryptography needs the processor's instructions, which take `unsafe` code, and a hand-written copy would have no outside review | Nothing planned |
-| `rustix` (Bytecode Alliance), on macOS only, already there for `cap-std` | `hivepack-extract` | Reading and setting macOS's quarantine attribute (`com.apple.quarantine`) by file descriptor: `fgetxattr` and `fsetxattr`, so that files extracted from a downloaded archive keep its mark | The standard library has no extended attributes, and calling `fsetxattr` is `unsafe` | an extended attributes API in the standard library |
+| `cap-std`, `cap-fs-ext` (Bytecode Alliance; with `rustix` on Unix, `windows-sys` and `winx` on Windows) | `hivepack::extract` | Opening each directory under the destination from its parent's handle without following a symbolic link, and creating files there: `openat2` with `RESOLVE_BENEATH` on Linux, `openat` with `O_NOFOLLOW` a component at a time elsewhere on Unix, handles relative to a directory's on Windows | The standard library's directory handles (`std::fs::Dir`, tracking issue rust-lang/rust#120426) are not stable. Without them, a path is checked and then opened again, and a link put in between is followed | `std::fs::Dir`, once stable |
+| `aes`, `sha1`, `sha2`, `md-5`, `hmac`, `hkdf`, `pbkdf2`, `chacha20poly1305`, `scrypt`, `ml-dsa` (RustCrypto), `curve25519-dalek`, `ed25519-dalek` (dalek-cryptography), `blake2s_simd`, `subtle`, `hpke`, `x-wing`, `ml-kem` | `hivepack::crypto`, the only crate that names them | All cryptography (see [crypto.md](crypto.md)) | Fast constant-time cryptography needs the processor's instructions, which take `unsafe` code, and a hand-written copy would have no outside review | Nothing planned |
+| `rustix` (Bytecode Alliance), on macOS only, already there for `cap-std` | `hivepack::extract` | Reading and setting macOS's quarantine attribute (`com.apple.quarantine`) by file descriptor: `fgetxattr` and `fsetxattr`, so that files extracted from a downloaded archive keep its mark | The standard library has no extended attributes, and calling `fsetxattr` is `unsafe` | an extended attributes API in the standard library |
 
-The rest of the repository, the codecs and the containers among them, depends on nothing with `unsafe` code but through `hivepack-crypto`, where a format encrypts or hashes with it. `hivepack-crypto` itself forbids `unsafe` code, as every other crate does.
+The rest of the repository, the codecs and the containers among them, depends on nothing with `unsafe` code but through `hivepack::crypto`, where a format encrypts or hashes with it. `hivepack::crypto` itself forbids `unsafe` code, as every other crate does.
 
 ## Untrusted input never panics
 

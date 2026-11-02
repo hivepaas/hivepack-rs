@@ -12,20 +12,20 @@ allow = [
   "BSD-3-Clause",
   "BSL-1.0",
   # BSD-style, with zlib's rule that altered versions say so: libbzip2's,
-  # which hivepack-bzip2, a port of it, keeps.
+  # which hivepack::bzip2, a port of it, keeps.
   "bzip2-1.0.6",
-  # BSD Zero Clause: liblzma's, which hivepack-xz, a port of it, keeps.
+  # BSD Zero Clause: liblzma's, which hivepack::xz, a port of it, keeps.
   "0BSD",
   "ISC",
   "Unicode-3.0",
   "Zlib",
 ]
 confidence-threshold = 0.9
-# UnRAR's own license, which OSI does not approve: for hivepack-rar, a port
-# of UnRAR, alone, so that no other crate takes its terms (docs/rar.md), and for
+# UnRAR's own license, which OSI does not approve: for hivepack, whose `rar`
+# module is a port of UnRAR and off by default (docs/rar.md), and for
 # rar-bench, a tool that is not published, which links it and UnRAR.
 exceptions = [
-  { name = "hivepack-rar", allow = ["UnRAR"] },
+  { name = "hivepack", allow = ["UnRAR"] },
   { name = "rar-bench", allow = ["UnRAR"] },
 ]
 

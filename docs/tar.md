@@ -1,10 +1,10 @@
 # Porting Go's archive/tar
 
-`hivepack-tar` reads and writes tar archives in safe Rust. It is a port of `archive/tar` in Go's standard library: a small, well-tested reader of every format in use and writer of USTAR, PAX and GNU, hardened by years of fuzzing, under the BSD-3-Clause license. Most `.tar.gz`, `.tar.zst`, `.tar.xz` and `.tar.zst.age` files are tar inside a compressor, which hivepack's other crates read.
+`hivepack::tar` reads and writes tar archives in safe Rust. It is a port of `archive/tar` in Go's standard library: a small, well-tested reader of every format in use and writer of USTAR, PAX and GNU, hardened by years of fuzzing, under the BSD-3-Clause license. Most `.tar.gz`, `.tar.zst`, `.tar.xz` and `.tar.zst.age` files are tar inside a compressor, which hivepack's other crates read.
 
 ## The source
 
-The port follows **Go 1.27.2** (`src/archive/tar`), the latest release as of October 2026. `hivepack_tar::UPSTREAM_VERSION` names it. As in the other ports ([porting.md](porting.md)), each Go file is a module, functions keep their names in snake case, and each doc comment names its Go original.
+The port follows **Go 1.27.2** (`src/archive/tar`), the latest release as of October 2026. `hivepack::tar::UPSTREAM_VERSION` names it. As in the other ports ([porting.md](porting.md)), each Go file is a module, functions keep their names in snake case, and each doc comment names its Go original.
 
 | Go | Port | What |
 |---|---|---|
@@ -21,7 +21,7 @@ The port follows **Go 1.27.2** (`src/archive/tar`), the latest release as of Oct
 - **Errors are a type.** Go's `ErrHeader`, `ErrFieldTooLong`, `errSparseTooLong`, `errMissData`, `errUnrefData` and `io.ErrUnexpectedEOF` are `Error`'s variants; the data's errors travel inside `io::Error` and come back out with `Error::from`. A failure is kept and returned again by every later call, as Go keeps it.
 - **An error that comes with the last bytes comes after them.** Go's `Read` can return bytes and an error at once (a sparse file with more data than its map ends so); Rust's cannot, so the bytes come first and the error at the next call, which `read_to_end` sees the same way.
 - **Seeking is asked for.** Go skips the rest of an entry with `Seek` when it finds that its input can, by asking the value's type. Rust cannot ask, so `Reader::new` reads past the data of any `Read`, and `Reader::seekable` seeks, as Go does, up to the data's last byte, so that an archive cut short is found by the read after it. The outcome is the same, which `seeking_changes_nothing` checks on Go's archives and their damaged copies; the tests give Go an input that cannot seek.
-- **No `GODEBUG=tarinsecurepath`.** Names are checked where files are written, in hivepack-extract.
+- **No `GODEBUG=tarinsecurepath`.** Names are checked where files are written, in hivepack::extract.
 - **The global PAX header's records are merged in key order.** Go merges them in its map's random order and ignores the error of a bad one, so a global header with both a bad record and a `path` can come out either way in Go; here the order is fixed.
 - **`Flush` is `Writer::finish_entry`.** `io::Write::flush` has to work in the middle of an entry, for a buffer around the writer, where Go's `Flush` fails, so it is the output's `flush`, and Go's has another name.
 - **`close` flushes the output** after the end of the archive, and reports its error, which Go's writers have no way to ask for. As in Go, the output is not closed, and an error from `close` does not change that the writer is then closed.
@@ -33,7 +33,7 @@ The port follows **Go 1.27.2** (`src/archive/tar`), the latest release as of Oct
 
 ## Bounded resources
 
-As in Go: PAX records and GNU long names at most 1 MiB, sparse maps at most 1 MiB and a million entries, one header block at a time. An entry's data is read as the caller reads it, and skipped otherwise; a sparse file's holes are produced as zeros, so a reader that takes all of a terabyte of holes reads a terabyte. hivepack-extract will write holes without reading them.
+As in Go: PAX records and GNU long names at most 1 MiB, sparse maps at most 1 MiB and a million entries, one header block at a time. An entry's data is read as the caller reads it, and skipped otherwise; a sparse file's holes are produced as zeros, so a reader that takes all of a terabyte of holes reads a terabyte. hivepack::extract will write holes without reading them.
 
 ## The speed
 
@@ -105,4 +105,4 @@ A new Go release's changes to `src/archive/tar` are ported, `tools/tar-oracle/go
 
 ## Licenses
 
-The port is derived from Go, under the BSD-3-Clause license (Copyright 2009 The Go Authors); `hivepack-tar` is under the same license, with Go's notice in its [LICENSE](../crates/tar/LICENSE). Go's test archives in `testdata/go-tar` are under it too, with the same notice beside them.
+The port is derived from Go, under the BSD-3-Clause license (Copyright 2009 The Go Authors); `hivepack::tar` is under the same license, with Go's notice in its [LICENSE](../crates/hivepack/src/tar/LICENSE). Go's test archives in `testdata/go-tar` are under it too, with the same notice beside them.

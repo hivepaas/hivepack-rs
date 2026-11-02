@@ -1,4 +1,4 @@
-//! Extracts the input as a 7z archive with hivepack-extract, as the
+//! Extracts the input as a 7z archive with hivepack::extract, as the
 //! `extract` target does a ZIP archive: its first byte choosing the
 //! options, the rest the archive as the `sevenz` target reads it, with
 //! small limits on what it may allocate, into a scratch folder beside a
@@ -7,7 +7,7 @@
 //! destination, a link that leads outside it, a count of files the summary
 //! does not give, or a file left cut off: the files left hold the bytes of
 //! the entries written in full, however the extraction ends.
-//! `crates/extract/tests/sevenz.rs` has the cases made by hand.
+//! `crates/hivepack/tests/extract_sevenz.rs` has the cases made by hand.
 
 #![no_main]
 
@@ -15,8 +15,8 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use hivepack_7z::Archive;
-use hivepack_extract::{Cancel, Links, Names, OnRefused, Options, Progress, extract_7z};
+use hivepack::sevenz::Archive;
+use hivepack::extract::{Cancel, Links, Names, OnRefused, Options, Progress, extract_7z};
 use libfuzzer_sys::fuzz_target;
 
 /// The paths under `dir`: the files, and the links with their targets.
@@ -68,7 +68,7 @@ fuzz_target!(|data: &[u8]| {
     let Some((&choice, archive)) = data.split_first() else {
         return;
     };
-    let opening = hivepack_7z::Options {
+    let opening = hivepack::sevenz::Options {
         memory_limit: 1 << 26,
         decoder_memory_limit: 1 << 26,
         // The AES coder's paths, without the time its keys can take.

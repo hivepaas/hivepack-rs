@@ -4,13 +4,13 @@
 //! sizes: the same bytes and the same error both ways, and no panic. The
 //! decoder reads ahead of what it decodes only once it has 1 KiB of input
 //! or all of it, so that the pieces it is given cannot change what it
-//! reads. libzip has no PPMd: `crates/zip/src/ppmd8_oracle.rs` compares the
-//! model with 7-Zip's, and `crates/zip/tests/ppmd.rs` whole archives with
+//! reads. libzip has no PPMd: `crates/hivepack/src/zip/ppmd8_oracle.rs` compares the
+//! model with 7-Zip's, and `crates/hivepack/tests/zip_ppmd.rs` whole archives with
 //! `7zz`.
 
 #![no_main]
 
-use hivepack_zip::{Archive, Flags, OpenFlags};
+use hivepack::zip::{Archive, Flags, OpenFlags};
 use libfuzzer_sys::fuzz_target;
 
 /// A bound on the work: the data decoded from a few bytes can be large.
@@ -78,7 +78,7 @@ fuzz_target!(|data: &[u8]| {
     // checked too, the length refused as it ends.
     let zip = archive(data, 0, 0);
     let (decoded, _) = read(&zip, OpenFlags(0), 70_000, false);
-    let crc = hivepack_deflate::crc32(0, &decoded);
+    let crc = hivepack::deflate::crc32(0, &decoded);
     let zip = archive(data, decoded.len() as u32, crc);
     for flags in [OpenFlags(0), OpenFlags::CHECKCONS] {
         let bytes = read(&zip, flags, 1, false);

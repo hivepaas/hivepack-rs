@@ -1,7 +1,7 @@
 [package]
 name = "rar-bench"
 version = "0.0.0"
-description = "Times hivepack-rar against UnRAR on the RAR archives of other projects' tests"
+description = "Times hivepack::rar against UnRAR on the RAR archives of other projects' tests"
 publish = false
 license = "UnRAR"
 edition.workspace = true
@@ -11,8 +11,8 @@ rust-version.workspace = true
 workspace = true
 
 [features]
-# Nothing now: hivepack-crypto always has the fast code. For bench.yml.
+# Nothing now: hivepack::crypto always has the fast code. For bench.yml.
 unsafe-fast = []
 
 [dependencies]
-hivepack-rar.workspace = true
+hivepack = { workspace = true, features = ["rar"] }

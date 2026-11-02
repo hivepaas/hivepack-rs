@@ -66,7 +66,7 @@ def binary_data() -> bytes:
 
 
 def make_input(folder: Path) -> None:
-    listed = subprocess.run(["git", "ls-files", "crates/*/src/*.rs", "docs/*.md"], cwd=ROOT, check=True,
+    listed = subprocess.run(["git", "ls-files", "crates/hivepack/src/*/*.rs", "docs/*.md"], cwd=ROOT, check=True,
                             capture_output=True, text=True).stdout.split("\n")
     total = 0
     for name in sorted(filter(None, listed)):

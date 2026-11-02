@@ -1,8 +1,8 @@
-//! hivepack-iso on any input: every entry of the image and up to 4 MiB of
+//! hivepack::iso on any input: every entry of the image and up to 4 MiB of
 //! its data read, twice, in pieces of different sizes the first eight
 //! bytes' hash picks, as an input that can seek and as one that cannot.
 //! Both reads of each must give the same headers, data and end, and a panic
-//! is a bug (`crates/iso/tests/oracle.rs` compares the answers with
+//! is a bug (`crates/hivepack/tests/iso_oracle.rs` compares the answers with
 //! libarchive).
 //!
 //! Data is read up to 4 MiB an entry: a zisofs file a few kilobytes long
@@ -12,7 +12,7 @@
 
 use std::io::{Cursor, Read};
 
-use hivepack_iso::{Header, Reader};
+use hivepack::iso::{Header, Reader};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_DATA: usize = 4 << 20;
@@ -35,7 +35,7 @@ fn read<R: Read>(mut iso: Reader<R>, mut seed: u64) -> (Vec<(Header, Vec<u8>, Ve
                 Ok(0) => break,
                 Ok(n) => body.extend_from_slice(&buf[..n]),
                 Err(e) => {
-                    let e = hivepack_iso::Error::from(e);
+                    let e = hivepack::iso::Error::from(e);
                     ends.push(e.to_string());
                     if !e.is_warning() {
                         break;

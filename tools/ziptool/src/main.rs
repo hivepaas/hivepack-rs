@@ -12,7 +12,7 @@ use std::process::ExitCode;
 
 use std::sync::Arc;
 
-use hivepack_zip::{
+use hivepack::zip::{
     Archive, ArchiveFlags, BufferSource, DataSource, Error, ErrorCode, FileSource, Flags,
     OpenFlags, Stat, ZipFile, ZipFileSource, cm, em, stat,
 };
@@ -377,7 +377,7 @@ struct StreamSource {
 }
 
 impl DataSource for StreamSource {
-    fn stat(&self) -> hivepack_zip::Result<Stat<'static>> {
+    fn stat(&self) -> hivepack::zip::Result<Stat<'static>> {
         Ok(Stat {
             valid: stat::MTIME,
             mtime: BufferSource::new(Vec::new()).stat()?.mtime,
@@ -385,7 +385,7 @@ impl DataSource for StreamSource {
         })
     }
 
-    fn read_at(&self, offset: u64, buf: &mut [u8]) -> hivepack_zip::Result<usize> {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> hivepack::zip::Result<usize> {
         let start = (offset as usize).min(self.data.len());
         let n = buf.len().min(self.data.len() - start);
         buf[..n].copy_from_slice(&self.data[start..start + n]);
@@ -442,7 +442,7 @@ struct NulSource {
 }
 
 impl DataSource for NulSource {
-    fn stat(&self) -> hivepack_zip::Result<Stat<'static>> {
+    fn stat(&self) -> hivepack::zip::Result<Stat<'static>> {
         Ok(Stat {
             valid: stat::SIZE,
             size: self.length,
@@ -450,7 +450,7 @@ impl DataSource for NulSource {
         })
     }
 
-    fn read_at(&self, offset: u64, buf: &mut [u8]) -> hivepack_zip::Result<usize> {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> hivepack::zip::Result<usize> {
         let n = (buf.len() as u64).min(self.length.saturating_sub(offset)) as usize;
         buf[..n].fill(0);
         Ok(n)
@@ -859,7 +859,7 @@ fn zstat(t: &mut Tool, argv: &[String]) -> Result<(), ()> {
 }
 
 /// `strftime("%a %b %d %Y %H:%M:%S", localtime(mtime))`, in UTC, the time
-/// zone hivepack-zip takes MS-DOS times in, so that the fields are those
+/// zone hivepack::zip takes MS-DOS times in, so that the fields are those
 /// stored, as libzip's round trip through `mktime` and `localtime` gives
 /// them.
 fn strftime(mtime: i64) -> String {

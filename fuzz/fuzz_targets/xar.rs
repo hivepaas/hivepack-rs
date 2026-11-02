@@ -1,15 +1,15 @@
-//! hivepack-xar on any input: every entry of the archive and up to 4 MiB of
+//! hivepack::xar on any input: every entry of the archive and up to 4 MiB of
 //! its data read, twice, in pieces of different sizes the first eight
 //! bytes' hash picks, as an input that can seek and as one that cannot.
 //! Both reads of each must give the same headers, data and end, and a panic
-//! is a bug (`crates/xar/tests/oracle.rs` compares the answers with
+//! is a bug (`crates/hivepack/tests/xar_oracle.rs` compares the answers with
 //! libarchive).
 
 #![no_main]
 
 use std::io::{Cursor, Read};
 
-use hivepack_xar::{Error, Header, Reader};
+use hivepack::xar::{Error, Header, Reader};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_DATA: usize = 4 << 20;

@@ -15,7 +15,7 @@
 //	    Answered "ok <digest>".
 //
 //	blake2s <key> <data>
-//	    BLAKE2s-256 (x/crypto/blake2s), for hivepack-crypto and not age's:
+//	    BLAKE2s-256 (x/crypto/blake2s), for hivepack::crypto and not age's:
 //	    "ok <digest>", or "err" for a key over 32 bytes.
 //
 //	hmac256 <key> <data>

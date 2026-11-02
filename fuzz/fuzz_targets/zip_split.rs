@@ -1,17 +1,17 @@
-//! Opens the input as a split archive with hivepack-zip: its first byte
+//! Opens the input as a split archive with hivepack::zip: its first byte
 //! says how many volumes (1 to 8), the next four bytes for each but the
 //! last where it ends (little-endian, then taken modulo what is left), and
 //! the rest is cut into those volumes, joined by `Volumes`. Leniently and
 //! with `ZIP_CHECKCONS`, every entry is read, decompressed and raw, in
 //! pieces: no panic, and the archive, written again as one of one disk,
 //! opens with the same entries. libzip reads no split archives:
-//! `crates/zip/tests/split.rs` compares them with 7-Zip.
+//! `crates/hivepack/tests/zip_split.rs` compares them with 7-Zip.
 
 #![no_main]
 
 use std::io::Cursor;
 
-use hivepack_zip::{Archive, Closed, Flags, OpenFlags, ReadAt, Volumes};
+use hivepack::zip::{Archive, Closed, Flags, OpenFlags, ReadAt, Volumes};
 use libfuzzer_sys::fuzz_target;
 
 /// Reads entry `i` to its end, in pieces of growing sizes, and closes it.

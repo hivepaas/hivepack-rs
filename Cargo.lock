@@ -29,7 +29,7 @@ name = "age-bench"
 version = "0.0.0"
 dependencies = [
  "getrandom",
- "hivepack-age",
+ "hivepack",
 ]
 
 [[package]]
@@ -96,7 +96,7 @@ name = "bzip2-bench"
 version = "0.0.0"
 dependencies = [
  "bzip2",
- "hivepack-bzip2",
+ "hivepack",
 ]
 
 [[package]]
@@ -298,7 +298,7 @@ name = "deflate-bench"
 version = "0.0.0"
 dependencies = [
  "flate2",
- "hivepack-deflate",
+ "hivepack",
  "libz-sys",
 ]
 
@@ -401,194 +401,36 @@ dependencies = [
 ]
 
 [[package]]
-name = "hivepack-7z"
-version = "0.1.0"
-dependencies = [
- "hivepack-bzip2",
- "hivepack-crypto",
- "hivepack-deflate",
- "hivepack-xz",
- "hivepack-zstd",
-]
-
-[[package]]
-name = "hivepack-age"
-version = "0.1.0"
-dependencies = [
- "hivepack-crypto",
- "hivepack-deflate",
-]
-
-[[package]]
-name = "hivepack-bzip2"
-version = "0.1.0"
-dependencies = [
- "bzip2",
-]
-
-[[package]]
-name = "hivepack-cpio"
-version = "0.1.0"
-dependencies = [
- "hivepack-bzip2",
- "hivepack-deflate",
-]
-
-[[package]]
-name = "hivepack-crypto"
+name = "hivepack"
 version = "0.1.0"
 dependencies = [
  "aes",
  "blake2s_simd",
+ "bzip2",
+ "cap-fs-ext",
+ "cap-std",
  "chacha20poly1305",
  "curve25519-dalek",
  "ed25519-dalek",
+ "flate2",
  "hkdf",
  "hmac",
  "hpke",
+ "liblzma",
+ "libz-sys",
+ "lz4",
+ "lz4-sys",
  "md-5",
  "ml-dsa",
  "pbkdf2",
  "rand_core",
+ "rustix",
  "scrypt",
+ "serde",
+ "serde_json",
  "sha1",
  "sha2",
  "subtle",
-]
-
-[[package]]
-name = "hivepack-deflate"
-version = "0.1.0"
-dependencies = [
- "flate2",
- "libz-sys",
-]
-
-[[package]]
-name = "hivepack-extract"
-version = "0.1.0"
-dependencies = [
- "cap-fs-ext",
- "cap-std",
- "hivepack-7z",
- "hivepack-cpio",
- "hivepack-crypto",
- "hivepack-deflate",
- "hivepack-iso",
- "hivepack-open",
- "hivepack-rar",
- "hivepack-tar",
- "hivepack-udf",
- "hivepack-xar",
- "hivepack-xz",
- "hivepack-zip",
- "rustix",
-]
-
-[[package]]
-name = "hivepack-iso"
-version = "0.1.0"
-dependencies = [
- "hivepack-deflate",
- "hivepack-xz",
-]
-
-[[package]]
-name = "hivepack-lz4"
-version = "0.1.0"
-dependencies = [
- "lz4",
- "lz4-sys",
-]
-
-[[package]]
-name = "hivepack-open"
-version = "0.1.0"
-dependencies = [
- "bzip2",
- "flate2",
- "hivepack-7z",
- "hivepack-age",
- "hivepack-bzip2",
- "hivepack-cpio",
- "hivepack-deflate",
- "hivepack-extract",
- "hivepack-iso",
- "hivepack-lz4",
- "hivepack-tar",
- "hivepack-udf",
- "hivepack-xar",
- "hivepack-xz",
- "hivepack-zip",
- "hivepack-zstd",
- "liblzma",
- "lz4",
- "zstd",
-]
-
-[[package]]
-name = "hivepack-rar"
-version = "0.1.0"
-dependencies = [
- "hivepack-crypto",
- "hivepack-deflate",
-]
-
-[[package]]
-name = "hivepack-sign"
-version = "0.1.0"
-dependencies = [
- "hivepack-age",
- "hivepack-crypto",
-]
-
-[[package]]
-name = "hivepack-tar"
-version = "0.1.0"
-dependencies = [
- "hivepack-bzip2",
- "hivepack-crypto",
-]
-
-[[package]]
-name = "hivepack-udf"
-version = "0.1.0"
-dependencies = [
- "hivepack-crypto",
- "hivepack-xz",
-]
-
-[[package]]
-name = "hivepack-xar"
-version = "0.1.0"
-dependencies = [
- "hivepack-bzip2",
- "hivepack-crypto",
- "hivepack-deflate",
- "hivepack-xz",
-]
-
-[[package]]
-name = "hivepack-xz"
-version = "0.1.0"
-
-[[package]]
-name = "hivepack-zip"
-version = "0.1.0"
-dependencies = [
- "hivepack-bzip2",
- "hivepack-crypto",
- "hivepack-deflate",
- "hivepack-xz",
- "hivepack-zstd",
-]
-
-[[package]]
-name = "hivepack-zstd"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
  "zstd",
 ]
 
@@ -774,7 +616,7 @@ dependencies = [
 name = "lz4-bench"
 version = "0.0.0"
 dependencies = [
- "hivepack-lz4",
+ "hivepack",
  "lz4",
  "lz4_flex",
 ]
@@ -948,7 +790,7 @@ checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 name = "rar-bench"
 version = "0.0.0"
 dependencies = [
- "hivepack-rar",
+ "hivepack",
 ]
 
 [[package]]
@@ -1058,7 +900,7 @@ dependencies = [
 name = "sevenz-bench"
 version = "0.0.0"
 dependencies = [
- "hivepack-7z",
+ "hivepack",
 ]
 
 [[package]]
@@ -1171,7 +1013,7 @@ dependencies = [
 name = "tar-bench"
 version = "0.0.0"
 dependencies = [
- "hivepack-tar",
+ "hivepack",
 ]
 
 [[package]]
@@ -1420,7 +1262,7 @@ dependencies = [
 name = "xz-bench"
 version = "0.0.0"
 dependencies = [
- "hivepack-xz",
+ "hivepack",
  "liblzma",
  "liblzma-sys",
 ]
@@ -1449,15 +1291,14 @@ dependencies = [
 name = "zip-bench"
 version = "0.0.0"
 dependencies = [
- "hivepack-zip",
+ "hivepack",
 ]
 
 [[package]]
 name = "ziptool"
 version = "0.0.0"
 dependencies = [
- "hivepack-deflate",
- "hivepack-zip",
+ "hivepack",
 ]
 
 [[package]]
@@ -1479,7 +1320,7 @@ dependencies = [
 name = "zstd-bench"
 version = "0.0.0"
 dependencies = [
- "hivepack-zstd",
+ "hivepack",
  "zstd",
 ]
 

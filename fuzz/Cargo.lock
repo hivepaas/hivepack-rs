@@ -382,37 +382,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "hivepack-7z"
-version = "0.0.0"
-dependencies = [
- "hivepack-bzip2",
- "hivepack-crypto",
- "hivepack-deflate",
- "hivepack-xz",
- "hivepack-zstd",
-]
-
-[[package]]
-name = "hivepack-age"
-version = "0.0.0"
-dependencies = [
- "hivepack-crypto",
-]
-
-[[package]]
-name = "hivepack-bzip2"
-version = "0.0.0"
-
-[[package]]
-name = "hivepack-cpio"
-version = "0.0.0"
-
-[[package]]
-name = "hivepack-crypto"
-version = "0.0.0"
+name = "hivepack"
+version = "0.1.0"
 dependencies = [
  "aes",
  "blake2s_simd",
+ "cap-fs-ext",
+ "cap-std",
  "chacha20poly1305",
  "curve25519-dalek",
  "ed25519-dalek",
@@ -423,32 +399,11 @@ dependencies = [
  "ml-dsa",
  "pbkdf2",
  "rand_core",
+ "rustix",
  "scrypt",
  "sha1",
  "sha2",
  "subtle",
-]
-
-[[package]]
-name = "hivepack-deflate"
-version = "0.0.0"
-
-[[package]]
-name = "hivepack-extract"
-version = "0.0.0"
-dependencies = [
- "cap-fs-ext",
- "cap-std",
- "hivepack-7z",
- "hivepack-cpio",
- "hivepack-iso",
- "hivepack-open",
- "hivepack-rar",
- "hivepack-tar",
- "hivepack-udf",
- "hivepack-xar",
- "hivepack-zip",
- "rustix",
 ]
 
 [[package]]
@@ -457,24 +412,7 @@ version = "0.0.0"
 dependencies = [
  "bzip2",
  "flate2",
- "hivepack-7z",
- "hivepack-age",
- "hivepack-bzip2",
- "hivepack-cpio",
- "hivepack-crypto",
- "hivepack-deflate",
- "hivepack-extract",
- "hivepack-iso",
- "hivepack-lz4",
- "hivepack-open",
- "hivepack-rar",
- "hivepack-sign",
- "hivepack-tar",
- "hivepack-udf",
- "hivepack-xar",
- "hivepack-xz",
- "hivepack-zip",
- "hivepack-zstd",
+ "hivepack",
  "libfuzzer-sys",
  "liblzma",
  "liblzma-sys",
@@ -483,83 +421,6 @@ dependencies = [
  "lz4-sys",
  "zstd",
 ]
-
-[[package]]
-name = "hivepack-iso"
-version = "0.0.0"
-dependencies = [
- "hivepack-deflate",
-]
-
-[[package]]
-name = "hivepack-lz4"
-version = "0.0.0"
-
-[[package]]
-name = "hivepack-open"
-version = "0.0.0"
-dependencies = [
- "hivepack-age",
- "hivepack-bzip2",
- "hivepack-cpio",
- "hivepack-deflate",
- "hivepack-lz4",
- "hivepack-xz",
- "hivepack-zstd",
-]
-
-[[package]]
-name = "hivepack-rar"
-version = "0.0.0"
-dependencies = [
- "hivepack-crypto",
- "hivepack-deflate",
-]
-
-[[package]]
-name = "hivepack-sign"
-version = "0.0.0"
-dependencies = [
- "hivepack-age",
- "hivepack-crypto",
-]
-
-[[package]]
-name = "hivepack-tar"
-version = "0.0.0"
-
-[[package]]
-name = "hivepack-udf"
-version = "0.0.0"
-
-[[package]]
-name = "hivepack-xar"
-version = "0.0.0"
-dependencies = [
- "hivepack-bzip2",
- "hivepack-crypto",
- "hivepack-deflate",
- "hivepack-xz",
-]
-
-[[package]]
-name = "hivepack-xz"
-version = "0.0.0"
-
-[[package]]
-name = "hivepack-zip"
-version = "0.0.0"
-dependencies = [
- "hivepack-bzip2",
- "hivepack-crypto",
- "hivepack-deflate",
- "hivepack-xz",
- "hivepack-zstd",
-]
-
-[[package]]
-name = "hivepack-zstd"
-version = "0.0.0"
 
 [[package]]
 name = "hkdf"

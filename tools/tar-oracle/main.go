@@ -1,7 +1,7 @@
-// The Go side of hivepack-tar's comparison tests.
+// The Go side of hivepack::tar's comparison tests.
 //
 // It reads one request per line on stdin and answers each on one line of
-// stdout, with Go's archive/tar, which hivepack-tar ports. The Rust tests
+// stdout, with Go's archive/tar, which hivepack::tar ports. The Rust tests
 // ask the port the same questions and compare the answers as text.
 // scripts/testdata.py builds it with the Go toolchain go.mod names.
 //

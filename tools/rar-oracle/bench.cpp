@@ -1,6 +1,6 @@
 // tools/rar-oracle/bench.cpp: UnRAR 7.3.2's speed, for tools/rar-bench. Built by
 // scripts/testdata.py with UnRAR's sources, as its library is built, without
-// RAR_SMP, so on one thread, as hivepack-rar runs.
+// RAR_SMP, so on one thread, as hivepack::rar runs.
 //
 // It reads requests from standard input, one a line, and answers each on one line:
 //

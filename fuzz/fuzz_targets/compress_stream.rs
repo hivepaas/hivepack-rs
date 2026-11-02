@@ -21,7 +21,7 @@
 
 use std::sync::Arc;
 
-use hivepack_zstd::{
+use hivepack::zstd::{
     CCtx, CDict, CParameter as P, DCtx, DictAttachPref, EndDirective, ParamSwitch,
     Strategy,
 };
@@ -311,7 +311,7 @@ fuzz_target!(|input: &[u8]| {
     let prefix = dict_way == 1;
 
     // With a stable output buffer, one buffer whose room stays the same.
-    let room = hivepack_zstd::compress_bound(src.len()).unwrap_or(0) + 64;
+    let room = hivepack::zstd::compress_bound(src.len()).unwrap_or(0) + 64;
     let (mut c_stable, mut p_stable) = if stable_out {
         (vec![0u8; room], vec![0u8; room])
     } else {
@@ -353,8 +353,8 @@ fuzz_target!(|input: &[u8]| {
             (result.map_err(name), input.pos(), output.pos())
         });
         let (got, got_end) = drive(&steps, src, stable_room, |dst, out_pos, piece, directive| {
-            let mut output = hivepack_zstd::OutBuffer { dst, pos: out_pos };
-            let mut input = hivepack_zstd::InBuffer::new(piece);
+            let mut output = hivepack::zstd::OutBuffer { dst, pos: out_pos };
+            let mut input = hivepack::zstd::InBuffer::new(piece);
             let result = p.compress_stream2(&mut output, &mut input, directive);
             let fp = p.get_frame_progression();
             assert!(
@@ -425,11 +425,11 @@ fuzz_target!(|input: &[u8]| {
             (result.map_err(name), input.pos(), output.pos())
         };
         let (got, pi, po) = {
-            let mut output = hivepack_zstd::OutBuffer {
+            let mut output = hivepack::zstd::OutBuffer {
                 dst: &mut *p_dst,
                 pos: out_pos,
             };
-            let mut input = hivepack_zstd::InBuffer::new(piece);
+            let mut input = hivepack::zstd::InBuffer::new(piece);
             let result = p.compress_stream2(&mut output, &mut input, directive);
             (result, input.pos, output.pos)
         };

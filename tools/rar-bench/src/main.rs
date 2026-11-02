@@ -1,4 +1,4 @@
-//! Times hivepack-rar against UnRAR 7.3.2 on `testdata/rar`: testing an archive,
+//! Times hivepack::rar against UnRAR 7.3.2 on `testdata/rar`: testing an archive,
 //! from its file.
 //!
 //! ```text
@@ -22,7 +22,7 @@ use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
-use hivepack_rar::{Archive, Extract};
+use hivepack::rar::{Archive, Extract};
 
 type Result<T> = std::result::Result<T, String>;
 

@@ -6,7 +6,7 @@
 //! The programs are this crate's `ziptool`, which stands for libzip's
 //! `ziptool_regress`, and `tryopen`. A test that uses a command the port's
 //! ziptool has not got yet (adding data, compression, encryption), needs a
-//! feature hivepack-zip has not got (`FTS`), or runs
+//! feature hivepack::zip has not got (`FTS`), or runs
 //! another of libzip's test programs, is skipped and counted. Each file a
 //! test gives must hold what it says afterwards, or be gone where it says
 //! `{}`, and no other file may be left in the folder. The tests come from the libzip 1.12.1
@@ -393,11 +393,11 @@ fn run(test: &Test, regress: &Path, extracted: &Path, folder: &Path) -> Result<(
 }
 
 /// The archives libzip's build extracts from `data/manyfiles-zip.zip` and
-/// `data/bigzero-zip.zip`, extracted here with hivepack-zip.
+/// `data/bigzero-zip.zip`, extracted here with hivepack::zip.
 fn extract_generated(regress: &Path, to: &Path) {
     use std::io::Read;
 
-    use hivepack_zip::{Archive, Flags, OpenFlags};
+    use hivepack::zip::{Archive, Flags, OpenFlags};
 
     std::fs::create_dir_all(to).unwrap();
     for name in ["manyfiles-zip.zip", "bigzero-zip.zip"] {
