@@ -75,6 +75,8 @@ A downloaded archive carries a mark of where it came from, which the system chec
 
 `Origin::of` reads the mark an archive's file has, and `Options::origin` carries it, as it is, to every file written: on Windows the stream is opened from the file's own handle (`:Zone.Identifier` relative to it, so no path is resolved again, and a file named `a` is not taken for drive A); on macOS the attribute is set on the file's descriptor, and on every directory created too, as Gatekeeper checks an app, which is a directory. The mark is written before the file's time, which writing a stream changes. A mark that cannot be written stops the extraction (`ErrorKind::Origin`), and so does one this system cannot carry, before anything is written: an extraction that drops the mark would hide where its files came from. It is not the default only because the archive's path is the caller's: `extract_zip` reads an `Archive`, not a file.
 
+`Origin::without_addresses` gives the mark without what a download left in it to say where its user has been, for an app that would rather not copy that on to every file: Windows' stream keeps only its zone, and one with no zone that can be read says the internet, as a mark must not be lost by being odd. macOS's holds no address and stays as it is.
+
 Linux and the other systems have no mark (`Origin::of` gives `None`). macOS's attribute takes `rustix`, a dependency with `unsafe` code, already there for `cap-std`, since the standard library has no extended attributes (see [safety.md](safety.md#dependencies-with-unsafe-code)).
 
 ## Time, cancelling and progress

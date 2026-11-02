@@ -38,6 +38,9 @@ impl std::fmt::Debug for Origin {
     }
 }
 
+/// Windows' number for the internet's zone.
+const ZONE_INTERNET: u8 = 3;
+
 /// The name of macOS's quarantine attribute.
 #[cfg(target_os = "macos")]
 const QUARANTINE: &str = "com.apple.quarantine";
@@ -48,6 +51,25 @@ impl Origin {
     /// and on other systems, which have no mark.
     pub fn of(path: &Path) -> io::Result<Option<Origin>> {
         read(path)
+    }
+
+    /// The mark without the addresses a download left in it, as what is
+    /// extracted may be passed on, and they say where its user has been. Windows'
+    /// keeps only its zone: `HostUrl` and `ReferrerUrl` go. A stream with no zone that can be read says the
+    /// internet, as a mark must not be lost by being odd. macOS's holds no address.
+    pub fn without_addresses(self) -> Origin {
+        match self {
+            Origin::ZoneIdentifier(value) => {
+                let zone = String::from_utf8_lossy(&value)
+                    .lines()
+                    .filter_map(|line| line.trim().split_once('='))
+                    .find(|(name, _)| name.trim().eq_ignore_ascii_case("ZoneId"))
+                    .and_then(|(_, zone)| zone.trim().parse::<u8>().ok())
+                    .unwrap_or(ZONE_INTERNET);
+                Origin::ZoneIdentifier(format!("[ZoneTransfer]\r\nZoneId={zone}\r\n").into_bytes())
+            }
+            quarantine => quarantine,
+        }
     }
 
     /// Whether this system can write the mark: an error, before anything
@@ -163,4 +185,50 @@ fn read(_path: &Path) -> io::Result<Option<Origin>> {
 #[cfg(not(any(windows, target_os = "macos")))]
 fn write(_origin: &Origin, _file: &std::fs::File) -> io::Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod address_tests {
+    use super::*;
+
+    fn zone(stream: &str) -> Origin {
+        Origin::ZoneIdentifier(stream.as_bytes().to_vec()).without_addresses()
+    }
+
+    fn only(zone: u8) -> Origin {
+        Origin::ZoneIdentifier(format!("[ZoneTransfer]\r\nZoneId={zone}\r\n").into_bytes())
+    }
+
+    #[test]
+    fn a_download_keeps_its_zone_and_loses_its_addresses() {
+        let stream = "[ZoneTransfer]\r\nZoneId=3\r\n\
+                      ReferrerUrl=https://example.com/page\r\n\
+                      HostUrl=https://example.com/a.zip\r\n";
+        assert_eq!(zone(stream), only(3));
+    }
+
+    #[test]
+    fn the_zone_is_kept_whatever_it_is_and_however_it_is_written() {
+        assert_eq!(zone("[ZoneTransfer]\nZoneId=4\n"), only(4));
+        assert_eq!(zone("[zonetransfer]\r\n zoneid = 2 \r\n"), only(2));
+    }
+
+    #[test]
+    fn a_mark_with_no_zone_that_can_be_read_stays_the_internet() {
+        for stream in [
+            "",
+            "[ZoneTransfer]\r\n",
+            "ZoneId=many",
+            "ZoneId=999",
+            "\u{fffd}",
+        ] {
+            assert_eq!(zone(stream), only(ZONE_INTERNET), "{stream:?}");
+        }
+    }
+
+    #[test]
+    fn a_quarantine_stays_as_it_is() {
+        let mark = Origin::Quarantine(b"0083;65a1;Safari;".to_vec());
+        assert_eq!(mark.clone().without_addresses(), mark);
+    }
 }
