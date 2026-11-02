@@ -13,6 +13,12 @@ pub enum Error {
     PassphraseNeeded,
     /// The private key file could not be read, or the passphrase is wrong.
     PrivateKey(SshKeyError),
+    /// The passphrase does not open the private key file.
+    WrongPassphrase,
+    /// The private key file is not one this crate wrote.
+    KeyFile(String),
+    /// No random bytes to make a key with, or the key file could not be encrypted.
+    MakingKey(String),
     /// The private key file's public key is not its private key's.
     KeyMismatch,
     /// The public key's line could not be read.
@@ -57,6 +63,9 @@ impl fmt::Display for Error {
         match self {
             Error::PassphraseNeeded => f.write_str("the private key needs a passphrase"),
             Error::PrivateKey(e) => write!(f, "private key: {e}"),
+            Error::WrongPassphrase => f.write_str("the passphrase does not open the private key"),
+            Error::KeyFile(e) => write!(f, "private key file: {e}"),
+            Error::MakingKey(e) => write!(f, "making a key: {e}"),
             Error::KeyMismatch => {
                 f.write_str("the private key file's public key is not its private key's")
             }

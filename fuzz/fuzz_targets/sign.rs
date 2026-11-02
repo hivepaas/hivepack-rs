@@ -17,10 +17,14 @@ fuzz_target!(|data: &[u8]| {
     let _ = PublicKey::parse(data);
     let _ = PrivateKey::parse(data, None);
 
-    let key = PrivateKey::from_seed([7; 32]);
-    let signature = sign(&key, FILE_NAMESPACE, data).unwrap();
-    verify(&signature, key.public(), FILE_NAMESPACE, data).unwrap();
     let mut changed = data.to_vec();
     changed.push(0);
-    assert!(verify(&signature, key.public(), FILE_NAMESPACE, &changed[..]).is_err());
+    for key in [
+        PrivateKey::from_seed([7; 32]),
+        PrivateKey::from_hybrid_seeds([7; 32], [8; 32]),
+    ] {
+        let signature = sign(&key, FILE_NAMESPACE, data).unwrap();
+        verify(&signature, key.public(), FILE_NAMESPACE, data).unwrap();
+        assert!(verify(&signature, key.public(), FILE_NAMESPACE, &changed[..]).is_err());
+    }
 });

@@ -15,6 +15,8 @@
 //!   `curve25519-dalek`, age's keys and SSH keys.
 //! - [`ed25519_public`], [`ed25519_sign`] and [`ed25519_verify`]: `ed25519-dalek`,
 //!   signatures.
+//! - [`mldsa65_public`], [`mldsa65_sign`] and [`mldsa65_verify`]: `ml-dsa`, signatures
+//!   that hold against a quantum computer.
 //! - [`scrypt()`]: `scrypt`, age's passphrases.
 //! - [`xwing_hpke_seal`] and [`xwing_hpke_open`]: `hpke` and `x-wing`, age's
 //!   post-quantum keys.
@@ -31,6 +33,7 @@ mod curve;
 mod digest;
 mod ed25519;
 mod kdf;
+mod mldsa;
 mod random;
 mod xwing;
 
@@ -50,6 +53,10 @@ pub use ed25519::{
     ed25519_sign, ed25519_verify,
 };
 pub use kdf::{ScryptError, scrypt};
+pub use mldsa::{
+    MLDSA65_PUBLIC_LENGTH, MLDSA65_SEED_LENGTH, MLDSA65_SIGNATURE_LENGTH, mldsa65_public,
+    mldsa65_sign, mldsa65_verify,
+};
 pub use random::{RandomSource, system_random};
 pub use xwing::{
     XWING_ENC_LENGTH, XWING_PUBLIC_LENGTH, XWING_SEED_LENGTH, XwingOpenError, xwing_hpke_open,

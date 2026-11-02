@@ -39,6 +39,10 @@ fn key() -> PrivateKey {
     PrivateKey::from_seed(seed)
 }
 
+fn ed25519_of(key: &PublicKey) -> [u8; 32] {
+    *key.as_ed25519().unwrap()
+}
+
 fn public() -> PublicKey {
     PublicKey::parse(PUBLIC).unwrap()
 }
@@ -87,10 +91,10 @@ fn a_signature_is_for_one_key_and_one_use() {
     ));
     // Signed by another key that names this one: the signature must still hold.
     let mut blob = sign(&other, FILE_NAMESPACE, MESSAGE).unwrap().to_blob();
-    let named = public().as_bytes().to_owned();
+    let named = ed25519_of(&public());
     let at = blob
         .windows(32)
-        .position(|w| w == other.public().as_bytes())
+        .position(|w| w == ed25519_of(other.public()))
         .unwrap();
     blob[at..at + 32].copy_from_slice(&named);
     let forged = Signature::from_blob(&blob).unwrap();
@@ -248,13 +252,13 @@ fn key_file(seed: &[u8; 32], public: &[u8; 32]) -> Vec<u8> {
 #[test]
 fn a_key_whose_halves_do_not_match_is_refused() {
     let seed = [3u8; 32];
-    let own = *PrivateKey::from_seed(seed).public().as_bytes();
+    let own = ed25519_of(PrivateKey::from_seed(seed).public());
     let read = PrivateKey::parse(&key_file(&seed, &own), None).unwrap();
-    assert_eq!(read.public().as_bytes(), &own);
+    assert_eq!(ed25519_of(read.public()), own);
     // A passphrase is not asked of a key that has none, nor used.
     PrivateKey::parse(&key_file(&seed, &own), Some(b"unused")).unwrap();
 
-    let other = *PrivateKey::from_seed([4; 32]).public().as_bytes();
+    let other = ed25519_of(PrivateKey::from_seed([4; 32]).public());
     assert!(matches!(
         PrivateKey::parse(&key_file(&seed, &other), None),
         Err(Error::KeyMismatch)
@@ -316,7 +320,7 @@ fn a_key_of_small_order_signs_nothing() {
     signature[0] = 1;
     let read = Signature::from_blob(&blob_of(&typed(&identity, b""), &typed(&signature, b"")));
     let read = read.unwrap();
-    let public = PublicKey::from_bytes(identity);
+    let public = PublicKey::from_ed25519(identity);
     assert!(matches!(
         verify(&read, &public, FILE_NAMESPACE, MESSAGE),
         Err(Error::BadSignature)
