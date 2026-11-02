@@ -81,7 +81,11 @@ impl Aes {
             cipher.copy_from_slice(group);
             let (blocks, _) = Block::slice_as_chunks_mut(group);
             self.decrypt_blocks(blocks);
-            for (byte, before) in group.iter_mut().zip(iv.iter().chain(cipher.iter())) {
+            let (first, rest) = group.split_at_mut(AES_BLOCK_LENGTH);
+            for (byte, before) in first.iter_mut().zip(iv.iter()) {
+                *byte ^= before;
+            }
+            for (byte, before) in rest.iter_mut().zip(cipher.iter()) {
                 *byte ^= before;
             }
             iv.copy_from_slice(&cipher[cipher.len() - AES_BLOCK_LENGTH..]);
