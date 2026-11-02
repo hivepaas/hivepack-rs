@@ -67,6 +67,12 @@ pub trait Identity {
     fn is_native(&self) -> bool {
         false
     }
+
+    /// What `identitiesToRecipients` in `cmd/age/age.go` asks of an identity:
+    /// the recipients that encrypt to it. A passphrase has none.
+    fn recipients(&self) -> Result<Vec<BoxedRecipient>, String> {
+        Err("unexpected identity type".into())
+    }
 }
 
 /// A file key known already, from [`Decryptor::file_key`]:
@@ -98,6 +104,22 @@ pub trait Recipient {
     ) -> Result<(Vec<Stanza>, Vec<String>), EncryptError> {
         Ok((self.wrap(file_key, random)?, Vec::new()))
     }
+}
+
+/// A recipient read from text or a file.
+pub type BoxedRecipient = Box<dyn Recipient + Send + Sync>;
+
+/// `identitiesToRecipients` in `cmd/age/age.go`: the recipients that encrypt to
+/// `identities`, as `age -i` does when encrypting, and `age-keygen -y`. A file of
+/// keys encrypted with a passphrase asks for it.
+pub fn identities_to_recipients(
+    identities: &[&dyn Identity],
+) -> Result<Vec<BoxedRecipient>, String> {
+    let mut recipients = Vec::new();
+    for identity in identities {
+        recipients.extend(identity.recipients()?);
+    }
+    Ok(recipients)
 }
 
 /// Fills `bytes` from `random`.

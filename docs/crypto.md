@@ -50,6 +50,10 @@ scrypt is not in BearSSL. It is written from RFC 7914: the Salsa20/8 core of sec
 
 BLAKE2 is not in BearSSL either. RAR 5 hashes files with BLAKE2sp, eight BLAKE2s leaves and a root, and [rar.md](rar.md) needs it: `blake2s.rs` and `blake2sp.rs` are ports of `ref/blake2s-ref.c` and `ref/blake2sp-ref.c` of the BLAKE2 reference implementation (github.com/BLAKE2/BLAKE2, commit `ed1974ea`), Samuel Neves's, which UnRAR's own BLAKE2 comes from, keys included, without the salt, personalization, other digest lengths and OpenMP threads, which nothing here uses.
 
+## Ed25519 public keys as X25519
+
+`ed25519_public_to_x25519` is what age needs to encrypt to an SSH key. It is not in BearSSL. It is written from RFC 8032, section 5.1.3, for whether the key is a point of the curve, and RFC 7748, section 4.1, for u = (1 + y) / (1 - y), on the field arithmetic of `ec_c25519_m31.rs`. Its input is public, so its time depends on the key. Where RFC 8032 refuses, it does what `filippo.io/edwards25519` does for age: a `y` of the modulus or more is reduced, the sign of an `x` of zero is not looked at, and `y` = 1 gives 0. RFC 7748's base point and RFC 8032's first key are in `tests/vectors.rs`; the rest is compared with age, by the files it writes, in `crates/age/tests/encrypt.rs`.
+
 ## Clearing secrets
 
 libzip clears keys and contexts with `_zip_crypto_clear` when it frees them. The port overwrites keys, key schedules, HMAC keys and hash states when they are dropped, and the intermediate key material in the key schedule, HMAC, HKDF, PBKDF2, ChaCha20 (its copy of the key), Poly1305 (its one-time key), X25519 (its copy of the scalar) and scrypt (all of its memory); not the data or the per-block temporaries, which BearSSL does not clear either. It is best effort: safe Rust has no volatile write, so the zeroing is followed by `std::hint::black_box`, which asks the compiler to keep it but does not promise to.

@@ -12,6 +12,8 @@
 
 use hivepack_crypto::{AES_BLOCK_LENGTH, Aes};
 
+use crate::armor::trim_space_start;
+use crate::base64;
 use crate::bcrypt_pbkdf;
 use crate::pem;
 
@@ -109,11 +111,168 @@ pub(crate) fn marshal_ed25519(public: &[u8; 32]) -> Vec<u8> {
     w
 }
 
+/// `parseRSA`: the bits in the modulus of an RSA key, after its type.
+fn parse_rsa(w: &mut Wire<'_>) -> Result<usize, KeyError> {
+    /// `parseInt`: the bits in a non-negative number.
+    fn bits(s: &[u8]) -> Result<usize, KeyError> {
+        if s.first().is_some_and(|b| b & 0x80 != 0) {
+            return Err(other("ssh: parse error in message type 0"));
+        }
+        let Some(at) = s.iter().position(|&b| b != 0) else {
+            return Ok(0);
+        };
+        Ok((s.len() - at) * 8 - s[at].leading_zeros() as usize)
+    }
+    let e = w.string()?;
+    let n = w.string()?;
+    let n_bits = bits(n)?;
+    if n_bits > 16384 {
+        return Err(other("ssh: rsa modulus too large"));
+    }
+    let e_bits = bits(e)?;
+    if e_bits > 24 {
+        return Err(other("ssh: exponent too large"));
+    }
+    let value = e.iter().fold(0u64, |v, &b| v << 8 | u64::from(b));
+    if value < 3 || value & 1 == 0 {
+        return Err(other("ssh: incorrect exponent"));
+    }
+    Ok(n_bits)
+}
+
+/// The bits in the modulus, if `input` is an RSA key in the wire format.
+pub(crate) fn rsa_modulus_bits(input: &[u8]) -> Option<usize> {
+    let mut w = Wire(input);
+    if w.string().ok()? != b"ssh-rsa" {
+        return None;
+    }
+    parse_rsa(&mut w).ok()
+}
+
+/// Go's `bytes.TrimSpace`: Unicode's white space, on valid UTF-8; an invalid
+/// byte is not space.
+fn trim_space(b: &[u8]) -> &[u8] {
+    let mut b = trim_space_start(b);
+    'trim: while !b.is_empty() {
+        for width in 1..=b.len().min(4) {
+            if let Ok(s) = std::str::from_utf8(&b[b.len() - width..]) {
+                if s.chars().next_back().is_some_and(char::is_whitespace) {
+                    b = &b[..b.len() - width];
+                    continue 'trim;
+                }
+                break 'trim;
+            }
+        }
+        break;
+    }
+    b
+}
+
+/// An SSH public key as an `authorized_keys` line has it.
+pub(crate) struct AuthorizedKey {
+    /// Its type, which the line says too.
+    pub(crate) kind: String,
+    /// An Ed25519 key.
+    pub(crate) ed25519: Option<[u8; 32]>,
+}
+
+/// `parseAuthorizedKey`: after a key's type, its base64 and perhaps a comment.
+fn parse_authorized_key_body(input: &[u8]) -> Result<AuthorizedKey, KeyError> {
+    let input = trim_space(input);
+    let end = input
+        .iter()
+        .position(|&c| c == b' ' || c == b'\t')
+        .unwrap_or(input.len());
+    let key = base64::decode_lenient(&input[..end]).ok_or_else(|| other("illegal base64 data"))?;
+    let (kind, ed25519) = parse_public_key(&key)?;
+    Ok(AuthorizedKey { kind, ed25519 })
+}
+
+/// A key whose line says the same type as the key does, or why not.
+fn typed_key(kind: &[u8], body: &[u8]) -> Result<AuthorizedKey, KeyError> {
+    let key = parse_authorized_key_body(body)?;
+    if kind != key.kind.as_bytes() {
+        return Err(other(format!(
+            "ssh: authorized keys key type mismatch: human-readable type {:?}, encoded type {:?}",
+            String::from_utf8_lossy(kind),
+            key.kind
+        )));
+    }
+    Ok(key)
+}
+
+/// `ParseAuthorizedKey`: the first key of the lines in `input`, past empty lines,
+/// comments and options, which are not kept.
+///
+/// Differs from Go as [`parse_public_key`] does: a key of another type than
+/// Ed25519 or RSA is taken as it says it is, where Go goes on to the next line if
+/// it finds it malformed.
+pub(crate) fn parse_authorized_key(input: &[u8]) -> Result<AuthorizedKey, KeyError> {
+    let mut last_err = None;
+    for line in input.split(|&c| c == b'\n') {
+        let line = line.split(|&c| c == b'\r').next().unwrap_or(line);
+        let line = trim_space(line);
+        if line.is_empty() || line[0] == b'#' {
+            continue;
+        }
+        let is_blank = |c: &u8| *c == b' ' || *c == b'\t';
+        let Some(at) = line.iter().position(is_blank) else {
+            continue;
+        };
+        match typed_key(&line[..at], &line[at..]) {
+            Ok(key) => return Ok(key),
+            Err(e) => last_err = Some(e),
+        }
+
+        // No key type recognised. Maybe there's an options field at the
+        // beginning.
+        let mut in_quote = false;
+        let mut i = line.len() - 1;
+        for (at, &b) in line.iter().enumerate() {
+            if !in_quote && is_blank(&b) {
+                i = at;
+                break;
+            }
+            if b == b'"' && (at == 0 || line[at - 1] != b'\\') {
+                in_quote = !in_quote;
+            }
+        }
+        while i < line.len() && is_blank(&line[i]) {
+            i += 1;
+        }
+        if i == line.len() {
+            continue;
+        }
+        let line = &line[i..];
+        let Some(at) = line.iter().position(is_blank) else {
+            continue;
+        };
+        match typed_key(&line[..at], &line[at..]) {
+            Ok(key) => return Ok(key),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(match last_err {
+        Some(e) => other(format!(
+            "ssh: no key found; last parsing error for ignored line: {e}"
+        )),
+        None => other("ssh: no key found"),
+    })
+}
+
 /// `ParsePublicKey`, for the keys agessh takes: its type, and for an
-/// Ed25519 key the key itself. Other types are only checked to be strings.
+/// Ed25519 key the key itself. An RSA key is checked. Other types are only
+/// checked to be strings.
 pub(crate) fn parse_public_key(input: &[u8]) -> Result<(String, Option<[u8; 32]>), KeyError> {
     let mut w = Wire(input);
     let algo = String::from_utf8_lossy(w.string()?).into_owned();
+    if algo == "ssh-rsa" {
+        parse_rsa(&mut w)?;
+        if !w.0.is_empty() {
+            return Err(other("ssh: trailing junk in public key"));
+        }
+        return Ok((algo, None));
+    }
     if algo != KEY_ALGO_ED25519 {
         // Differs from Go, which parses every type it knows: agessh only
         // takes Ed25519 and RSA keys, and the port reads Ed25519 only.

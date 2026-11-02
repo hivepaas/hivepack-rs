@@ -13,7 +13,7 @@
 use std::io::Read;
 use std::sync::{Mutex, PoisonError};
 
-use crate::age::{FileKey, INCORRECT_IDENTITY, Identity, UnwrapError, decrypt};
+use crate::age::{BoxedRecipient, FileKey, INCORRECT_IDENTITY, Identity, UnwrapError, decrypt};
 use crate::agessh::{self, PassphraseFn, SshIdentity};
 use crate::armor::{ArmoredReader, HEADER as ARMOR_HEADER, MAX_WHITESPACE, trim_space_start};
 use crate::error::Error;
@@ -282,6 +282,22 @@ impl Identity for EncryptedIdentity {
             }
         }
         Err(UnwrapError::Incorrect(INCORRECT_IDENTITY.into()))
+    }
+
+    /// `Recipients`: decrypts the file of keys, if that is not done yet.
+    fn recipients(&self) -> Result<Vec<BoxedRecipient>, String> {
+        let mut identities = self
+            .identities
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if identities.is_none() {
+            *identities = Some(self.decrypt()?);
+        }
+        let mut recipients = Vec::new();
+        for id in identities.iter().flatten() {
+            recipients.extend(id.recipients()?);
+        }
+        Ok(recipients)
     }
 }
 

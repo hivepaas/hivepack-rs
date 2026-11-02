@@ -22,13 +22,16 @@
 //!   header MAC that does not match, malformed armor, or a payload that
 //!   fails.
 //! - [`encrypt`] writes a file, as the Go package's `Encrypt`, to
-//!   [`X25519Recipient`]s or a [`ScryptRecipient`], armored through an
-//!   [`ArmoredWriter`], byte for byte as age writes it with the same random
-//!   bytes.
+//!   [`X25519Recipient`]s, [`SshEd25519Recipient`]s or a [`ScryptRecipient`],
+//!   armored through an [`ArmoredWriter`], byte for byte as age writes it with
+//!   the same random bytes.
+//! - [`parse_recipient`] and [`parse_recipients_file`] read what `age -r` and
+//!   `age -R` take, [`identities_to_recipients`] what encrypts to the keys of
+//!   `age -i`, and [`X25519Identity::generate`] makes a key, as `age-keygen`.
 //!
 //! The cryptography is hivepack-crypto's, ported from BearSSL, in place of
-//! Go's `golang.org/x/crypto`. Encrypting to SSH keys, SSH RSA keys,
-//! post-quantum keys and plugins are not ported yet. How the port follows age, and how it is
+//! Go's `golang.org/x/crypto`. SSH RSA keys, post-quantum keys and plugins
+//! are not ported yet. How the port follows age, and how it is
 //! checked, is in the repository: `docs/age.md`.
 //!
 //! ```no_run
@@ -68,6 +71,7 @@ mod identity_file;
 mod parse;
 mod pem;
 mod primitives;
+mod recipient_file;
 mod scrypt;
 mod ssh_keys;
 mod stream;
@@ -76,10 +80,10 @@ mod x25519;
 use std::io::{self, BufRead, BufReader, Read};
 
 pub use age::{
-    Decryptor, Encryptor, FileKey, FileKeyIdentity, Identity, Recipient, UnwrapError, decrypt,
-    encrypt,
+    BoxedRecipient, Decryptor, Encryptor, FileKey, FileKeyIdentity, Identity, Recipient,
+    UnwrapError, decrypt, encrypt, identities_to_recipients,
 };
-pub use agessh::{EncryptedSshIdentity, SshEd25519Identity};
+pub use agessh::{EncryptedSshIdentity, SshEd25519Identity, SshEd25519Recipient};
 pub use armor::{ArmoredReader, ArmoredWriter, FOOTER as ARMOR_FOOTER, HEADER as ARMOR_HEADER};
 pub use error::{EncryptError, Error, NoIdentityMatch};
 pub use format::Stanza;
@@ -88,6 +92,7 @@ pub use identity_file::{
     LazyScryptIdentity, PassphraseFor, PassphrasePrompt, parse_identities_file,
 };
 pub use parse::{BoxedIdentity, parse_identities};
+pub use recipient_file::{Recipients, SkippedKey, parse_recipient, parse_recipients_file};
 pub use scrypt::{DEFAULT_MAX_WORK_FACTOR, DEFAULT_WORK_FACTOR, ScryptIdentity, ScryptRecipient};
 pub use x25519::{X25519Identity, X25519Recipient};
 

@@ -176,6 +176,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "age_recipients"
+path = "fuzz_targets/age_recipients.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "age_keys"
 path = "fuzz_targets/age_keys.rs"
 test = false

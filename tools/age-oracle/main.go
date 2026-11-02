@@ -66,6 +66,14 @@
 //	    <random> read>", or "err" if a recipient does not parse or age refuses
 //	    the recipients.
 //
+//	    In <recipients>, also "R:<file>", a recipients file read as age -R
+//	    reads it (cmd/age's parseRecipientsFile), and "i:<file>:<passphrase>",
+//	    what encrypts to an identity file as age -i does when encrypting.
+//
+//	keygen <random>
+//	    A new X25519 identity with crypto/rand reading <random>. Answered
+//	    "ok <the identity's String> <the recipient's String>".
+//
 //	recipient <text>
 //	    <text> as age.ParseX25519Recipient reads it. Answered "ok <what its
 //	    String gives>", or "err".
@@ -232,6 +240,15 @@ func answer(words []string) string {
 		return encrypt(words[1], words[2] == "1", unhex(words[3]))
 	case words[0] == "encryptwith" && len(words) == 5:
 		return encryptWith(unhex(words[1]), words[2], words[3] == "1", unhex(words[4]))
+	case words[0] == "keygen" && len(words) == 2:
+		saved := rand.Reader
+		rand.Reader = &countingReader{bytes: unhex(words[1])}
+		defer func() { rand.Reader = saved }()
+		i, err := age.GenerateX25519Identity()
+		if err != nil {
+			return "bad"
+		}
+		return ok([]byte(i.String())) + " " + hex.EncodeToString([]byte(i.Recipient().String()))
 	case words[0] == "recipient" && len(words) == 2:
 		r, err := age.ParseX25519Recipient(string(unhex(words[1])))
 		if err != nil {
@@ -282,6 +299,27 @@ func encryptWith(random []byte, spec string, armored bool, plaintext []byte) str
 func encryptFile(spec string, armored bool, plaintext []byte) ([]byte, error) {
 	var recipients []age.Recipient
 	for _, s := range strings.Split(spec, ",") {
+		if f, ok := strings.CutPrefix(s, "R:"); ok {
+			r, err := parseRecipientsFile(unhex(f))
+			if err != nil {
+				return nil, err
+			}
+			recipients = append(recipients, r...)
+			continue
+		}
+		if f, ok := strings.CutPrefix(s, "i:"); ok {
+			contents, pass, _ := strings.Cut(f, ":")
+			ids, err := parseIdentitiesFile(unhex(contents), pass)
+			if err != nil {
+				return nil, err
+			}
+			r, err := identitiesToRecipients(ids)
+			if err != nil {
+				return nil, err
+			}
+			recipients = append(recipients, r...)
+			continue
+		}
 		if p, ok := strings.CutPrefix(s, "p:"); ok {
 			pass, logN, _ := strings.Cut(p, ":")
 			r, err := age.NewScryptRecipient(string(unhex(pass)))

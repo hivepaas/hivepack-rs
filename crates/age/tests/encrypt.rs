@@ -1,8 +1,9 @@
 //! Writing age files, compared with age v1.3.2 itself through
 //! `tools/age-oracle`: given the same random bytes, in the same order, the port
-//! must write the file age writes, byte for byte, armored or not, to X25519 keys
-//! or a passphrase, whatever pieces the plaintext comes in, and refuse what age
-//! refuses.
+//! must write the file age writes, byte for byte, armored or not, to X25519 keys,
+//! SSH Ed25519 keys, a recipients file, an identity file or a passphrase, whatever
+//! pieces the plaintext comes in, and refuse what age refuses. New keys come out
+//! the same too.
 //!
 //! - With the oracle built, requests are compared with age directly.
 //! - Everywhere, including where it is not built (Windows, and the emulated
@@ -23,8 +24,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use hivepack_age::{
-    ArmoredReader, ArmoredWriter, EncryptError, Identity, RandomSource, Recipient, ScryptIdentity,
-    ScryptRecipient, X25519Identity, X25519Recipient, decrypt_file, encrypt,
+    ArmoredReader, ArmoredWriter, BoxedRecipient, EncryptError, Identity, PassphrasePrompt,
+    RandomSource, Recipient, ScryptIdentity, ScryptRecipient, SshEd25519Recipient, X25519Identity,
+    X25519Recipient, decrypt_file, encrypt, identities_to_recipients, parse_identities_file,
+    parse_recipient, parse_recipients_file,
 };
 use hivepack_crypto::Sha256;
 use support::{Oracle, Rng, hex, repository, unhex};
@@ -40,6 +43,27 @@ const KEYS: [&str; 4] = [
 const LOW_ORDER: [&str; 2] = [
     "age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq5cu47z",
     "age1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqj7vrya",
+];
+
+/// Ed25519 public keys: RFC 8032's first three, and the curve's base point.
+const ED25519_KEYS: [&str; 4] = [
+    "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+    "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025",
+    "5866666666666666666666666666666666666666666666666666666666666666",
+];
+
+/// Encodings at the edges of what is a key: `y` of 0, 1, the modulus less one, the
+/// modulus, one more, the largest with the sign bit clear, and each sign bit.
+const ED25519_EDGES: [&str; 8] = [
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0100000000000000000000000000000000000000000000000000000000000000",
+    "0100000000000000000000000000000000000000000000000000000000000080",
+    "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707519a",
 ];
 
 /// How many requests go in the recorded file.
@@ -87,6 +111,134 @@ fn recipient_of(key: &str) -> String {
     X25519Identity::parse(key).unwrap().recipient()
 }
 
+/// Standard base64 with padding, for the lines made here.
+fn base64(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, &b)| n | u32::from(b) << (16 - 8 * i));
+        for i in 0..4 {
+            out.push(if i <= chunk.len() {
+                char::from(ALPHABET[(n >> (18 - 6 * i) & 0x3F) as usize])
+            } else {
+                '='
+            });
+        }
+    }
+    out
+}
+
+/// Fields of SSH's wire format, each with its length.
+fn wire(fields: &[&[u8]]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for field in fields {
+        out.extend_from_slice(&(field.len() as u32).to_be_bytes());
+        out.extend_from_slice(field);
+    }
+    out
+}
+
+fn ed25519_line(key: &[u8]) -> String {
+    format!("ssh-ed25519 {}", base64(&wire(&[b"ssh-ed25519", key])))
+}
+
+/// An `ssh-rsa` line whose modulus has `bits` bits, with the exponent `e`.
+fn rsa_line(bits: usize, e: &[u8]) -> String {
+    let mut n = vec![0u8; bits.div_ceil(8)];
+    n[0] = 1 << ((bits - 1) % 8);
+    if n[0] & 0x80 != 0 {
+        n.insert(0, 0);
+    }
+    format!("ssh-rsa {}", base64(&wire(&[b"ssh-rsa", e, &n])))
+}
+
+/// An `authorized_keys` line for an SSH key, in one of the shapes that one comes
+/// in, some of which Go takes and some not.
+fn ssh_line(rng: &mut Rng) -> Vec<u8> {
+    let key = match rng.below(4) {
+        0 => unhex(rng.pick(&ED25519_EDGES)),
+        1 => bytes(rng, 32),
+        _ => unhex(rng.pick(&ED25519_KEYS)),
+    };
+    let blob = wire(&[b"ssh-ed25519", &key]);
+    let b64 = base64(&blob);
+    let line = match rng.below(24) {
+        0 => format!("ssh-ed25519 {b64} me@host"),
+        1 => format!("ssh-ed25519\t{b64}\tme@host and more"),
+        2 => format!("  ssh-ed25519   {b64}  "),
+        3 => format!("ssh-opt ssh-ed25519 {b64}"),
+        4 => format!("ssh-opt=\"a b\",other ssh-ed25519 {b64} c"),
+        5 => format!("ssh-opt=\"a b ssh-ed25519 {b64} c"),
+        6 => format!("# a comment\n\nssh-ed25519 {b64}\nssh-other"),
+        7 => format!("ssh-other {b64}"),
+        8 => format!("ssh-ed25519 {}", b64.trim_end_matches('=')),
+        9 => format!(
+            "ssh-ed25519 {}",
+            base64(&wire(&[b"ssh-ed25519", &key[..31]]))
+        ),
+        10 => {
+            let mut more = blob.clone();
+            more.push(0);
+            format!("ssh-ed25519 {}", base64(&more))
+        }
+        11 => format!("ssh-ed25519 {b64}\r\n"),
+        12 => "ssh-ed25519".to_string(),
+        13 => format!("ssh-ed25519 {}", base64(&wire(&[b"ssh-ed25519"]))),
+        14 => format!("ssh-opt ssh-other ssh-ed25519 {b64}"),
+        _ => format!("ssh-ed25519 {b64}"),
+    };
+    line.into_bytes()
+}
+
+/// A line of a recipients file, mostly one that is taken or passed over, and now
+/// and then one that stops the file.
+fn recipients_line(rng: &mut Rng) -> Vec<u8> {
+    let common = rng.below(8) != 0;
+    if common {
+        return match rng.below(8) {
+            0 => format!("# {}", "a comment ".repeat(rng.pick(&[1, 900, 6000]))).into_bytes(),
+            1 => Vec::new(),
+            2 => format!(
+                "ecdsa-sha2-nistp256 {} other@host",
+                base64(&wire(&[b"ecdsa-sha2-nistp256", b"data"]))
+            )
+            .into_bytes(),
+            3 => rsa_line(rng.pick(&[512, 1024, 2047]), &[1, 0, 1]).into_bytes(),
+            4 | 5 => ed25519_line(&unhex(rng.pick(&ED25519_KEYS))).into_bytes(),
+            _ => recipient_of(rng.pick(&KEYS)).into_bytes(),
+        };
+    }
+    match rng.below(13) {
+        // A key on a line of the longest length, and of one more.
+        10 | 11 => {
+            let line = ed25519_line(&unhex(rng.pick(&ED25519_KEYS)));
+            let len = rng.pick(&[8192, 8193]);
+            format!("{line} {}", "c".repeat(len - line.len() - 1)).into_bytes()
+        }
+        // Base64 with the unused bits of its last character set, which Go
+        // does not mind here, on a key with padding: it is skipped.
+        12 => {
+            let mut line = rsa_line(1024, &[1, 0, 1]).into_bytes();
+            let at = line.iter().position(|&c| c == b'=').unwrap() - 1;
+            line[at] = if line[at] == b'z' { b'y' } else { line[at] + 1 };
+            line
+        }
+        0 => ssh_line(rng),
+        1 => rsa_line(1024, &[2]).into_bytes(),
+        2 => rsa_line(1024, &[0x80, 0, 1]).into_bytes(),
+        3 => format!("ssh-other {}", base64(&wire(&[b"ssh-rsa"]))).into_bytes(),
+        4 => KEYS[0].as_bytes().to_vec(),
+        5 => b"not a recipient".to_vec(),
+        6 => vec![b'a', 0xFF, b'b'],
+        7 => vec![b'x'; 8193],
+        8 => format!("#{}", "x".repeat(65_535)).into_bytes(),
+        _ => recipient_of(KEYS[0]).to_uppercase().into_bytes(),
+    }
+}
+
 /// The request numbered `n`, made again the same from its number.
 fn request(n: u64) -> String {
     let mut rng = Rng((n + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
@@ -100,7 +252,51 @@ fn request(n: u64) -> String {
         };
         format!("p:{pass}:{log_n}")
     };
-    let spec = match rng.below(10) {
+    if rng.below(30) == 0 {
+        return format!("keygen {}", hex(&bytes(&mut rng, 32)));
+    }
+    let spec = match rng.below(16) {
+        // An SSH key, or more, with an X25519 key or not.
+        10..=12 => {
+            let mut spec = vec![format!("s:{}", hex(&ssh_line(&mut rng)))];
+            if rng.below(3) == 0 {
+                spec.push(format!("s:{}", hex(&ssh_line(&mut rng))));
+            }
+            if rng.below(3) == 0 {
+                spec.push(recipient_of(KEYS[2]));
+            }
+            spec.join(",")
+        }
+        // A recipients file.
+        13 | 14 => {
+            let eol: &[u8] = if rng.below(4) == 0 { b"\r\n" } else { b"\n" };
+            let mut file = Vec::new();
+            for _ in 0..rng.below(8) {
+                file.extend_from_slice(&recipients_line(&mut rng));
+                file.extend_from_slice(eol);
+            }
+            if rng.below(3) == 0 {
+                file.extend_from_slice(&recipients_line(&mut rng));
+            }
+            let file = if file.is_empty() {
+                "-".to_string()
+            } else {
+                hex(&file)
+            };
+            format!("R:{file}")
+        }
+        // A file of keys, as an identity file.
+        15 => {
+            let mut file = String::from("# created: 2026-11-02T10:00:00Z\n");
+            for key in KEYS.iter().filter(|_| rng.below(2) == 0) {
+                file.push_str(key);
+                file.push('\n');
+            }
+            if rng.below(4) == 0 {
+                file.push_str("age1notakey\n");
+            }
+            format!("i:{}:-", hex(file.as_bytes()))
+        }
         // A passphrase.
         0..=2 => passphrase(&mut rng),
         // Recipients that cannot be mixed.
@@ -148,7 +344,7 @@ fn request(n: u64) -> String {
     };
     // The file key, the nonce, and up to 32 bytes for each recipient, and a
     // label; more than any file takes.
-    let random = bytes(&mut rng, 256);
+    let random = bytes(&mut rng, 512);
     let armored = rng.below(3) == 0;
     format!(
         "encryptwith {} {spec} {} {plaintext}",
@@ -205,12 +401,50 @@ fn file_of(
 /// The port's answer to an `encryptwith` request, as the oracle words it.
 fn answer(request: &str, rng: &mut Rng) -> String {
     let words: Vec<&str> = request.split(' ').collect();
+    if let ["keygen", random] = words[..] {
+        let (source, _) = counting_source(unhex(random));
+        let identity = X25519Identity::generate(Some(&source)).unwrap();
+        return format!(
+            "ok {} {}",
+            hex(identity.to_secret_string().as_bytes()),
+            hex(identity.to_recipient().to_string().as_bytes())
+        );
+    }
     let ["encryptwith", random, spec, armored, plaintext] = words[..] else {
         panic!("unknown request {request:.100}");
     };
-    let mut recipients: Vec<Box<dyn Recipient>> = Vec::new();
+    let mut recipients: Vec<BoxedRecipient> = Vec::new();
     for s in spec.split(',') {
-        if let Some(p) = s.strip_prefix("p:") {
+        if let Some(line) = s.strip_prefix("s:") {
+            let line = unhex(line);
+            let Ok(r) = SshEd25519Recipient::parse(std::str::from_utf8(&line).unwrap()) else {
+                return "err".into();
+            };
+            recipients.push(Box::new(r));
+        } else if let Some(file) = s.strip_prefix("R:") {
+            let Ok(file) = parse_recipients_file(&unhex(file)[..]) else {
+                return "err".into();
+            };
+            recipients.extend(file.recipients);
+        } else if let Some(i) = s.strip_prefix("i:") {
+            let (file, pass) = i.split_once(':').unwrap();
+            let pass = pass.to_string();
+            let prompt: PassphrasePrompt = Arc::new(move |_| {
+                if pass == "-" {
+                    Err("no passphrase".into())
+                } else {
+                    Ok(unhex(&pass))
+                }
+            });
+            let Ok(ids) = parse_identities_file(&unhex(file)[..], prompt) else {
+                return "err".into();
+            };
+            let ids: Vec<&dyn Identity> = ids.iter().map(|i| i.as_ref() as &dyn Identity).collect();
+            let Ok(r) = identities_to_recipients(&ids) else {
+                return "err".into();
+            };
+            recipients.extend(r);
+        } else if let Some(p) = s.strip_prefix("p:") {
             let (pass, log_n) = p.split_once(':').unwrap();
             let Ok(mut r) = ScryptRecipient::new(&unhex(pass)) else {
                 return "err".into();
@@ -224,7 +458,10 @@ fn answer(request: &str, rng: &mut Rng) -> String {
             recipients.push(Box::new(r));
         }
     }
-    let recipients: Vec<&dyn Recipient> = recipients.iter().map(|r| r.as_ref()).collect();
+    let recipients: Vec<&dyn Recipient> = recipients
+        .iter()
+        .map(|r| r.as_ref() as &dyn Recipient)
+        .collect();
     let (source, taken) = counting_source(unhex(random));
     match file_of(&recipients, armored == "1", &unhex(plaintext), &source, rng) {
         Ok(file) => format!("ok {} {}", hex(&file), taken.lock().unwrap()),
@@ -255,7 +492,7 @@ fn port_writes_what_age_writes() {
         }
     }
     eprintln!("{written} files written, {refused} refused");
-    assert!(written > 800 && refused > 100, "{written} and {refused}");
+    assert!(written > 700 && refused > 100, "{written} and {refused}");
 }
 
 #[test]
@@ -289,6 +526,133 @@ fn record_oracle_answers() {
         let _ = writeln!(text, "{n}\t{}", sha256(reply.as_bytes()));
     }
     std::fs::write(recorded_path(), text).expect("written");
+}
+
+/// What encrypts to SSH private keys and to files of keys, encrypted with age or
+/// not: the oracle makes those, so these are not in the recorded file. No SSH key's
+/// passphrase is asked for; an encrypted file of keys' is.
+#[test]
+fn identity_files_encrypt_as_in_age() {
+    let Some(mut oracle) = Oracle::spawn("age-oracle") else {
+        return;
+    };
+    let mut rng = Rng(0xa9e_e006);
+    let mut files = Vec::new();
+    for (i, pass) in ["-".to_string(), hex(b"password")].into_iter().enumerate() {
+        let reply = oracle.ask(&format!("sshkey {} {pass}", hex(&[i as u8 + 1; 32])));
+        let file = reply.split(' ').nth(1).unwrap().to_string();
+        files.push(format!("i:{file}:-"));
+    }
+    let keys = hex(format!("{}\n{}\n", KEYS[0], KEYS[1]).as_bytes());
+    let reply = oracle.ask(&format!("encrypt p:{}:2 0 {keys}", hex(b"password")));
+    let encrypted = reply.strip_prefix("ok ").unwrap().to_string();
+    files.push(format!("i:{encrypted}:{}", hex(b"password")));
+    files.push(format!("i:{encrypted}:{}", hex(b"wrong")));
+    files.push(format!("i:{encrypted}:-"));
+    let plaintext = hex(b"the plaintext");
+    for spec in &files {
+        for armored in [0, 1] {
+            let random = hex(&bytes(&mut rng, 256));
+            let request = format!("encryptwith {random} {spec} {armored} {plaintext}");
+            assert_eq!(
+                answer(&request, &mut rng),
+                oracle.ask(&request),
+                "{spec:.100}"
+            );
+        }
+    }
+}
+
+/// What age takes and the port cannot encrypt to stops the file, rather than leave
+/// someone out of it; what age skips, the port skips and lists.
+#[test]
+fn recipients_files_say_what_they_leave_out() {
+    let key = recipient_of(KEYS[0]);
+    let fails = |line: &str, says: &str| {
+        let file = format!("{key}\n{line}\n");
+        let e = parse_recipients_file(file.as_bytes()).unwrap_err();
+        assert!(e.contains(says) && e.contains("line 2"), "{e}");
+    };
+    fails(
+        &rsa_line(2048, &[1, 0, 1]),
+        "ssh-rsa keys are not supported yet",
+    );
+    fails(
+        &rsa_line(4096, &[1, 0, 1]),
+        "ssh-rsa keys are not supported yet",
+    );
+    fails("age1pq1aaaaaaaaaaaaaaaaaaaaaaaa", "post-quantum");
+    fails("age1tag1aaaaaaaaaaaaaaaaaaaaaaa", "tagged");
+    fails("age1plugin1aaaaaaaaaaaaaaaaaaaa", "plugins");
+    fails(KEYS[1], "apparent identity");
+
+    let file = format!(
+        "# a comment\n{key}\n{}\n\n{} me@host\n",
+        rsa_line(1024, &[1, 0, 1]),
+        "ecdsa-sha2-nistp256 ".to_string() + &base64(&wire(&[b"ecdsa-sha2-nistp256", b"data"])),
+    );
+    let file = parse_recipients_file(file.as_bytes()).unwrap();
+    assert_eq!(file.recipients.len(), 1);
+    let skipped: Vec<(usize, &str)> = file.skipped.iter().map(|s| (s.line, &s.kind[..])).collect();
+    assert_eq!(skipped, [(3, "ssh-rsa"), (5, "ecdsa-sha2-nistp256")]);
+
+    assert!(parse_recipients_file(&b""[..]).is_err());
+    let only_skipped = format!("{}\n", rsa_line(1024, &[1, 0, 1]));
+    assert!(parse_recipients_file(only_skipped.as_bytes()).is_err());
+    let too_long = vec![b'#'; 16 << 20];
+    assert!(parse_recipients_file(&too_long[..]).is_err());
+
+    assert!(parse_recipient(&rsa_line(2048, &[1, 0, 1])).is_err());
+    assert!(parse_recipient("github:someone").is_err());
+    assert!(parse_recipient("something else").is_err());
+}
+
+/// A recipient's text reads back as the same recipient.
+#[test]
+fn recipients_read_back_from_their_text() {
+    let line = ed25519_line(&unhex(ED25519_KEYS[0]));
+    let r = SshEd25519Recipient::parse(&format!("{line} me@host")).unwrap();
+    assert_eq!(r.to_string(), line);
+    assert_eq!(SshEd25519Recipient::parse(&r.to_string()).unwrap(), r);
+    let k = X25519Recipient::parse(&recipient_of(KEYS[0])).unwrap();
+    assert_eq!(X25519Recipient::parse(&k.to_string()).unwrap(), k);
+}
+
+/// A new key reads back, from what `age-keygen` writes, and opens what is encrypted
+/// to it. Two are not the same.
+#[cfg(unix)]
+#[test]
+fn new_keys_work() {
+    let key = X25519Identity::generate(None).unwrap();
+    assert_ne!(
+        key.to_secret_string(),
+        X25519Identity::generate(None).unwrap().to_secret_string()
+    );
+    let file = key.to_key_file("2026-11-02T10:00:00Z");
+    let lines: Vec<&str> = file.lines().collect();
+    assert_eq!(lines[0], "# created: 2026-11-02T10:00:00Z");
+    assert_eq!(lines[1], format!("# public key: {}", key.recipient()));
+    assert_eq!(lines[2], key.to_secret_string());
+    let prompt: PassphrasePrompt = Arc::new(|_| Err("no passphrase".into()));
+    let read = parse_identities_file(file.as_bytes(), prompt).unwrap();
+    let read: Vec<&dyn Identity> = read.iter().map(|i| i.as_ref() as &dyn Identity).collect();
+    let to = identities_to_recipients(&read).unwrap();
+    let to: Vec<&dyn Recipient> = to.iter().map(|r| r.as_ref() as &dyn Recipient).collect();
+    let mut w = encrypt(Vec::new(), &to, None).unwrap();
+    w.write_all(b"data").unwrap();
+    let encrypted = w.finish().unwrap();
+    let mut out = Vec::new();
+    decrypt_file(&encrypted[..], &[&key as &dyn Identity])
+        .unwrap()
+        .read_to_end(&mut out)
+        .unwrap();
+    assert_eq!(out, b"data");
+}
+
+#[test]
+fn a_source_that_fails_makes_no_key() {
+    let failing: RandomSource = Arc::new(|_: &mut [u8]| Err(io::Error::other("no randomness")));
+    assert!(X25519Identity::generate(Some(&failing)).is_err());
 }
 
 #[test]
