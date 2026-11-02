@@ -76,43 +76,43 @@ Against the LZMA SDK 26.05 and `7zz`, as the crate comes by default, each row th
 
 | Port / reference | Linux x86-64 | Windows x86-64 | macOS arm64 |
 |---|---|---|---|
-| Opening many files, against the SDK | 0.66× (0.58–0.73×) | 0.77× (0.75–0.79×) | 0.78× (0.66–0.89×) |
-| Copy, against the SDK | 0.45× | 0.68× | 0.48× |
-| LZMA, LZMA2 and their filters, against the SDK | 1.01× (0.84–1.07×) | 0.99× (0.86–1.02×) | 0.91× (0.84–0.98×) |
-| LZMA with `lc + lp` above 4, against the SDK | 0.71× | 0.72× | 0.66× |
-| PPMd, against the SDK | 0.83× (0.82–0.85×) | 0.89× (0.84–0.94×) | 0.84× (0.75–0.93×) |
-| Deflate and Deflate64, against `7zz` | 1.09× (0.87–1.32×) | 1.20× (0.95–1.45×) | 0.99× (0.74–1.25×) |
-| BZip2 and Swap4, against `7zz` | 0.54× (0.46–0.62×) | 0.66× (0.63–0.68×) | 0.52× (0.37–0.67×) |
-| AES-256 with Copy, against `7zz` | 0.44× | 0.43× | 0.36× |
-| AES-256 behind a compressor, against `7zz` | 1.03× (1.02–1.04×) | 1.06× (0.97–1.16×) | 0.76× (0.72–0.80×) |
-| Writing, Copy | 1.07× (0.52–1.62×) | 1.40× (0.99–1.80×) | 1.15× (0.89–1.41×) |
-| Writing, LZMA and LZMA2 | 0.69× (0.68–0.70×) | 0.80× (0.78–0.81×) | 0.80× (0.77–0.84×) |
-| Writing, Deflate | 2.24× | 2.11× | 2.74× |
-| Writing, BZip2 | 1.25× | 1.37× | 1.21× |
-| Writing, AES-256 with LZMA2 | 0.68× | 0.79× | 0.93× |
-| Writing, LZMA2, not solid, small files | 0.69× | 0.79× | 0.76× |
+| Opening many files, against the SDK | 0.66× (0.58–0.73×) | 0.77× (0.74–0.79×) | 0.75× (0.62–0.88×) |
+| Copy, against the SDK | 0.43× | 0.69× | 0.49× |
+| LZMA, LZMA2 and their filters, against the SDK | 1.01× (0.84–1.07×) | 0.99× (0.87–1.02×) | 0.89× (0.81–0.96×) |
+| LZMA with `lc + lp` above 4, against the SDK | 0.71× | 0.72× | 0.61× |
+| PPMd, against the SDK | 0.86× (0.81–0.91×) | 0.90× (0.83–0.96×) | 0.89× (0.75–1.02×) |
+| Deflate and Deflate64, against `7zz` | 1.10× (0.88–1.32×) | 1.19× (0.95–1.44×) | 0.98× (0.79–1.18×) |
+| BZip2 and Swap4, against `7zz` | 0.53× (0.45–0.61×) | 0.66× (0.63–0.68×) | 0.52× (0.39–0.64×) |
+| AES-256 with Copy, against `7zz` | 0.64× | 0.79× | 0.63× |
+| AES-256 behind a compressor, against `7zz` | 1.05× (1.03–1.07×) | 1.09× (0.99–1.19×) | 0.77× (0.72–0.83×) |
+| Writing, Copy | 1.06× (0.54–1.59×) | 1.40× (0.99–1.80×) | 1.02× (0.78–1.25×) |
+| Writing, LZMA and LZMA2 | 0.69× (0.67–0.72×) | 0.78× (0.70–0.83×) | 0.79× (0.77–0.83×) |
+| Writing, Deflate | 2.24× | 2.12× | 2.70× |
+| Writing, BZip2 | 1.25× | 1.39× | 1.20× |
+| Writing, AES-256 with LZMA2 | 0.70× | 0.80× | 0.73× |
+| Writing, LZMA2, not solid, small files | 0.68× | 0.80× | 0.81× |
 
 With the `unsafe-fast` feature, off by default (see [docs/unsafe.md](../../docs/unsafe.md)):
 
 | Port / reference | Linux x86-64 | Windows x86-64 | macOS arm64 |
 |---|---|---|---|
-| Opening many files, against the SDK | 0.67× (0.59–0.74×) | 0.77× (0.74–0.80×) | 0.78× (0.69–0.87×) |
-| Copy, against the SDK | 0.42× | 0.41× | 0.52× |
-| LZMA, LZMA2 and their filters, against the SDK | 1.01× (0.84–1.07×) | 1.00× (0.84–1.04×) | 0.88× (0.84–0.92×) |
-| LZMA with `lc + lp` above 4, against the SDK | 0.71× | 0.69× | 0.63× |
-| PPMd, against the SDK | 0.85× (0.82–0.89×) | 0.85× (0.81–0.89×) | 0.75× (0.74–0.76×) |
-| Deflate and Deflate64, against `7zz` | 1.10× (0.88–1.32×) | 1.11× (0.80–1.42×) | 1.00× (0.79–1.21×) |
-| BZip2 and Swap4, against `7zz` | 0.53× (0.45–0.61×) | 0.59× (0.50–0.68×) | 0.54× (0.41–0.66×) |
-| AES-256 with Copy, against `7zz` | 0.43× | 0.52× | 0.40× |
-| AES-256 behind a compressor, against `7zz` | 1.03× (1.02–1.04×) | 1.12× (1.01–1.23×) | 0.75× (0.68–0.81×) |
-| Writing, Copy | 1.06× (0.53–1.60×) | 1.44× (1.01–1.87×) | 1.12× (0.88–1.36×) |
-| Writing, LZMA and LZMA2 | 0.68× (0.66–0.71×) | 0.76× (0.73–0.79×) | 0.82× (0.76–0.87×) |
-| Writing, Deflate | 2.23× | 2.17× | 2.68× |
-| Writing, BZip2 | 1.25× | 1.30× | 1.20× |
-| Writing, AES-256 with LZMA2 | 0.71× | 0.78× | 0.93× |
-| Writing, LZMA2, not solid, small files | 0.68× | 0.80× | 0.77× |
+| Opening many files, against the SDK | 0.78× (0.70–0.86×) | 0.77× (0.74–0.79×) | 0.76× (0.65–0.86×) |
+| Copy, against the SDK | 0.54× | 0.41× | 0.51× |
+| LZMA, LZMA2 and their filters, against the SDK | 1.19× (1.06–1.28×) | 1.00× (0.84–1.04×) | 0.90× (0.86–0.99×) |
+| LZMA with `lc + lp` above 4, against the SDK | 0.78× | 0.69× | 0.62× |
+| PPMd, against the SDK | 0.89× (0.88–0.89×) | 0.85× (0.81–0.89×) | 0.83× (0.74–0.93×) |
+| Deflate and Deflate64, against `7zz` | 1.21× (1.01–1.40×) | 1.11× (0.80–1.42×) | 0.99× (0.81–1.17×) |
+| BZip2 and Swap4, against `7zz` | 0.60× (0.60–0.60×) | 0.59× (0.50–0.68×) | 0.54× (0.43–0.64×) |
+| AES-256 with Copy, against `7zz` | 0.60× | 0.78× | 0.68× |
+| AES-256 behind a compressor, against `7zz` | 1.25× (1.18–1.32×) | 1.13× (1.02–1.24×) | 0.77× (0.73–0.82×) |
+| Writing, Copy | 0.98× (0.17–1.79×) | 1.43× (0.99–1.87×) | 1.15× (0.90–1.39×) |
+| Writing, LZMA and LZMA2 | 0.74× (0.68–0.78×) | 0.74× (0.73–0.76×) | 0.83× (0.77–0.94×) |
+| Writing, Deflate | 2.21× | 2.17× | 2.51× |
+| Writing, BZip2 | 1.44× | 1.31× | 1.19× |
+| Writing, AES-256 with LZMA2 | 0.70× | 0.78× | 0.85× |
+| Writing, LZMA2, not solid, small files | 0.64× | 0.81× | 0.78× |
 
-**Measured on** `.github/workflows/bench.yml`, on November 2, 2026, with rustc 1.99.1. Without the feature: Linux x86-64 on AMD EPYC 7763 (4 threads); Windows x86-64 on AMD64 Family 25 Model 17 (4 threads); macOS arm64 on Apple M1 (Virtual) (3 threads). With it: Linux x86-64 on AMD EPYC 7763 (4 threads); Windows x86-64 on AMD64 Family 25 Model 1 (4 threads); macOS arm64 on Apple M1 (Virtual) (3 threads). `unsafe-fast` here is now only CRC-32 on arm64: AES has the processor's instructions in both, and differences between the tables on x86-64 are the machines. Each job gets what the runner has that day, so the two tables, and the formats, are not on the same processor, and they are shared machines: the ratios hold better than the speeds.
+**Measured on** `.github/workflows/bench.yml`, on November 2, 2026, with rustc 1.99.1. Without the feature: Linux x86-64 on AMD EPYC 7763 (4 threads); Windows x86-64 on AMD64 Family 25 Model 17 (4 threads); macOS arm64 on Apple M1 (Virtual) (3 threads). With it: Linux x86-64 on AMD EPYC 9V45 (4 threads); Windows x86-64 on AMD64 Family 25 Model 1 (4 threads); macOS arm64 on Apple M1 (Virtual) (3 threads). `unsafe-fast` here is now only CRC-32 on arm64: AES has the processor's instructions in both, and differences between the tables on x86-64 are the machines. Each job gets what the runner has that day, so the two tables, and the formats, are not on the same processor, and they are shared machines: the ratios hold better than the speeds.
 
 The rows of writing are against `7zz`, which has its own compressors.
 
