@@ -15,3 +15,5 @@ unsafe-fast = ["hivepack-age/unsafe-fast"]
 
 [dependencies]
 hivepack-age.workspace = true
+# Where a program takes the random bytes for files it writes.
+getrandom = "0.4"
