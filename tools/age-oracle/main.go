@@ -74,6 +74,14 @@
 //	    A new X25519 identity with crypto/rand reading <random>. Answered
 //	    "ok <the identity's String> <the recipient's String>".
 //
+//	keygenpq <random>
+//	    A new post-quantum identity with crypto/rand reading <random>. Answered
+//	    "ok <the identity's String> <the recipient's String>".
+//
+//	recipientpq <text>
+//	    <text> as age.ParseHybridRecipient reads it. Answered "ok <what its
+//	    String gives>", or "err".
+//
 //	recipient <text>
 //	    <text> as age.ParseX25519Recipient reads it. Answered "ok <what its
 //	    String gives>", or "err".
@@ -249,6 +257,21 @@ func answer(words []string) string {
 			return "bad"
 		}
 		return ok([]byte(i.String())) + " " + hex.EncodeToString([]byte(i.Recipient().String()))
+	case words[0] == "keygenpq" && len(words) == 2:
+		saved := rand.Reader
+		rand.Reader = &countingReader{bytes: unhex(words[1])}
+		defer func() { rand.Reader = saved }()
+		i, err := age.GenerateHybridIdentity()
+		if err != nil {
+			return "bad"
+		}
+		return ok([]byte(i.String())) + " " + hex.EncodeToString([]byte(i.Recipient().String()))
+	case words[0] == "recipientpq" && len(words) == 2:
+		r, err := age.ParseHybridRecipient(string(unhex(words[1])))
+		if err != nil {
+			return "err"
+		}
+		return ok([]byte(r.String()))
 	case words[0] == "recipient" && len(words) == 2:
 		r, err := age.ParseX25519Recipient(string(unhex(words[1])))
 		if err != nil {
@@ -338,6 +361,14 @@ func encryptFile(spec string, armored bool, plaintext []byte) ([]byte, error) {
 			recipients = append(recipients, r)
 			continue
 		}
+		if strings.HasPrefix(s, "age1pq1") {
+			r, err := age.ParseHybridRecipient(s)
+			if err != nil {
+				return nil, err
+			}
+			recipients = append(recipients, r)
+			continue
+		}
 		r, err := age.ParseX25519Recipient(s)
 		if err != nil {
 			return nil, err
@@ -411,6 +442,14 @@ func decrypt(spec string, file []byte) string {
 				return "bad"
 			}
 			i.SetMaxWorkFactor(number(logN))
+			identities = append(identities, i)
+			continue
+		}
+		if strings.HasPrefix(s, "AGE-SECRET-KEY-PQ-1") {
+			i, err := age.ParseHybridIdentity(s)
+			if err != nil {
+				return "bad"
+			}
 			identities = append(identities, i)
 			continue
 		}

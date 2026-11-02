@@ -116,6 +116,7 @@ const WORKLOADS: &[Workload] = &[
         Input::Empty,
         200,
     ),
+    work(KEYS, "ML-KEM-768 with X25519", "pq", Input::Empty, 200),
     work(KEYS, "ssh-ed25519", "ssh", Input::Empty, 200),
     work(
         KEYS,
@@ -148,6 +149,7 @@ const WORKLOADS: &[Workload] = &[
     ),
     write("Empty, to X25519", "x25519", Input::Empty, 200),
     write("Empty, to ten X25519 keys", "x25519-ten", Input::Empty, 200),
+    write("Empty, to ML-KEM-768 with X25519", "pq", Input::Empty, 200),
     write("Empty, to ssh-ed25519", "ssh", Input::Empty, 200),
     write("Empty, scrypt at 2^14", "scrypt14", Input::Empty, 1),
     write(
@@ -310,6 +312,7 @@ fn identity(kind: &str, dir: &Path) -> Result<Vec<BoxedIdentity>> {
             let id = X25519Identity::parse(key.trim())?;
             Ok(vec![Box::new(id)])
         }
+        "pq" => parse_identities(open("pq.key")?),
         "ssh" => parse_identities_file(open("ssh.key")?, std::sync::Arc::new(|_| Ok(Vec::new()))),
         "scrypt14" | "scrypt18" => Ok(vec![Box::new(ScryptIdentity::new(PASSPHRASE)?)]),
         _ => Err(format!("kind: {kind}")),

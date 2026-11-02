@@ -7,8 +7,7 @@
 //! As age's own `testkit_test.go` does, an armored vector is read through
 //! the armor reader, and the outcome is told from the error's type. Each
 //! vector is also read through `decrypt_file`, which finds the armor
-//! itself, as `age --decrypt` does. Vectors with post-quantum identities
-//! are skipped, as the port does not read those yet.
+//! itself, as `age --decrypt` does.
 
 // Helpers outside #[test] functions unwrap too: a failure there is a test
 // failure.
@@ -18,7 +17,8 @@ use std::io::{BufReader, Read};
 use std::path::PathBuf;
 
 use hivepack_age::{
-    ArmoredReader, Error, Identity, ScryptIdentity, X25519Identity, decrypt, decrypt_file,
+    ArmoredReader, Error, HybridIdentity, Identity, ScryptIdentity, X25519Identity, decrypt,
+    decrypt_file,
 };
 use hivepack_crypto::Sha256;
 use hivepack_deflate::{Flush, InBuffer, Inflate, OutBuffer, Status};
@@ -74,8 +74,6 @@ struct Vector {
     identities: Vec<Box<dyn Identity>>,
     armored: bool,
     file: Vec<u8>,
-    /// An identity the port does not read.
-    unsupported: bool,
 }
 
 fn parse_vector(contents: &[u8]) -> Vector {
@@ -85,7 +83,6 @@ fn parse_vector(contents: &[u8]) -> Vector {
         identities: Vec::new(),
         armored: false,
         file: Vec::new(),
-        unsupported: false,
     };
     let mut rest = contents;
     let mut compressed = false;
@@ -103,13 +100,12 @@ fn parse_vector(contents: &[u8]) -> Vector {
         match key {
             "expect" => v.expect = value.to_string(),
             "payload" => v.payload = Some(value.to_string()),
-            "identity" => match X25519Identity::parse(value) {
-                Ok(identity) => v.identities.push(Box::new(identity)),
-                Err(_) => {
-                    assert!(value.starts_with("AGE-SECRET-KEY-PQ-1"), "{value}");
-                    v.unsupported = true;
-                }
-            },
+            "identity" if value.starts_with("AGE-SECRET-KEY-PQ-1") => v
+                .identities
+                .push(Box::new(HybridIdentity::parse(value).unwrap())),
+            "identity" => v
+                .identities
+                .push(Box::new(X25519Identity::parse(value).unwrap())),
             "passphrase" => v
                 .identities
                 .push(Box::new(ScryptIdentity::new(value.as_bytes()).unwrap())),
@@ -187,14 +183,9 @@ fn port_decrypts_every_vector_as_expected() {
         .collect();
     names.sort();
     let mut checked = 0;
-    let mut skipped = 0;
     let mut problems = Vec::new();
     for name in &names {
         let v = parse_vector(&std::fs::read(folder.join(name)).unwrap());
-        if v.unsupported {
-            skipped += 1;
-            continue;
-        }
         checked += 1;
 
         // As age's testkit_test.go: the armor reader when the vector says.
@@ -236,9 +227,6 @@ fn port_decrypts_every_vector_as_expected() {
         }
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
-    assert!(
-        checked >= 120,
-        "only {checked} vectors checked ({skipped} skipped)"
-    );
-    eprintln!("{checked} vectors checked, {skipped} skipped (post-quantum identities)");
+    assert!(checked >= 147, "only {checked} vectors checked");
+    eprintln!("{checked} vectors checked");
 }

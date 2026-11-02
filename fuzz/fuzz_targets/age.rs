@@ -11,8 +11,11 @@
 #![no_main]
 
 use std::io::Read;
+use std::sync::{Arc, OnceLock};
 
-use hivepack_age::{Error, Identity, ScryptIdentity, X25519Identity, decrypt_file};
+use hivepack_age::{
+    Error, HybridIdentity, Identity, RandomSource, ScryptIdentity, X25519Identity, decrypt_file,
+};
 use libfuzzer_sys::fuzz_target;
 
 const KEY: &str = "AGE-SECRET-KEY-1EGTZVFFV20835NWYV6270LXYVK2VKNX2MMDKWYKLMGR48UAWX40Q2P2LM0";
@@ -42,11 +45,23 @@ fn read(data: &[u8], identities: &[&dyn Identity], mut seed: u64) -> (Vec<u8>, S
     }
 }
 
+/// A post-quantum key, made once: it takes longer than the rest.
+fn hybrid() -> &'static HybridIdentity {
+    static KEY: OnceLock<HybridIdentity> = OnceLock::new();
+    KEY.get_or_init(|| {
+        let source: RandomSource = Arc::new(|out: &mut [u8]| {
+            out.fill(7);
+            Ok(())
+        });
+        HybridIdentity::generate(Some(&source)).expect("a key")
+    })
+}
+
 fuzz_target!(|data: &[u8]| {
     let key = X25519Identity::parse(KEY).expect("the key");
     let mut passphrase = ScryptIdentity::new(b"password").expect("a passphrase");
     passphrase.set_max_work_factor(4);
-    let identities: [&dyn Identity; 2] = [&key, &passphrase];
+    let identities: [&dyn Identity; 3] = [&key, &passphrase, hybrid()];
     let seed = data.iter().take(8).fold(0u64, |h, &b| h.rotate_left(8) ^ u64::from(b));
     let first = read(data, &identities, seed);
     let second = read(data, &identities, !seed);

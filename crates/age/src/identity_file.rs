@@ -19,6 +19,7 @@ use crate::armor::{ArmoredReader, HEADER as ARMOR_HEADER, MAX_WHITESPACE, trim_s
 use crate::error::Error;
 use crate::format::Stanza;
 use crate::parse::BoxedIdentity;
+use crate::pq::HybridIdentity;
 use crate::scrypt::{DEFAULT_MAX_WORK_FACTOR, ScryptIdentity};
 use crate::x25519::X25519Identity;
 
@@ -124,7 +125,7 @@ fn parse_identity(s: &str) -> Result<BoxedIdentity, String> {
         return Ok(Box::new(X25519Identity::parse(s)?));
     }
     if s.starts_with("AGE-SECRET-KEY-PQ-1") {
-        return Err("post-quantum identities are not supported yet".into());
+        return Ok(Box::new(HybridIdentity::parse(s)?));
     }
     Err("unknown identity type".into())
 }

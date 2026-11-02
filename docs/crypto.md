@@ -15,6 +15,7 @@ Until November 2026 this crate was a port of BearSSL in safe Rust, with hand-wri
 | `scrypt` | `scrypt`, on `salsa20` | none stated | age's passphrases |
 | `x25519`, `x25519_base`, `ed25519_public_to_x25519` | `curve25519-dalek` | none stated in the README read | age's keys, SSH keys |
 | `Blake2s`, `Blake2sp` | `blake2s_simd` | none stated | RAR 5's file hashes. RustCrypto's `blake2` has no tree mode |
+| `xwing_public`, `xwing_hpke_seal`, `xwing_hpke_open` | `hpke`, on `x-wing` and `ml-kem` | **`x-wing` and `ml-kem` state that they have never been independently audited.** `hpke` states no paid audit, and a review by Cloudflare of an earlier version | age's post-quantum keys |
 | `equal` | `subtle` | none stated | age's tags and MACs |
 | `RandomSource`, `system_random` | the standard library | | see below |
 
@@ -28,6 +29,7 @@ Until November 2026 this crate was a port of BearSSL in safe Rust, with hand-wri
 - **`chacha20_poly1305_open` checks before it decrypts.** A tag that does not match leaves the data as it was.
 - **An Ed25519 public key** is a point of the curve or `None`, and its X25519 form is RFC 7748's map.
 - **Edwards decoding as age has it.** `curve25519-dalek`'s `decompress` reads a `y` of the modulus or more, and an `x` of zero with its sign set, as `filippo.io/edwards25519` does. `y` = 1 maps to 0. Each of these is compared with age.
+- **X-Wing refuses low-order points.** `x-wing` takes an X25519 part whose shared secret is all zeros, as its draft does not say, and its README says it will follow the RFC once that is published. age refuses it, as C2SP's vectors `hybrid_identity` and `hybrid_low_order` ask, so this crate checks the point first, in sealing and in opening.
 - **`scrypt` looks for its memory first.** The crate allocates in a way that aborts the program if there is none, and age lets a file ask for up to 4 GiB. So that much is reserved and let go first, which gives `ScryptError::Memory` in the usual case. A system that overcommits memory may still find out later.
 
 ## Clearing secrets

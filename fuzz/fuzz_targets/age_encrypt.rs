@@ -1,5 +1,5 @@
-//! Writing age files with hivepack-age: the first byte chooses the recipients and
-//! the armor, the next eight the random bytes and the pieces, and the rest is the
+//! Writing age files with hivepack-age, post-quantum ones among them: the first
+//! byte chooses the recipients and the armor, the next eight the random bytes and the pieces, and the rest is the
 //! plaintext. Written whole and in pieces, the file must be the same; it must
 //! decrypt to the plaintext; and, not armored, without its last byte it must not
 //! decrypt in full. A panic is a bug.
@@ -12,7 +12,7 @@ use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
 use hivepack_age::{
-    ArmoredWriter, Identity, RandomSource, Recipient, ScryptIdentity, ScryptRecipient,
+    ArmoredWriter, HybridIdentity, Identity, RandomSource, Recipient, ScryptIdentity, ScryptRecipient,
     X25519Identity, X25519Recipient, decrypt_file, encrypt,
 };
 use libfuzzer_sys::fuzz_target;
@@ -93,11 +93,14 @@ fuzz_target!(|data: &[u8]| {
     let mut identity = ScryptIdentity::new(b"password").unwrap();
     identity.set_max_work_factor(4);
 
-    let recipients: Vec<&dyn Recipient> = match mode >> 3 & 1 {
-        0 => vec![&to[0], &to[1]],
+    let pq = HybridIdentity::generate(Some(&source(seed))).unwrap();
+    let to_pq = pq.to_recipient();
+    let recipients: Vec<&dyn Recipient> = match (mode >> 3 & 1, seed & 1) {
+        (0, 0) => vec![&to[0], &to[1]],
+        (0, _) => vec![&to_pq],
         _ => vec![&pass],
     };
-    let identities: [&dyn Identity; 2] = [&keys[1], &identity];
+    let identities: [&dyn Identity; 3] = [&keys[1], &identity, &pq];
 
     let whole = file(&recipients, armored, &plaintext, seed, None);
     let pieces = file(&recipients, armored, &plaintext, seed, Some(seed));
