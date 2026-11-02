@@ -4,11 +4,13 @@
 //! sealed with a key derived from the shared secret, the share and the
 //! recipient's public key.
 
-use hivepack_crypto::{RandomSource, X25519_LENGTH, x25519, x25519_base};
+use std::io;
+
+use hivepack_crypto::{RandomSource, X25519_LENGTH, system_random, x25519, x25519_base};
 
 use crate::age::{
-    FILE_KEY_SIZE, FileKey, INCORRECT_IDENTITY, Identity, Recipient, UnwrapError, fill,
-    multi_unwrap,
+    BoxedRecipient, FILE_KEY_SIZE, FileKey, INCORRECT_IDENTITY, Identity, Recipient, UnwrapError,
+    fill, multi_unwrap,
 };
 use crate::bech32;
 use crate::error::EncryptError;
@@ -97,6 +99,45 @@ impl X25519Identity {
         })
     }
 
+    /// `GenerateX25519Identity`: a new key, with its random bytes from `random`,
+    /// or with `None` from the system, which only works on Unix.
+    pub fn generate(random: Option<&RandomSource>) -> io::Result<X25519Identity> {
+        let mut secret_key = [0u8; X25519_LENGTH];
+        match random {
+            Some(random) => random(&mut secret_key)?,
+            None => system_random(&mut secret_key)?,
+        }
+        let identity = X25519Identity {
+            our_public_key: x25519_base(&secret_key),
+            secret_key,
+        };
+        secret_key.fill(0);
+        Ok(identity)
+    }
+
+    /// `String`: the secret key as `age-keygen` writes it. The text is not
+    /// overwritten when it is dropped: that is for the caller.
+    pub fn to_secret_string(&self) -> String {
+        bech32::encode("AGE-SECRET-KEY-", &self.secret_key).unwrap_or_default()
+    }
+
+    /// What `age-keygen` writes to a file for this key, with `created` as its
+    /// date, such as `2026-11-02T10:00:00Z`.
+    pub fn to_key_file(&self, created: &str) -> String {
+        format!(
+            "# created: {created}\n# public key: {}\n{}\n",
+            self.recipient(),
+            self.to_secret_string()
+        )
+    }
+
+    /// `Recipient`: what encrypts to this key.
+    pub fn to_recipient(&self) -> X25519Recipient {
+        X25519Recipient {
+            their_public_key: self.our_public_key,
+        }
+    }
+
     /// `ParseX25519Identity`: a key as `age-keygen` writes it,
     /// `AGE-SECRET-KEY-1` and Bech32.
     pub fn parse(s: &str) -> Result<X25519Identity, String> {
@@ -164,6 +205,10 @@ impl Identity for X25519Identity {
 
     fn is_native(&self) -> bool {
         true
+    }
+
+    fn recipients(&self) -> Result<Vec<BoxedRecipient>, String> {
+        Ok(vec![Box::new(self.to_recipient())])
     }
 }
 

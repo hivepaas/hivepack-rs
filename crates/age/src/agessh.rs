@@ -1,5 +1,5 @@
-//! SSH keys: port of `agessh/agessh.go` and `agessh/encrypted_keys.go`, the
-//! identity halves, for Ed25519.
+//! SSH keys: port of `agessh/agessh.go` and `agessh/encrypted_keys.go`, for
+//! Ed25519.
 //!
 //! A stanza is `-> ssh-ed25519 <fingerprint> <ephemeral share>`: the
 //! fingerprint is the first four bytes of the SHA-256 of the public key in
@@ -13,14 +13,20 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use hivepack_crypto::{Sha256, Sha512, X25519_LENGTH, x25519, x25519_base};
+use hivepack_crypto::{
+    RandomSource, Sha256, Sha512, X25519_LENGTH, ed25519_public_to_x25519, x25519, x25519_base,
+};
 
-use crate::age::{FileKey, INCORRECT_IDENTITY, Identity, UnwrapError, multi_unwrap};
+use crate::age::{
+    BoxedRecipient, FileKey, INCORRECT_IDENTITY, Identity, Recipient, UnwrapError, fill,
+    multi_unwrap,
+};
+use crate::error::EncryptError;
 use crate::format::{Stanza, encode_to_string};
-use crate::primitives::{AeadError, aead_decrypt, hkdf_32};
+use crate::primitives::{AeadError, aead_decrypt, aead_encrypt, hkdf_32};
 use crate::ssh_keys::{
-    Ed25519PrivateKey, KEY_ALGO_ED25519, KeyError, marshal_ed25519, parse_public_key,
-    parse_raw_private_key, parse_raw_private_key_with_passphrase,
+    Ed25519PrivateKey, KEY_ALGO_ED25519, KeyError, marshal_ed25519, parse_authorized_key,
+    parse_public_key, parse_raw_private_key, parse_raw_private_key_with_passphrase,
 };
 
 /// `ed25519Label`.
@@ -36,6 +42,95 @@ fn ssh_fingerprint(ssh_key: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(ssh_key);
     encode_to_string(&h.out()[..4])
+}
+
+/// An SSH Ed25519 public key to encrypt to: `Ed25519Recipient`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SshEd25519Recipient {
+    ssh_key: Vec<u8>,
+    their_public_key: [u8; X25519_LENGTH],
+}
+
+impl SshEd25519Recipient {
+    /// `ParseRecipient`: a key as an `authorized_keys` line has it, such as
+    /// `ssh-ed25519 AAAA… me@host`.
+    ///
+    /// Differs from age: `ssh-rsa` keys are refused as not supported yet.
+    pub fn parse(s: &str) -> Result<SshEd25519Recipient, String> {
+        let malformed = |e: &dyn std::fmt::Display| format!("malformed SSH recipient: {s:?}: {e}");
+        let key = parse_authorized_key(s.as_bytes()).map_err(|e| malformed(&e))?;
+        match key.ed25519 {
+            Some(public) => Self::new(&public).map_err(|e| malformed(&e)),
+            None if key.kind == "ssh-rsa" => Err("ssh-rsa keys are not supported yet".into()),
+            None => Err(format!("unknown SSH recipient type: {:?}", key.kind)),
+        }
+    }
+
+    /// `NewEd25519Recipient`.
+    fn new(public: &[u8; 32]) -> Result<SshEd25519Recipient, String> {
+        let their_public_key = ed25519_public_to_x25519(public)
+            .ok_or("invalid Ed25519 public key: edwards25519: invalid point encoding")?;
+        Ok(SshEd25519Recipient {
+            ssh_key: marshal_ed25519(public),
+            their_public_key,
+        })
+    }
+}
+
+/// The key as an `authorized_keys` line has it, without a comment.
+impl std::fmt::Display for SshEd25519Recipient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{KEY_ALGO_ED25519} {}",
+            crate::base64::encode_padded(&self.ssh_key)
+        )
+    }
+}
+
+impl Recipient for SshEd25519Recipient {
+    /// `Wrap`.
+    fn wrap(&self, file_key: &FileKey, random: &RandomSource) -> Result<Vec<Stanza>, EncryptError> {
+        let mut ephemeral = [0u8; X25519_LENGTH];
+        fill(random, &mut ephemeral)?;
+        let our_public_key = x25519_base(&ephemeral);
+        let mut shared_secret = x25519(&ephemeral, &self.their_public_key);
+        ephemeral.fill(0);
+        if shared_secret == [0; X25519_LENGTH] {
+            return Err(EncryptError::Recipient(
+                "bad input point: low order point".into(),
+            ));
+        }
+
+        let mut tweak = hkdf_32(&[], Some(&self.ssh_key), ED25519_LABEL);
+        let mut tweaked = x25519(&tweak, &shared_secret);
+        tweak.fill(0);
+        shared_secret.fill(0);
+        // age drops the error of an all-zero result, which leaves the shared
+        // secret empty; it cannot happen for a point that passed the check above.
+        let ikm: &[u8] = if tweaked == [0; X25519_LENGTH] {
+            &[]
+        } else {
+            &tweaked
+        };
+
+        let mut salt = [0u8; 2 * X25519_LENGTH];
+        salt[..X25519_LENGTH].copy_from_slice(&our_public_key);
+        salt[X25519_LENGTH..].copy_from_slice(&self.their_public_key);
+        let mut wrapping_key = hkdf_32(ikm, Some(&salt), ED25519_LABEL);
+        tweaked.fill(0);
+        let body = aead_encrypt(&wrapping_key, file_key.as_bytes());
+        wrapping_key.fill(0);
+
+        Ok(vec![Stanza {
+            kind: KEY_ALGO_ED25519.into(),
+            args: vec![
+                ssh_fingerprint(&self.ssh_key),
+                encode_to_string(&our_public_key),
+            ],
+            body,
+        }])
+    }
 }
 
 /// An SSH Ed25519 private key: `Ed25519Identity`.
@@ -131,6 +226,14 @@ impl Identity for SshEd25519Identity {
     fn unwrap(&self, stanzas: &[Stanza]) -> Result<FileKey, UnwrapError> {
         multi_unwrap(|s| self.unwrap_one(s), stanzas)
     }
+
+    /// `Recipient`.
+    fn recipients(&self) -> Result<Vec<BoxedRecipient>, String> {
+        Ok(vec![Box::new(SshEd25519Recipient {
+            ssh_key: self.ssh_key.clone(),
+            their_public_key: self.our_public_key,
+        })])
+    }
 }
 
 impl Drop for SshEd25519Identity {
@@ -154,6 +257,7 @@ impl std::fmt::Debug for SshEd25519Identity {
 /// fingerprint tells, and the key is decrypted once.
 pub struct EncryptedSshIdentity {
     pub_key: Vec<u8>,
+    recipient: SshEd25519Recipient,
     pem_bytes: Vec<u8>,
     passphrase: PassphraseFn,
     decrypted: Mutex<Option<SshEd25519Identity>>,
@@ -162,25 +266,21 @@ pub struct EncryptedSshIdentity {
 impl EncryptedSshIdentity {
     /// `NewEncryptedSSHIdentity`: the key `pem_bytes`, whose public key
     /// `pub_key` is in the wire format.
-    ///
-    /// Differs from age: the Ed25519 public key is not checked to be a
-    /// point of the curve, which needs Edwards arithmetic that nothing else
-    /// here does; it is compared with the private key's once that is
-    /// decrypted.
     fn new(
         pub_key: Vec<u8>,
         pem_bytes: &[u8],
         passphrase: PassphraseFn,
     ) -> Result<EncryptedSshIdentity, String> {
-        let (kind, _) = parse_public_key(&pub_key).map_err(|e| e.to_string())?;
-        if kind != KEY_ALGO_ED25519 {
+        let (kind, public) = parse_public_key(&pub_key).map_err(|e| e.to_string())?;
+        let Some(public) = public else {
             if kind == "ssh-rsa" {
                 return Err("ssh-rsa keys are not supported yet".into());
             }
             return Err(format!("unsupported SSH key type: {kind}"));
-        }
+        };
         Ok(EncryptedSshIdentity {
             pub_key,
+            recipient: SshEd25519Recipient::new(&public)?,
             pem_bytes: pem_bytes.to_vec(),
             passphrase,
             decrypted: Mutex::new(None),
@@ -233,6 +333,11 @@ impl Identity for EncryptedSshIdentity {
         let result = identity.unwrap(stanzas);
         *decrypted = Some(identity);
         result
+    }
+
+    /// `Recipient`: no passphrase is needed for it.
+    fn recipients(&self) -> Result<Vec<BoxedRecipient>, String> {
+        Ok(vec![Box::new(self.recipient.clone())])
     }
 }
 

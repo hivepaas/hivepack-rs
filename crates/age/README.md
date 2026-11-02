@@ -2,7 +2,7 @@
 
 Decrypting and encrypting [age](https://age-encryption.org) files in safe Rust, ported from age v1.3.2, the reference implementation in Go (`filippo.io/age`).
 
-> **Status:** decrypts files encrypted with a passphrase, to X25519 keys (`AGE-SECRET-KEY-1…`) or to SSH Ed25519 keys, with or without a passphrase, armored or not, with age's outcomes on C2SP's test vectors and on files age encrypts. Encrypts with a passphrase or to X25519 keys, armored or not, writing what age writes, byte for byte, given the same random bytes. Encrypting to SSH keys, SSH RSA keys, post-quantum keys and plugins are not ported yet. This crate is not on crates.io.
+> **Status:** decrypts files encrypted with a passphrase, to X25519 keys (`AGE-SECRET-KEY-1…`) or to SSH Ed25519 keys, with or without a passphrase, armored or not, with age's outcomes on C2SP's test vectors and on files age encrypts. Encrypts with a passphrase or to X25519 and SSH Ed25519 keys, armored or not, writing what age writes, byte for byte, given the same random bytes. SSH RSA keys, post-quantum keys and plugins are not ported yet. This crate is not on crates.io.
 
 ```rust
 use std::io::Read;
@@ -49,6 +49,8 @@ let mut w = encrypt(file, &[&key as &dyn Recipient], None)?;
 w.write_all(b"the plaintext")?;
 w.finish()?;
 ```
+
+`SshEd25519Recipient::parse` takes an SSH public key, `parse_recipient` what `age -r` takes, `parse_recipients_file` what `age -R` takes, and `identities_to_recipients` what encrypts to the keys of `age -i`. A recipients file with a key the port cannot encrypt to, such as `ssh-rsa`, fails rather than leave that person out; the keys `age` skips with a warning are listed in `Recipients::skipped`. `X25519Identity::generate` makes a new key, and `to_key_file` what `age-keygen` writes for it.
 
 `ScryptRecipient` is a passphrase, with a work factor of 2^18 unless `set_work_factor` says otherwise, and must be a file's only recipient. For an armored file, `encrypt` writes to an `ArmoredWriter`, finished after it. Without `finish` a file lacks its last chunk and fails to decrypt. The random bytes come from the third argument, a `RandomSource`, or with `None` from `/dev/urandom`: where the system is not Unix a program gives its own, such as the `getrandom` crate, or `encrypt` fails. It fails before writing anything, whenever the source does.
 

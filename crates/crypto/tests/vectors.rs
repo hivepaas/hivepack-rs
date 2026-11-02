@@ -799,3 +799,43 @@ fn scrypt_reports_memory_it_cannot_have() {
         "{result:?}"
     );
 }
+
+/// RFC 7748, section 4.1: the base point of edwards25519 is that of curve25519.
+/// And RFC 8032's first key: its X25519 form is what the SHA-512 of its seed gives,
+/// as age has it. The rest is compared with Go in `crates/age/tests/encrypt.rs`.
+#[test]
+fn ed25519_public_keys_as_x25519() {
+    let unhex = |s: &str| -> [u8; 32] {
+        let bytes: Vec<u8> = (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect();
+        bytes.try_into().unwrap()
+    };
+    let base = unhex("5866666666666666666666666666666666666666666666666666666666666666");
+    let mut nine = [0; 32];
+    nine[0] = 9;
+    assert_eq!(hivepack_crypto::ed25519_public_to_x25519(&base), Some(nine));
+
+    let seed = unhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
+    let public = unhex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
+    let mut h = hivepack_crypto::Sha512::new();
+    h.update(&seed);
+    let hash = h.out();
+    let scalar: [u8; 32] = hash[..32].try_into().unwrap();
+    assert_eq!(
+        hivepack_crypto::ed25519_public_to_x25519(&public),
+        Some(hivepack_crypto::x25519_base(&scalar))
+    );
+
+    // y = 1, whose u has no inverse to divide by, and y = 2, which is no point.
+    let mut one = [0; 32];
+    one[0] = 1;
+    assert_eq!(
+        hivepack_crypto::ed25519_public_to_x25519(&one),
+        Some([0; 32])
+    );
+    let mut two = [0; 32];
+    two[0] = 2;
+    assert_eq!(hivepack_crypto::ed25519_public_to_x25519(&two), None);
+}

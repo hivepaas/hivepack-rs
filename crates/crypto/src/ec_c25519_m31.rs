@@ -330,6 +330,100 @@ pub fn x25519(kb: &[u8; X25519_LENGTH], g: &[u8; X25519_LENGTH]) -> [u8; X25519_
     g
 }
 
+/// `a` to the power 2^`bits` - 1 less the bits at `holes`, from the top bit down:
+/// the exponents below, which are almost all ones.
+fn f255_pow(a: &[u32; 9], bits: u32, holes: &[u32]) -> [u32; 9] {
+    let mut r = *a;
+    let mut t = [0u32; 9];
+    for bit in (0..bits - 1).rev() {
+        f255_square(&mut t, &r);
+        r = t;
+        if !holes.contains(&bit) {
+            f255_mul(&mut t, &r, a);
+            r = t;
+        }
+    }
+    r
+}
+
+/// A value as its 32 bytes, fully reduced.
+fn f255_bytes(a: &[u32; 9]) -> [u8; X25519_LENGTH] {
+    let mut d = *a;
+    reduce_final_f255(&mut d);
+    let mut out = [0; X25519_LENGTH];
+    le30_to_le8(&mut out, &d);
+    out
+}
+
+/// The curve's constant `d`, -121665/121666, little-endian.
+const EDWARDS_D: [u8; X25519_LENGTH] = [
+    0xA3, 0x78, 0x59, 0x13, 0xCA, 0x4D, 0xEB, 0x75, 0xAB, 0xD8, 0x41, 0x41, 0x4D, 0x0A, 0x70, 0x00,
+    0x98, 0xE8, 0x79, 0x77, 0x79, 0x40, 0xC7, 0x8C, 0x73, 0xFE, 0x6F, 0x2B, 0xEE, 0x6C, 0x03, 0x52,
+];
+
+/// An Ed25519 public key as the X25519 point it is on the birational map, as
+/// SSH keys are used to encrypt to: `None` if it is no point of the curve.
+///
+/// Not in BearSSL. Written from RFC 8032, section 5.1.3, whose square root tells
+/// whether `x` exists, and RFC 7748, section 4.1, u = (1 + y) / (1 - y). It runs
+/// on a public key, and its time depends on the key.
+///
+/// Differs from RFC 8032 as `filippo.io/edwards25519` does, which age uses: a `y`
+/// of the modulus or more is reduced, and the sign of an `x` of zero is not
+/// looked at. `y` = 1 has no u; it gives 0, as inverting zero does there.
+pub fn ed25519_public_to_x25519(public: &[u8; X25519_LENGTH]) -> Option<[u8; X25519_LENGTH]> {
+    let load = |bytes: &[u8; X25519_LENGTH]| {
+        let mut masked = *bytes;
+        masked[31] &= 0x7F;
+        let mut d = [0u32; 9];
+        d[8] = le8_to_le30(&mut d, &masked);
+        d
+    };
+    let y = load(public);
+    let d = load(&EDWARDS_D);
+    let mut one = [0u32; 9];
+    one[0] = 1;
+    let zero = [0u32; 9];
+
+    // x² = u / v, with u = y² - 1 and v = d y² + 1.
+    let (mut y2, mut u, mut v, mut t) = ([0u32; 9], [0u32; 9], [0u32; 9], [0u32; 9]);
+    f255_square(&mut y2, &y);
+    f255_sub(&mut u, &y2, &one);
+    f255_mul(&mut t, &d, &y2);
+    f255_add(&mut v, &t, &one);
+
+    // A root candidate: u v³ (u v⁷)^((p - 5) / 8), where (p - 5) / 8 = 2^252 - 3.
+    let (mut v3, mut v7, mut uv3, mut uv7) = ([0u32; 9], [0u32; 9], [0u32; 9], [0u32; 9]);
+    f255_square(&mut t, &v);
+    f255_mul(&mut v3, &t, &v);
+    f255_square(&mut t, &v3);
+    f255_mul(&mut v7, &t, &v);
+    f255_mul(&mut uv3, &u, &v3);
+    f255_mul(&mut uv7, &u, &v7);
+    let power = f255_pow(&uv7, 252, &[1]);
+    let mut x = [0u32; 9];
+    f255_mul(&mut x, &uv3, &power);
+
+    // It is a root of u / v or of -u / v; with neither, there is no point.
+    let mut check = [0u32; 9];
+    f255_square(&mut t, &x);
+    f255_mul(&mut check, &t, &v);
+    let mut minus_u = [0u32; 9];
+    f255_sub(&mut minus_u, &zero, &u);
+    let check = f255_bytes(&check);
+    if check != f255_bytes(&u) && check != f255_bytes(&minus_u) {
+        return None;
+    }
+
+    // u = (1 + y) / (1 - y), inverting by p - 2 = 2^255 - 21.
+    let (mut top, mut bottom, mut out) = ([0u32; 9], [0u32; 9], [0u32; 9]);
+    f255_add(&mut top, &one, &y);
+    f255_sub(&mut bottom, &one, &y);
+    let inverse = f255_pow(&bottom, 255, &[2, 4]);
+    f255_mul(&mut out, &top, &inverse);
+    Some(f255_bytes(&out))
+}
+
 /// `api_mulgen`: X25519 of the scalar `x` and the base point: the public
 /// key of the private key `x`.
 pub fn x25519_base(x: &[u8; X25519_LENGTH]) -> [u8; X25519_LENGTH] {
