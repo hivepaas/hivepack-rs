@@ -4,7 +4,8 @@
 //
 //	keys DIR
 //	    Writes DIR/x25519.key, an age key; DIR/ssh.key, an OpenSSH Ed25519 key;
-//	    and DIR/many.keys, a file of 1,000 age keys.
+//	    DIR/many.keys, a file of 1,000 age keys; and DIR/many.pub, their
+//	    recipients.
 //	make OUT INPUT KIND
 //	    Encrypts the file INPUT to OUT. KIND is x25519, x25519-ten (nine other
 //	    recipients first), ssh, scrypt14, scrypt18 (age's default) or armored
@@ -12,8 +13,15 @@
 //	decrypt PATH KIND DIR COUNT
 //	    Decrypts the file COUNT times, reading all of it. The value is the bytes
 //	    read. KIND is as for make.
+//	encrypt INPUT KIND DIR COUNT
+//	    Encrypts the file COUNT times, 64 KiB at a time, to a writer that only counts. The value is the bytes written. KIND is as
+//	    for make.
 //	parse PATH
 //	    age.ParseIdentities. The value is the number of keys.
+//	recipients PATH
+//	    age.ParseRecipients. The value is the number of keys.
+//	keygen COUNT
+//	    age.GenerateX25519Identity COUNT times. The value is COUNT.
 //
 // scripts/testdata.py builds it; go.sum pins what it is built from.
 package main
@@ -60,13 +68,17 @@ func keys(dir string) error {
 	if err := os.WriteFile(filepath.Join(dir, "ssh.key"), pem.EncodeToMemory(block), 0o600); err != nil {
 		return err
 	}
-	var many bytes.Buffer
+	var many, pub bytes.Buffer
 	for i := 0; i < 1000; i++ {
 		id, err := age.GenerateX25519Identity()
 		if err != nil {
 			return err
 		}
 		many.WriteString("# a key\n" + id.String() + "\n")
+		pub.WriteString("# a key\n" + id.Recipient().String() + "\n")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "many.pub"), pub.Bytes(), 0o600); err != nil {
+		return err
 	}
 	return os.WriteFile(filepath.Join(dir, "many.keys"), many.Bytes(), 0o600)
 }
@@ -218,6 +230,78 @@ func decrypt(path, kind, dir string, count int) (time.Duration, uint64, error) {
 	return time.Since(start), value, nil
 }
 
+// counter is a writer that only counts.
+type counter struct{ n uint64 }
+
+func (c *counter) Write(p []byte) (int, error) {
+	c.n += uint64(len(p))
+	return len(p), nil
+}
+
+func encrypt(input, kind, dir string, count int) (time.Duration, uint64, error) {
+	list, err := recipients(kind, dir)
+	if err != nil {
+		return 0, 0, err
+	}
+	data, err := os.ReadFile(input)
+	if err != nil {
+		return 0, 0, err
+	}
+	sink := &counter{}
+	start := time.Now()
+	for i := 0; i < count; i++ {
+		var w io.Writer = sink
+		var armored io.WriteCloser
+		if kind == "armored" {
+			armored = armor.NewWriter(sink)
+			w = armored
+		}
+		wc, err := age.Encrypt(w, list...)
+		if err != nil {
+			return 0, 0, err
+		}
+		for rest := data; len(rest) > 0; {
+			n := min(len(rest), 1<<16)
+			if _, err := wc.Write(rest[:n]); err != nil {
+				return 0, 0, err
+			}
+			rest = rest[n:]
+		}
+		if err := wc.Close(); err != nil {
+			return 0, 0, err
+		}
+		if armored != nil {
+			if err := armored.Close(); err != nil {
+				return 0, 0, err
+			}
+		}
+	}
+	return time.Since(start), sink.n, nil
+}
+
+func parseRecipients(path string) (time.Duration, uint64, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, 0, err
+	}
+	start := time.Now()
+	list, err := age.ParseRecipients(bytes.NewReader(data))
+	if err != nil {
+		return 0, 0, err
+	}
+	return time.Since(start), uint64(len(list)), nil
+}
+
+func keygen(count int) (time.Duration, uint64, error) {
+	start := time.Now()
+	for i := 0; i < count; i++ {
+		if _, err := age.GenerateX25519Identity(); err != nil {
+			return 0, 0, err
+		}
+	}
+	return time.Since(start), uint64(count), nil
+}
+
 func parse(path string) (time.Duration, uint64, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -252,8 +336,20 @@ func main() {
 			if count, err = strconv.Atoi(word[4]); err == nil {
 				d, value, err = decrypt(word[1], word[2], word[3], count)
 			}
+		case len(word) == 5 && word[0] == "encrypt":
+			var count int
+			if count, err = strconv.Atoi(word[4]); err == nil {
+				d, value, err = encrypt(word[1], word[2], word[3], count)
+			}
 		case len(word) == 2 && word[0] == "parse":
 			d, value, err = parse(word[1])
+		case len(word) == 2 && word[0] == "recipients":
+			d, value, err = parseRecipients(word[1])
+		case len(word) == 2 && word[0] == "keygen":
+			var count int
+			if count, err = strconv.Atoi(word[1]); err == nil {
+				d, value, err = keygen(count)
+			}
 		default:
 			err = fmt.Errorf("a bad request: %s", in.Text())
 		}

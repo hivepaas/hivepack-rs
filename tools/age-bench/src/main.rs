@@ -1,6 +1,6 @@
 //! Times hivepack-age against age v1.3.2, the reference implementation in Go, on
 //! the same files: finding the file key with each kind of identity, reading the
-//! payload, and parsing keys.
+//! payload, writing files to each kind of recipient, parsing keys and making them.
 //!
 //! ```text
 //! python3 scripts/testdata.py fetch --group bench
@@ -12,7 +12,9 @@
 //! corpus, cut to `--limit-mb` in all. age itself, in a program of its own
 //! (`tools/age-bench/go`), makes every file and key. Files are in memory on both
 //! sides, and read as `age --decrypt` reads them, through a buffer. Only the port's
-//! `decrypt_file` is used, which also looks for armor.
+//! `decrypt_file` is used, which also looks for armor. Files written go to a writer
+//! that only counts, and the port's random bytes come from `getrandom`, as a program
+//! gives them.
 //!
 //! Rounds take turns between the two, so that a noisy machine slows them alike,
 //! and each round runs for at least `--seconds`. The output is a Markdown table of
@@ -23,17 +25,29 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitCode, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use hivepack_age::{
-    BoxedIdentity, Identity, ScryptIdentity, X25519Identity, decrypt_file, parse_identities,
-    parse_identities_file,
+    ArmoredWriter, BoxedIdentity, BoxedRecipient, Identity, RandomSource, Recipient,
+    ScryptIdentity, ScryptRecipient, X25519Identity, decrypt_file, encrypt,
+    identities_to_recipients, parse_identities, parse_identities_file, parse_recipients_file,
 };
 
 type Result<T> = std::result::Result<T, String>;
 
 const PASSPHRASE: &[u8] = b"correct-horse-battery-staple";
 const CHUNK: usize = 1 << 16;
+
+/// What a workload times.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Op {
+    Decrypt,
+    Encrypt,
+    ParseKeys,
+    ParseRecipients,
+    Keygen,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Input {
@@ -45,10 +59,11 @@ enum Input {
 struct Workload {
     category: &'static str,
     name: &'static str,
-    /// Go's name for how it is encrypted; "parse" for parsing keys.
+    op: Op,
+    /// Go's name for how it is encrypted.
     kind: &'static str,
     input: Input,
-    /// Files decrypted in each run.
+    /// Files or keys in each run.
     count: u64,
 }
 
@@ -62,8 +77,31 @@ const fn work(
     Workload {
         category,
         name,
+        op: Op::Decrypt,
         kind,
         input,
+        count,
+    }
+}
+
+const fn write(name: &'static str, kind: &'static str, input: Input, count: u64) -> Workload {
+    Workload {
+        category: "Writing a file",
+        name,
+        op: Op::Encrypt,
+        kind,
+        input,
+        count,
+    }
+}
+
+const fn on_keys(name: &'static str, op: Op, count: u64) -> Workload {
+    Workload {
+        category: "Parsing keys and making them",
+        name,
+        op,
+        kind: "",
+        input: Input::Empty,
         count,
     }
 }
@@ -108,13 +146,22 @@ const WORKLOADS: &[Workload] = &[
         Input::Small,
         200,
     ),
-    work(
-        "Parsing keys",
-        "A file of 1,000 age keys",
-        "parse",
+    write("Empty, to X25519", "x25519", Input::Empty, 200),
+    write("Empty, to ten X25519 keys", "x25519-ten", Input::Empty, 200),
+    write("Empty, to ssh-ed25519", "ssh", Input::Empty, 200),
+    write("Empty, scrypt at 2^14", "scrypt14", Input::Empty, 1),
+    write(
+        "Empty, scrypt at 2^18, age's default",
+        "scrypt18",
         Input::Empty,
         1,
     ),
+    write("Big file", "x25519", Input::Big, 1),
+    write("Big file, in ASCII armor", "armored", Input::Big, 1),
+    write("Files of 4 KiB", "x25519", Input::Small, 200),
+    on_keys("A file of 1,000 age keys", Op::ParseKeys, 1000),
+    on_keys("A file of 1,000 recipients", Op::ParseRecipients, 1000),
+    on_keys("Making a key", Op::Keygen, 200),
 ];
 
 struct Go {
@@ -174,6 +221,81 @@ fn text(path: &Path) -> Result<&str> {
         return Err(format!("{text} has a space in it"));
     }
     Ok(text)
+}
+
+/// The recipients for files of `kind`, from the keys age wrote.
+fn recipients(kind: &str, dir: &Path, random: &RandomSource) -> Result<Vec<BoxedRecipient>> {
+    let mut list: Vec<BoxedRecipient> = Vec::new();
+    match kind {
+        "scrypt14" | "scrypt18" => {
+            let mut r = ScryptRecipient::new(PASSPHRASE)?;
+            r.set_work_factor(if kind == "scrypt14" { 14 } else { 18 });
+            list.push(Box::new(r));
+            return Ok(list);
+        }
+        "x25519-ten" => {
+            for _ in 0..9 {
+                let other = X25519Identity::generate(Some(random)).map_err(|e| e.to_string())?;
+                list.push(Box::new(other.to_recipient()));
+            }
+        }
+        _ => {}
+    }
+    let boxed = identity(kind, dir)?;
+    let identities: Vec<&dyn Identity> = boxed
+        .iter()
+        .map(|id| id.as_ref() as &dyn Identity)
+        .collect();
+    list.extend(identities_to_recipients(&identities)?);
+    Ok(list)
+}
+
+/// A writer that only counts.
+struct Counter<'a>(&'a mut u64);
+
+impl Write for Counter<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        *self.0 += buf.len() as u64;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Writes all of `data` to `w`, 64 KiB at a time.
+fn write_all<W: Write>(w: &mut W, data: &[u8]) -> Result<()> {
+    for chunk in data.chunks(CHUNK) {
+        w.write_all(chunk).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn encrypt_all(
+    data: &[u8],
+    to: &[&dyn Recipient],
+    armored: bool,
+    random: &RandomSource,
+    count: u64,
+) -> Result<(Duration, u64)> {
+    let mut value = 0;
+    let start = Instant::now();
+    for _ in 0..count {
+        if armored {
+            let dst = ArmoredWriter::new(Counter(&mut value));
+            let mut w = encrypt(dst, to, Some(random)).map_err(|e| e.to_string())?;
+            write_all(&mut w, data)?;
+            let dst = w.finish().map_err(|e| e.to_string())?;
+            dst.finish().map_err(|e| e.to_string())?;
+        } else {
+            let mut w =
+                encrypt(Counter(&mut value), to, Some(random)).map_err(|e| e.to_string())?;
+            write_all(&mut w, data)?;
+            w.finish().map_err(|e| e.to_string())?;
+        }
+    }
+    Ok((start.elapsed(), value))
 }
 
 /// The identity for files of `kind`, from the keys age wrote.
@@ -289,6 +411,9 @@ fn real_main() -> Result<()> {
     let mut go = Go::spawn(&repository.join("target/testdata/age-bench-go/oracle"))?;
     go.ask(&format!("keys {}", text(&dir)?))?;
 
+    let random: RandomSource =
+        Arc::new(|bytes: &mut [u8]| getrandom::fill(bytes).map_err(std::io::Error::other));
+
     let big = load(&options.data, options.limit_mb << 20)?;
     let inputs = [
         ("empty", &big[..0]),
@@ -317,40 +442,60 @@ fn real_main() -> Result<()> {
             Input::Small => ("small", big.len().min(4096)),
             Input::Big => ("big", big.len()),
         };
-        let parsing = w.kind == "parse";
-        let path = if parsing {
-            dir.join("many.keys")
-        } else {
-            dir.join(format!("file-{index}.age"))
+        let input_path = dir.join(input_name);
+        let input_bytes = &big[..input_len];
+        let path = match w.op {
+            Op::ParseKeys => dir.join("many.keys"),
+            Op::ParseRecipients => dir.join("many.pub"),
+            _ => dir.join(format!("file-{index}.age")),
         };
-        if !parsing {
+        if w.op == Op::Decrypt {
             go.ask(&format!(
                 "make {} {} {}",
                 text(&path)?,
-                text(&dir.join(input_name))?,
+                text(&input_path)?,
                 w.kind
             ))?;
         }
-        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-        let boxed = if parsing {
-            Vec::new()
-        } else {
+        let bytes = match w.op {
+            Op::Decrypt | Op::ParseKeys | Op::ParseRecipients => {
+                std::fs::read(&path).map_err(|e| e.to_string())?
+            }
+            Op::Encrypt | Op::Keygen => Vec::new(),
+        };
+        let boxed = if w.op == Op::Decrypt {
             identity(w.kind, &dir)?
+        } else {
+            Vec::new()
         };
         let identities: Vec<&dyn Identity> = boxed
             .iter()
             .map(|id| id.as_ref() as &dyn Identity)
             .collect();
-        let request = if parsing {
-            format!("parse {}", text(&path)?)
+        let to = if w.op == Op::Encrypt {
+            recipients(w.kind, &dir, &random)?
         } else {
-            format!(
+            Vec::new()
+        };
+        let to: Vec<&dyn Recipient> = to.iter().map(|r| r.as_ref() as &dyn Recipient).collect();
+        let request = match w.op {
+            Op::Decrypt => format!(
                 "decrypt {} {} {} {}",
                 text(&path)?,
                 w.kind,
                 text(&dir)?,
                 w.count
-            )
+            ),
+            Op::Encrypt => format!(
+                "encrypt {} {} {} {}",
+                text(&input_path)?,
+                w.kind,
+                text(&dir)?,
+                w.count
+            ),
+            Op::ParseKeys => format!("parse {}", text(&path)?),
+            Op::ParseRecipients => format!("recipients {}", text(&path)?),
+            Op::Keygen => format!("keygen {}", w.count),
         };
 
         let mut port_times = Vec::new();
@@ -363,12 +508,35 @@ fn real_main() -> Result<()> {
                 while runs == 0 || total.as_secs_f64() < options.seconds {
                     let (time, value) = if !port {
                         go.ask(&request)?
-                    } else if parsing {
-                        let start = Instant::now();
-                        let ids = parse_identities(&bytes[..])?;
-                        (start.elapsed(), ids.len() as u64)
                     } else {
-                        decrypt_all(&bytes, &identities, w.count)?
+                        match w.op {
+                            Op::Decrypt => decrypt_all(&bytes, &identities, w.count)?,
+                            Op::Encrypt => encrypt_all(
+                                input_bytes,
+                                &to,
+                                w.kind == "armored",
+                                &random,
+                                w.count,
+                            )?,
+                            Op::ParseKeys => {
+                                let start = Instant::now();
+                                let ids = parse_identities(&bytes[..])?;
+                                (start.elapsed(), ids.len() as u64)
+                            }
+                            Op::ParseRecipients => {
+                                let start = Instant::now();
+                                let file = parse_recipients_file(&bytes[..])?;
+                                (start.elapsed(), file.recipients.len() as u64)
+                            }
+                            Op::Keygen => {
+                                let start = Instant::now();
+                                for _ in 0..w.count {
+                                    X25519Identity::generate(Some(&random))
+                                        .map_err(|e| e.to_string())?;
+                                }
+                                (start.elapsed(), w.count)
+                            }
+                        }
                     };
                     total += time;
                     runs += 1;
@@ -397,8 +565,8 @@ fn real_main() -> Result<()> {
         let speed = |seconds: f64| {
             if matches!(w.input, Input::Big) {
                 format!("{:.0} MB/s", input_len as f64 / seconds / 1e6)
-            } else if parsing {
-                format!("{:.0} k keys/s", 1000.0 / seconds / 1e3)
+            } else if matches!(w.op, Op::ParseKeys | Op::ParseRecipients | Op::Keygen) {
+                format!("{:.0} k keys/s", w.count as f64 / seconds / 1e3)
             } else {
                 format!("{:.1} files/s", w.count as f64 / seconds)
             }
