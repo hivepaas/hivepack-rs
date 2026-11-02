@@ -8,7 +8,7 @@
 //!
 //! - [`Aes`]: `aes`, the AES of ZIP's, 7z's and RAR's encryption.
 //! - [`Sha1`], [`Sha256`], [`Sha512`], [`Md5`], and through [`Digest`] [`Hmac`],
-//!   [`hkdf`] and [`pbkdf2`]: `sha1`, `sha2`, `md-5`, `hmac`, `hkdf` and `pbkdf2`.
+//!   [`hkdf()`] and [`pbkdf2()`]: `sha1`, `sha2`, `md-5`, `hmac`, `hkdf` and `pbkdf2`.
 //! - [`chacha20_poly1305_seal`] and [`chacha20_poly1305_open`]: `chacha20poly1305`,
 //!   what age encrypts with.
 //! - [`x25519`], [`x25519_base`] and [`ed25519_public_to_x25519`]:

@@ -18,8 +18,8 @@ homepage.workspace = true
 workspace = true
 
 [dependencies]
-# SHA-256, HMAC, HKDF, ChaCha20-Poly1305, X25519 and scrypt, ported from
-# BearSSL, in place of Go's standard library and golang.org/x/crypto.
+# SHA-256, HMAC, HKDF, ChaCha20-Poly1305, X25519 and scrypt, in place of Go's
+# standard library and golang.org/x/crypto.
 hivepack-crypto.workspace = true
 
 [dev-dependencies]

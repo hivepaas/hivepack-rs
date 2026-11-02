@@ -48,14 +48,14 @@ Where UnRAR depends on the system (a name in a RAR 4 archive without Unicode, wh
 |---|---|---|
 | `archive.cpp`, `arcread.cpp`, `headers.hpp`, `headers5.hpp`, `headers.cpp`, `rawread.cpp` | `archive`, `headers`, `raw` | step 1 |
 | `encname.cpp`, the parts of `unicode.cpp`, `strfn.cpp` and `timefn.cpp` that names and times need | `name`, `time` | step 1 |
-| `crc.cpp`, `hash.cpp`, `blake2s.cpp`, `blake2sp.cpp` | `hash`; CRC-32 from `hivepack-deflate`; BLAKE2s and BLAKE2sp in `hivepack-crypto`, ported from the reference code (CC0) | step 1 |
+| `crc.cpp`, `hash.cpp`, `blake2s.cpp`, `blake2sp.cpp` | `hash`; CRC-32 from `hivepack-deflate`; BLAKE2s and BLAKE2sp in `hivepack-crypto`, from `blake2s_simd` (formerly ported from the reference code, CC0) | step 1 |
 | `rdwrfn.cpp` (`ComprDataIO`), the data path of `extract.cpp` | `extract` | steps 1 and 2 |
 | `unpack.cpp`, `unpack15.cpp`, `unpack20.cpp`, `unpack30.cpp`, `unpack50.cpp`, `unpack50frag.cpp`, `unpackinline.cpp`, `getbits.cpp` | `unpack` | step 2 (2.9/3.x, 5.0, 7.0), step 3 (1.5, 2.x) |
 | `model.cpp`, `suballoc.cpp` (PPMd variant H) | `ppm` | step 2 |
 | `rarvm.cpp` (RAR 3's standard filters) | `filters` | step 2 |
 | `crypt.cpp`, `crypt1.cpp`, `crypt2.cpp`, `crypt3.cpp`, `crypt5.cpp`, `secpassword.cpp` | `crypt`; AES decryption, HMAC-SHA256 and PBKDF2 from `hivepack-crypto` | step 3 |
 | `volume.cpp`, `arccmt.cpp`, `qopen.cpp` | `volume`, `comment`, `quick_open` | step 3 |
-| `rijndael.cpp`, `sha1.cpp`, `sha256.cpp` | not ported: `hivepack-crypto`'s AES (BearSSL's, constant time), SHA-1 and SHA-256 | |
+| `rijndael.cpp`, `sha1.cpp`, `sha256.cpp` | not ported: `hivepack-crypto`'s AES (the `aes` crate's), SHA-1 and SHA-256 | |
 | `unpack50mt.cpp`, `threadpool.cpp`, `threadmisc.cpp` | not ported: one thread, the same output | |
 | `rar.cpp`, `cmddata.cpp`, `cmdfilter.cpp`, `cmdmix.cpp`, `options.cpp`, `consio.cpp`, `ui*.cpp`, `list.cpp`, `errhnd.cpp`, `resource.cpp`, `dll.cpp` | not ported: the command line, the console and the DLL API | |
 | `file.cpp`, `filefn.cpp`, `filcreat.cpp`, `filestr.cpp`, `find.cpp`, `scantree.cpp`, `pathfn.cpp`, `extinfo.cpp`, `hardlinks.cpp`, `ulinks.cpp`, `uowners.cpp`, `motw.cpp`, `win32*.cpp`, `isnt.cpp`, `largepage.cpp`, `system.cpp` | not ported: writing to disk, which `hivepack-extract` does by its own rules | step 4 |

@@ -31,5 +31,5 @@ hivepack-bzip2.workspace = true
 hivepack-xz.workspace = true
 # Zstandard, ported from libzstd.
 hivepack-zstd.workspace = true
-# AES, HMAC-SHA1 and PBKDF2 for WinZip AES, ported from BearSSL.
+# AES, HMAC-SHA1 and PBKDF2 for WinZip AES.
 hivepack-crypto.workspace = true

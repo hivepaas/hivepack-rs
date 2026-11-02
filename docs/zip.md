@@ -46,7 +46,7 @@ libzip 1.12.1's `lib/` is about 22,000 lines of C. Roughly half of it is ported.
 | `zip_source_crc.c`, `zip_source_compress.c`, `zip_source_window.c`, `zip_source_zip_new.c`, `zip_algorithm_*.c` | ~2,500 | Their rules are ported (when the CRC and sizes are checked, the parameters given to each codec) into Rust readers and writers. The layering is not |
 | `zip_hash.c`, `siphash.c` | 533 | Replaced by `std::collections::HashMap`, which already hashes with SipHash-1-3 and random keys, as libzip 1.12 does to stop hash flooding. Duplicate names are reported as libzip reports them |
 | The rest of `zip_source_*.c`, `zip_fdopen.c`, `zip_memdup.c`, `zip_realloc.c`, `compat.h` | ~4,900 | Not ported: C plumbing |
-| `zip_crypto_*.c`, `zip_random_*.c` | ~1,600 | Not ported: OpenSSL, GnuTLS, mbed TLS, CommonCrypto and Windows backends, replaced by `hivepack-crypto` (BearSSL's AES, SHA-1 and HMAC; see [crypto.md](crypto.md)); random bytes from `/dev/urandom` on Unix, as `zip_random_unix.c` reads them, and from the caller elsewhere |
+| `zip_crypto_*.c`, `zip_random_*.c` | ~1,600 | Not ported: OpenSSL, GnuTLS, mbed TLS, CommonCrypto and Windows backends, replaced by `hivepack-crypto` (the `aes` crate's AES, SHA-1 and HMAC; see [crypto.md](crypto.md)); random bytes from `/dev/urandom` on Unix, as `zip_random_unix.c` reads them, and from the caller elsewhere |
 | The editing API (`zip_add.c`, `zip_delete.c`, `zip_rename.c`, `zip_set_*.c`, `zip_unchange*.c`, …) | ~2,000 | Ported as an editor over `zip_close`'s model: an entry's original header plus its changes, written out as a new archive |
 
 ## What libzip does not do
@@ -250,7 +250,7 @@ A split archive [APPNOTE 8.5] is one archive's bytes cut into volumes, or disks:
 1. **CRC-32 and inflate.** The decompressor and checksums of `hivepack-deflate`, ported from zlib 1.3.2 (`crc32.c`; `inflate.c`, `inftrees.c`, `inffast.c`). Nothing compressed can be read before them. Done: see [deflate.md](deflate.md).
 2. **Reading.** Errors, buffers, extra fields, headers, file names, `open.rs`; stored and deflated entries; `tools/zip-oracle`, and `tools/ziptool`'s reading commands. Deflate64 entries, with `Inflate9` (see [deflate.md](deflate.md)): done.
 3. **Writing.** Writing headers, `close.rs`, the editor; the compressor of `hivepack-deflate` (`deflate.c`, `trees.c`), with output identical to zlib's: done, see [deflate.md](deflate.md). Editing, adding data and writing archives, `ziptool`'s commands and the tests that use them: done.
-4. **Encryption.** ZipCrypto and WinZip AES, on `hivepack-crypto` (AES, SHA-1, HMAC and PBKDF2, ported from BearSSL and compared with nettle; see [crypto.md](crypto.md)): decrypting and encrypting, done.
+4. **Encryption.** ZipCrypto and WinZip AES, on `hivepack-crypto` (AES, SHA-1, HMAC and PBKDF2, compared with nettle; see [crypto.md](crypto.md)): decrypting and encrypting, done.
 5. **Beyond libzip.** Legacy code pages, split archives (read: done; written: later), streaming, parallel work. `hivepack-extract` is built alongside step 2, so that nothing reads archives to disk without it.
 6. **More methods.** bzip2, with `hivepack-bzip2` (see [bzip2.md](bzip2.md)), LZMA and XZ, with `hivepack-xz` (see [xz.md](xz.md)), and Zstandard, with `hivepack-zstd`: done. libzip keeps LZMA2 (method 33) disabled, because 7-Zip cannot unpack it, and so does the port. PPMd (method 98), read as 7-Zip reads it: done.
 
