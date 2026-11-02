@@ -192,6 +192,11 @@ fn it_holds_what_it_would_hold_written_with_seeking() {
 fn encrypted_entries() {
     let body = b"secret ".repeat(10_000);
     let mut archive = new_archive();
+    // Windows has no system source without one, and salts need not be secret here.
+    archive.set_random_source(Some(std::sync::Arc::new(|buffer: &mut [u8]| {
+        buffer.fill(7);
+        Ok(())
+    })));
     for (name, method) in [
         ("aes", em::AES_256),
         ("short-aes", em::AES_128),
