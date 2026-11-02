@@ -127,6 +127,26 @@ pub(crate) fn encode(data: &[u8]) -> String {
     out
 }
 
+/// Encodes 48 bytes into a line of 64 characters: the armor's lines.
+pub(crate) fn encode_line(data: &[u8; 48], out: &mut [u8; 64]) {
+    let (groups, _) = data.as_chunks::<3>();
+    let (outs, _) = out.as_chunks_mut::<4>();
+    for (&[a, b, c], out) in groups.iter().zip(outs) {
+        let n = u32::from(a) << 16 | u32::from(b) << 8 | u32::from(c);
+        *out = [18, 12, 6, 0].map(|shift| ALPHABET[(n >> shift & 0x3F) as usize]);
+    }
+}
+
+/// Encodes `data`, padded with `=` to a multiple of four characters
+/// (`StdEncoding`).
+pub(crate) fn encode_padded(data: &[u8]) -> String {
+    let mut out = encode(data);
+    while !out.len().is_multiple_of(4) {
+        out.push('=');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

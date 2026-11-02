@@ -1,5 +1,4 @@
-//! The ASCII armor, age's PEM-like text form: port of `armor/armor.go`,
-//! the reading half.
+//! The ASCII armor, age's PEM-like text form: port of `armor/armor.go`.
 //!
 //! ```text
 //! -----BEGIN AGE ENCRYPTED FILE-----
@@ -11,7 +10,7 @@
 //! line ends may be CRLF, and up to 1 KiB of whitespace is allowed before
 //! the first line and after the last.
 
-use std::io::{self, BufRead, Read};
+use std::io::{self, BufRead, Read, Write};
 
 use crate::base64;
 use crate::error::Error;
@@ -276,6 +275,122 @@ impl<R: BufRead> Read for ArmoredReader<R> {
         p[..n].copy_from_slice(&self.buf[self.start..self.start + n]);
         self.start += n;
         Ok(n)
+    }
+}
+
+/// `armoredWriter`: writes what it is given to `dst` as an armored file, which
+/// [`ArmoredWriter::finish`] ends. Without it, the file has no last line, and
+/// does not read.
+///
+/// A failure of `dst` is kept, and returned again by every later write and by
+/// `finish`. `io::Error` cannot be cloned, so those are its kind and message.
+#[derive(Debug)]
+pub struct ArmoredWriter<W> {
+    dst: W,
+    started: bool,
+    /// The bytes of a line not whole yet.
+    partial: [u8; BYTES_PER_LINE],
+    partial_len: usize,
+    out: Vec<u8>,
+    err: Option<(io::ErrorKind, String)>,
+}
+
+impl<W: Write> ArmoredWriter<W> {
+    /// `NewWriter`.
+    pub fn new(dst: W) -> ArmoredWriter<W> {
+        ArmoredWriter {
+            dst,
+            started: false,
+            partial: [0; BYTES_PER_LINE],
+            partial_len: 0,
+            out: Vec::new(),
+            err: None,
+        }
+    }
+
+    /// The failure kept, if there is one.
+    fn check(&self) -> io::Result<()> {
+        match &self.err {
+            Some((kind, message)) => Err(io::Error::new(*kind, message.clone())),
+            None => Ok(()),
+        }
+    }
+
+    /// `writeHeader`, into what is to be written.
+    fn write_header(&mut self) {
+        if !self.started {
+            self.out.extend_from_slice(HEADER.as_bytes());
+            self.out.push(b'\n');
+            self.started = true;
+        }
+    }
+
+    /// A whole line, into what is to be written.
+    fn push_line(out: &mut Vec<u8>, data: &[u8; BYTES_PER_LINE]) {
+        let mut line = [0; COLUMNS_PER_LINE];
+        base64::encode_line(data, &mut line);
+        out.extend_from_slice(&line);
+        out.push(b'\n');
+    }
+
+    /// Writes what is to be written, keeping a failure.
+    fn send(&mut self) -> io::Result<()> {
+        let sent = self.dst.write_all(&self.out);
+        self.out.clear();
+        sent.inspect_err(|e| self.err = Some((e.kind(), e.to_string())))
+    }
+
+    /// `Close`: the rest and the last line, then `dst` flushed and given back.
+    pub fn finish(mut self) -> io::Result<W> {
+        self.check()?;
+        self.write_header();
+        if self.partial_len > 0 {
+            let rest = base64::encode_padded(&self.partial[..self.partial_len]);
+            self.out.extend_from_slice(rest.as_bytes());
+            self.out.push(b'\n');
+        }
+        self.out.extend_from_slice(FOOTER.as_bytes());
+        self.out.push(b'\n');
+        self.send()?;
+        self.dst.flush()?;
+        Ok(self.dst)
+    }
+}
+
+impl<W: Write> Write for ArmoredWriter<W> {
+    /// `Write`.
+    fn write(&mut self, p: &[u8]) -> io::Result<usize> {
+        self.check()?;
+        self.write_header();
+        let total = p.len();
+        let mut p = p;
+        if self.partial_len > 0 {
+            let n = p.len().min(BYTES_PER_LINE - self.partial_len);
+            self.partial[self.partial_len..self.partial_len + n].copy_from_slice(&p[..n]);
+            self.partial_len += n;
+            p = &p[n..];
+            if self.partial_len == BYTES_PER_LINE {
+                Self::push_line(&mut self.out, &self.partial);
+                self.partial_len = 0;
+            }
+        }
+        let (lines, rest) = p.as_chunks::<BYTES_PER_LINE>();
+        self.out.reserve(lines.len() * (COLUMNS_PER_LINE + 1));
+        for line in lines {
+            Self::push_line(&mut self.out, line);
+        }
+        if !rest.is_empty() {
+            self.partial[..rest.len()].copy_from_slice(rest);
+            self.partial_len = rest.len();
+        }
+        self.send()?;
+        Ok(total)
+    }
+
+    /// Flushes `dst`. The bytes of a line not whole yet stay here.
+    fn flush(&mut self) -> io::Result<()> {
+        self.check()?;
+        self.dst.flush()
     }
 }
 

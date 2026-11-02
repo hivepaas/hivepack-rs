@@ -1,4 +1,4 @@
-//! The payload: port of `internal/stream/stream.go`, the decrypting half.
+//! The payload: port of `internal/stream/stream.go`.
 //!
 //! The payload is the STREAM construction over ChaCha20-Poly1305: chunks of
 //! 64 KiB of plaintext, each sealed with a nonce that counts the chunks in
@@ -6,7 +6,7 @@
 //! authenticated before any of it is given out, and a payload cut at a
 //! chunk boundary fails, as its last chunk lacks the mark.
 
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 
 use hivepack_crypto::{
     CHACHA20_NONCE_LENGTH, POLY1305_TAG_LENGTH, chacha20, chacha20_poly1305, equal,
@@ -244,6 +244,128 @@ impl<R> std::fmt::Debug for DecryptReader<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DecryptReader")
             .field("nonce", &self.nonce)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What [`EncryptWriter`] must overwrite when it is dropped (best effort): the
+/// key, and the plaintext of a chunk not sealed yet. Apart from the writer, so
+/// that the writer can give its destination back.
+struct Sealer {
+    key: [u8; 32],
+    nonce: [u8; CHACHA20_NONCE_LENGTH],
+    /// The chunk being written, plaintext in `buf[..len]`, then sealed in place
+    /// with its tag after it.
+    buf: Box<[u8; ENC_CHUNK_SIZE]>,
+    len: usize,
+}
+
+impl Drop for Sealer {
+    fn drop(&mut self) {
+        self.key.fill(0);
+        self.buf.fill(0);
+        std::hint::black_box((&mut self.key, &mut self.buf));
+    }
+}
+
+/// `EncryptWriter`: seals what is written to it into `dst`, a chunk at a time.
+///
+/// A failure of `dst` is kept, and returned again by every later write and by
+/// `finish`. `io::Error` cannot be cloned, so those are its kind and message.
+pub(crate) struct EncryptWriter<W> {
+    sealer: Sealer,
+    dst: W,
+    err: Option<(io::ErrorKind, String)>,
+}
+
+impl<W: Write> EncryptWriter<W> {
+    /// `NewEncryptWriter`.
+    pub(crate) fn new(key: [u8; 32], dst: W) -> EncryptWriter<W> {
+        EncryptWriter {
+            sealer: Sealer {
+                key,
+                nonce: [0; CHACHA20_NONCE_LENGTH],
+                buf: Box::new([0; ENC_CHUNK_SIZE]),
+                len: 0,
+            },
+            dst,
+            err: None,
+        }
+    }
+
+    /// `flushChunk`.
+    fn flush_chunk(&mut self, last: bool) -> io::Result<()> {
+        let s = &mut self.sealer;
+        if last {
+            s.nonce[CHACHA20_NONCE_LENGTH - 1] = LAST_CHUNK_FLAG;
+        }
+        let (plaintext, rest) = s.buf.split_at_mut(s.len);
+        let tag = chacha20_poly1305(&s.key, &s.nonce, plaintext, &[], true);
+        rest[..POLY1305_TAG_LENGTH].copy_from_slice(&tag);
+        self.dst.write_all(&s.buf[..s.len + POLY1305_TAG_LENGTH])?;
+        s.len = 0;
+        inc_nonce(&mut s.nonce).map_err(|stop| io::Error::other(stop.message()))
+    }
+
+    /// The failure kept, if there is one.
+    fn check(&self) -> io::Result<()> {
+        match &self.err {
+            Some((kind, message)) => Err(io::Error::new(*kind, message.clone())),
+            None => Ok(()),
+        }
+    }
+
+    /// Keeps a failure, and returns it.
+    fn fail(&mut self, e: io::Error) -> io::Error {
+        self.err = Some((e.kind(), e.to_string()));
+        e
+    }
+
+    /// `Close`: seals the last chunk, flushes `dst` and gives it back.
+    pub(crate) fn finish(mut self) -> io::Result<W> {
+        self.check()?;
+        self.flush_chunk(true)?;
+        self.dst.flush()?;
+        Ok(self.dst)
+    }
+}
+
+impl<W: Write> Write for EncryptWriter<W> {
+    /// `Write`.
+    fn write(&mut self, p: &[u8]) -> io::Result<usize> {
+        self.check()?;
+        let total = p.len();
+        let mut p = p;
+        while !p.is_empty() {
+            let len = self.sealer.len;
+            let n = p.len().min(CHUNK_SIZE - len);
+            self.sealer.buf[len..len + n].copy_from_slice(&p[..n]);
+            self.sealer.len += n;
+            p = &p[n..];
+            // Only flush if there's a full chunk with bytes still to write, or
+            // we can't know if this is the last chunk yet.
+            if self.sealer.len == CHUNK_SIZE
+                && !p.is_empty()
+                && let Err(e) = self.flush_chunk(false)
+            {
+                return Err(self.fail(e));
+            }
+        }
+        Ok(total)
+    }
+
+    /// Flushes `dst`. What is in the chunk being written stays there, as a
+    /// chunk is sealed only when it is full or the last.
+    fn flush(&mut self) -> io::Result<()> {
+        self.check()?;
+        self.dst.flush()
+    }
+}
+
+impl<W> std::fmt::Debug for EncryptWriter<W> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EncryptWriter")
+            .field("nonce", &self.sealer.nonce)
             .finish_non_exhaustive()
     }
 }

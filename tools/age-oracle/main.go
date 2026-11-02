@@ -60,6 +60,16 @@
 //	    one "p:<passphrase>:<work factor>". Armored if <armor> is 1.
 //	    Answered "ok <file>".
 //
+//	encryptwith <random> <recipients> <armor> <plaintext>
+//	    The same, with crypto/rand reading <random>, so that the file is one
+//	    the port can write byte for byte. Answered "ok <file> <bytes of
+//	    <random> read>", or "err" if a recipient does not parse or age refuses
+//	    the recipients.
+//
+//	recipient <text>
+//	    <text> as age.ParseX25519Recipient reads it. Answered "ok <what its
+//	    String gives>", or "err".
+//
 //	decrypt <identities> <file>
 //	    <file> decrypted as age --decrypt reads it (cmd/age's decrypt: the
 //	    armor found from the first line, PowerShell's mangling refused),
@@ -82,6 +92,7 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/pbkdf2"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/hex"
@@ -219,6 +230,14 @@ func answer(words []string) string {
 		return sshkey(unhex(words[1]), words[2])
 	case words[0] == "encrypt" && len(words) == 4:
 		return encrypt(words[1], words[2] == "1", unhex(words[3]))
+	case words[0] == "encryptwith" && len(words) == 5:
+		return encryptWith(unhex(words[1]), words[2], words[3] == "1", unhex(words[4]))
+	case words[0] == "recipient" && len(words) == 2:
+		r, err := age.ParseX25519Recipient(string(unhex(words[1])))
+		if err != nil {
+			return "err"
+		}
+		return ok([]byte(r.String()))
 	case words[0] == "decrypt" && len(words) == 3:
 		return decrypt(words[1], unhex(words[2]))
 	}
@@ -226,13 +245,48 @@ func answer(words []string) string {
 }
 
 func encrypt(spec string, armored bool, plaintext []byte) string {
+	file, err := encryptFile(spec, armored, plaintext)
+	if err != nil {
+		return "bad"
+	}
+	return ok(file)
+}
+
+// countingReader gives its bytes, as crypto/rand's Reader.
+type countingReader struct {
+	bytes []byte
+	read  int
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	n := copy(p, r.bytes[r.read:])
+	r.read += n
+	if n == 0 && len(p) > 0 {
+		return 0, io.EOF
+	}
+	return n, nil
+}
+
+func encryptWith(random []byte, spec string, armored bool, plaintext []byte) string {
+	source := &countingReader{bytes: random}
+	saved := rand.Reader
+	rand.Reader = source
+	defer func() { rand.Reader = saved }()
+	file, err := encryptFile(spec, armored, plaintext)
+	if err != nil {
+		return "err"
+	}
+	return fmt.Sprintf("%s %d", ok(file), source.read)
+}
+
+func encryptFile(spec string, armored bool, plaintext []byte) ([]byte, error) {
 	var recipients []age.Recipient
 	for _, s := range strings.Split(spec, ",") {
 		if p, ok := strings.CutPrefix(s, "p:"); ok {
 			pass, logN, _ := strings.Cut(p, ":")
 			r, err := age.NewScryptRecipient(string(unhex(pass)))
 			if err != nil {
-				return "bad"
+				return nil, err
 			}
 			r.SetWorkFactor(number(logN))
 			recipients = append(recipients, r)
@@ -241,14 +295,14 @@ func encrypt(spec string, armored bool, plaintext []byte) string {
 		if line, ok := strings.CutPrefix(s, "s:"); ok {
 			r, err := agessh.ParseRecipient(string(unhex(line)))
 			if err != nil {
-				return "bad"
+				return nil, err
 			}
 			recipients = append(recipients, r)
 			continue
 		}
 		r, err := age.ParseX25519Recipient(s)
 		if err != nil {
-			return "bad"
+			return nil, err
 		}
 		recipients = append(recipients, r)
 	}
@@ -261,18 +315,18 @@ func encrypt(spec string, armored bool, plaintext []byte) string {
 	}
 	w, err := age.Encrypt(dst, recipients...)
 	if err != nil {
-		return "bad"
+		return nil, err
 	}
 	w.Write(plaintext)
 	if err := w.Close(); err != nil {
-		return "bad"
+		return nil, err
 	}
 	if a != nil {
 		if err := a.Close(); err != nil {
-			return "bad"
+			return nil, err
 		}
 	}
-	return ok(out.Bytes())
+	return out.Bytes(), nil
 }
 
 // What cmd/age's decrypt checks first.

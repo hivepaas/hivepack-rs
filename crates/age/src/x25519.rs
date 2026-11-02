@@ -1,18 +1,80 @@
-//! age's X25519 keys: port of `x25519.go`, the identity half.
+//! age's X25519 keys: port of `x25519.go`.
 //!
 //! A stanza is `-> X25519 <ephemeral share>`; its body is the file key
 //! sealed with a key derived from the shared secret, the share and the
 //! recipient's public key.
 
-use hivepack_crypto::{X25519_LENGTH, x25519, x25519_base};
+use hivepack_crypto::{RandomSource, X25519_LENGTH, x25519, x25519_base};
 
-use crate::age::{FILE_KEY_SIZE, FileKey, INCORRECT_IDENTITY, Identity, UnwrapError, multi_unwrap};
+use crate::age::{
+    FILE_KEY_SIZE, FileKey, INCORRECT_IDENTITY, Identity, Recipient, UnwrapError, fill,
+    multi_unwrap,
+};
 use crate::bech32;
-use crate::format::{Stanza, decode_string};
-use crate::primitives::{AeadError, aead_decrypt, hkdf_32};
+use crate::error::EncryptError;
+use crate::format::{Stanza, decode_string, encode_to_string};
+use crate::primitives::{AeadError, aead_decrypt, aead_encrypt, hkdf_32};
 
 /// `x25519Label`.
 const X25519_LABEL: &[u8] = b"age-encryption.org/v1/X25519";
+
+/// An X25519 public key to encrypt to, `age1…`: `X25519Recipient`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct X25519Recipient {
+    their_public_key: [u8; X25519_LENGTH],
+}
+
+impl X25519Recipient {
+    /// `ParseX25519Recipient`: a key as `age-keygen` shows it, `age1` and
+    /// Bech32.
+    pub fn parse(s: &str) -> Result<X25519Recipient, String> {
+        let (t, k) = bech32::decode(s).map_err(|e| format!("malformed recipient {s:?}: {e}"))?;
+        if t != "age" {
+            return Err(format!("malformed recipient {s:?}: invalid type {t:?}"));
+        }
+        let their_public_key = k
+            .try_into()
+            .map_err(|_| format!("malformed recipient {s:?}: invalid X25519 public key"))?;
+        Ok(X25519Recipient { their_public_key })
+    }
+}
+
+/// `String`: `age1` and Bech32.
+impl std::fmt::Display for X25519Recipient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&bech32::encode("age", &self.their_public_key).unwrap_or_default())
+    }
+}
+
+impl Recipient for X25519Recipient {
+    /// `Wrap`.
+    fn wrap(&self, file_key: &FileKey, random: &RandomSource) -> Result<Vec<Stanza>, EncryptError> {
+        let mut ephemeral = [0u8; X25519_LENGTH];
+        fill(random, &mut ephemeral)?;
+        let our_public_key = x25519_base(&ephemeral);
+        let mut shared_secret = x25519(&ephemeral, &self.their_public_key);
+        ephemeral.fill(0);
+        if shared_secret == [0; X25519_LENGTH] {
+            return Err(EncryptError::Recipient(
+                "bad input point: low order point".into(),
+            ));
+        }
+
+        let mut salt = [0u8; 2 * X25519_LENGTH];
+        salt[..X25519_LENGTH].copy_from_slice(&our_public_key);
+        salt[X25519_LENGTH..].copy_from_slice(&self.their_public_key);
+        let mut wrapping_key = hkdf_32(&shared_secret, Some(&salt), X25519_LABEL);
+        shared_secret.fill(0);
+        let body = aead_encrypt(&wrapping_key, file_key.as_bytes());
+        wrapping_key.fill(0);
+
+        Ok(vec![Stanza {
+            kind: "X25519".into(),
+            args: vec![encode_to_string(&our_public_key)],
+            body,
+        }])
+    }
+}
 
 /// An X25519 secret key, `AGE-SECRET-KEY-1…`: `X25519Identity`.
 ///

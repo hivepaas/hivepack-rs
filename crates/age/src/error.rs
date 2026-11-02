@@ -32,6 +32,37 @@ pub enum Error {
     Io(io::Error),
 }
 
+/// Why a file could not be encrypted.
+#[derive(Debug)]
+pub enum EncryptError {
+    /// There are no recipients, they cannot be mixed, or one could not take
+    /// the file key. The message is age's.
+    Recipient(String),
+    /// The source of random bytes failed. Nothing was written.
+    Random(io::Error),
+    /// Writing failed.
+    Io(io::Error),
+}
+
+impl fmt::Display for EncryptError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EncryptError::Recipient(message) => f.write_str(message),
+            EncryptError::Random(e) => write!(f, "no random bytes: {e}"),
+            EncryptError::Io(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for EncryptError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            EncryptError::Recipient(_) => None,
+            EncryptError::Random(e) | EncryptError::Io(e) => Some(e),
+        }
+    }
+}
+
 /// None of the identities matched: `NoIdentityMatchError`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NoIdentityMatch {

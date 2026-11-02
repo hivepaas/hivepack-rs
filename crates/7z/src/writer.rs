@@ -11,7 +11,6 @@
 //! is zeros, and what is cut short is no archive.
 
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::sync::Arc;
 
 use hivepack_bzip2::{
     Action as BzAction, Compress, InBuffer as BzIn, OutBuffer as BzOut, Status as BzStatus,
@@ -128,7 +127,7 @@ impl Filter {
 
 /// Where random bytes come from: it fills the buffer it is given, or fails. Salts
 /// and IVs take them, when encrypting.
-pub type RandomSource = Arc<dyn Fn(&mut [u8]) -> io::Result<()> + Send + Sync>;
+pub use hivepack_crypto::RandomSource;
 
 /// How an archive is written.
 #[derive(Clone)]
@@ -887,20 +886,8 @@ fn as_error(e: &io::Error) -> Error {
 fn random(options: &WriteOptions, bytes: &mut [u8]) -> Result<()> {
     match &options.random_source {
         Some(source) => source(bytes).map_err(|_| Error::Fail),
-        None => system_random(bytes),
+        None => hivepack_crypto::system_random(bytes).map_err(|_| Error::Fail),
     }
-}
-
-#[cfg(unix)]
-fn system_random(bytes: &mut [u8]) -> Result<()> {
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut file| file.read_exact(bytes))
-        .map_err(|_| Error::Fail)
-}
-
-#[cfg(not(unix))]
-fn system_random(_bytes: &mut [u8]) -> Result<()> {
-    Err(Error::Fail)
 }
 
 /// The filters for `hivepack-xz`, ending with `last`.

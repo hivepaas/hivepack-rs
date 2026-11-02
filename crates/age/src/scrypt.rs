@@ -1,15 +1,18 @@
-//! Passphrases: port of `scrypt.go`, the identity half.
+//! Passphrases: port of `scrypt.go`.
 //!
 //! A stanza is `-> scrypt <salt> <work factor>`; its body is the file key
 //! sealed with a key that scrypt derives from the passphrase, with N =
 //! 2^(work factor), r = 8 and p = 1. Such a stanza must be the file's only
 //! one.
 
-use hivepack_crypto::scrypt;
+use hivepack_crypto::{RandomSource, scrypt};
 
-use crate::age::{FILE_KEY_SIZE, FileKey, INCORRECT_IDENTITY, Identity, UnwrapError};
-use crate::format::{Stanza, decode_string};
-use crate::primitives::{AeadError, aead_decrypt};
+use crate::age::{
+    FILE_KEY_SIZE, FileKey, INCORRECT_IDENTITY, Identity, Recipient, UnwrapError, fill,
+};
+use crate::error::EncryptError;
+use crate::format::{Stanza, decode_string, encode_to_string};
+use crate::primitives::{AeadError, aead_decrypt, aead_encrypt};
 
 /// `scryptLabel`.
 const SCRYPT_LABEL: &[u8] = b"age-encryption.org/v1/scrypt";
@@ -21,6 +24,96 @@ const SCRYPT_SALT_SIZE: usize = 16;
 /// memory and about 5 seconds on a Ryzen 9 9950X ("15s on a modern
 /// machine", age says).
 pub const DEFAULT_MAX_WORK_FACTOR: u8 = 22;
+
+/// The work factor a passphrase is encrypted with by default: 2^18, which takes
+/// 256 MiB of memory and about 0.3 seconds on a Ryzen 9 9950X.
+pub const DEFAULT_WORK_FACTOR: u8 = 18;
+
+/// A passphrase to encrypt with: `ScryptRecipient`. It must be a file's only
+/// recipient.
+///
+/// The passphrase is overwritten when it is dropped (best effort).
+#[derive(Clone)]
+pub struct ScryptRecipient {
+    password: Vec<u8>,
+    work_factor: u8,
+}
+
+impl ScryptRecipient {
+    /// `NewScryptRecipient`: a recipient for `password`, which cannot be empty,
+    /// with the work factor [`DEFAULT_WORK_FACTOR`].
+    pub fn new(password: &[u8]) -> Result<ScryptRecipient, String> {
+        if password.is_empty() {
+            return Err("passphrase can't be empty".into());
+        }
+        Ok(ScryptRecipient {
+            password: password.to_vec(),
+            work_factor: DEFAULT_WORK_FACTOR,
+        })
+    }
+
+    /// `SetWorkFactor`: each step doubles the time and the memory, to encrypt
+    /// and to decrypt. Differs from age, which panics: a value out of 1 to 30
+    /// is brought into the range.
+    pub fn set_work_factor(&mut self, log_n: u8) {
+        self.work_factor = log_n.clamp(1, 30);
+    }
+}
+
+impl Recipient for ScryptRecipient {
+    /// `Wrap`.
+    fn wrap(&self, file_key: &FileKey, random: &RandomSource) -> Result<Vec<Stanza>, EncryptError> {
+        let mut salt = [0u8; SCRYPT_SALT_SIZE];
+        fill(random, &mut salt)?;
+        let log_n = self.work_factor;
+
+        let mut full_salt = SCRYPT_LABEL.to_vec();
+        full_salt.extend_from_slice(&salt);
+        let mut k = [0u8; 32];
+        // log_n is from 1 to 30, with r = 8 and p = 1, which scrypt takes; it
+        // can still fail to find the memory.
+        scrypt(&self.password, &full_salt, log_n, 8, 1, &mut k)
+            .map_err(|e| EncryptError::Recipient(format!("failed to generate scrypt hash: {e}")))?;
+        let body = aead_encrypt(&k, file_key.as_bytes());
+        k.fill(0);
+
+        Ok(vec![Stanza {
+            kind: "scrypt".into(),
+            args: vec![encode_to_string(&salt), log_n.to_string()],
+            body,
+        }])
+    }
+
+    /// `WrapWithLabels`: a random label, which no other recipient has, so that
+    /// a passphrase is a file's only recipient.
+    fn wrap_with_labels(
+        &self,
+        file_key: &FileKey,
+        random: &RandomSource,
+    ) -> Result<(Vec<Stanza>, Vec<String>), EncryptError> {
+        let stanzas = self.wrap(file_key, random)?;
+        let mut label = [0u8; 16];
+        fill(random, &mut label)?;
+        let label = label.iter().map(|b| format!("{b:02x}")).collect();
+        Ok((stanzas, vec![label]))
+    }
+}
+
+impl Drop for ScryptRecipient {
+    fn drop(&mut self) {
+        self.password.fill(0);
+        std::hint::black_box(&mut self.password);
+    }
+}
+
+/// Shows the work factor, not the passphrase.
+impl std::fmt::Debug for ScryptRecipient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScryptRecipient")
+            .field("work_factor", &self.work_factor)
+            .finish_non_exhaustive()
+    }
+}
 
 /// A passphrase: `ScryptIdentity`.
 ///

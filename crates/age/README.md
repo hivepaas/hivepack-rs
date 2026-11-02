@@ -1,8 +1,8 @@
 # hivepack-age
 
-Decrypting [age](https://age-encryption.org) files in safe Rust, ported from age v1.3.2, the reference implementation in Go (`filippo.io/age`).
+Decrypting and encrypting [age](https://age-encryption.org) files in safe Rust, ported from age v1.3.2, the reference implementation in Go (`filippo.io/age`).
 
-> **Status:** decrypts files encrypted with a passphrase, to X25519 keys (`AGE-SECRET-KEY-1…`) or to SSH Ed25519 keys, with or without a passphrase, armored or not, with age's outcomes on C2SP's test vectors and on files age encrypts. SSH RSA keys, post-quantum keys, plugins and encrypting are not ported yet. This crate is not on crates.io.
+> **Status:** decrypts files encrypted with a passphrase, to X25519 keys (`AGE-SECRET-KEY-1…`) or to SSH Ed25519 keys, with or without a passphrase, armored or not, with age's outcomes on C2SP's test vectors and on files age encrypts. Encrypts with a passphrase or to X25519 keys, armored or not, writing what age writes, byte for byte, given the same random bytes. Encrypting to SSH keys, SSH RSA keys, post-quantum keys and plugins are not ported yet. This crate is not on crates.io.
 
 ```rust
 use std::io::Read;
@@ -36,6 +36,21 @@ let keys = parse_identities_file(std::fs::File::open("/home/me/.ssh/id_ed25519")
 `decrypt_file` reads a file as `age --decrypt` does: armored (`-----BEGIN AGE ENCRYPTED FILE-----`) or binary, told apart by its first line. The header is checked before it returns; the payload is decrypted as it is read, 64 KiB at a time, each chunk authenticated before any of it is given out. A file cut short or changed fails when the damage is reached, with what was read before it authentic but incomplete.
 
 `Error` says why a file did not decrypt: `Header` (malformed, or a stanza that asks for too much work), `NoMatch` (no identity fits; its `stanza_types` say what kind of key the file needs), `HeaderMac`, `Armor`, `Payload` or `Io`. A passphrase's work factor is limited to 2^22 by default (4 GiB of memory, as age); `ScryptIdentity::set_max_work_factor` lowers it.
+
+To encrypt:
+
+```rust
+use std::io::Write;
+use hivepack_age::{Recipient, X25519Recipient, encrypt};
+
+let key = X25519Recipient::parse("age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p")?;
+let file = std::fs::File::create("backup.tar.zst.age")?;
+let mut w = encrypt(file, &[&key as &dyn Recipient], None)?;
+w.write_all(b"the plaintext")?;
+w.finish()?;
+```
+
+`ScryptRecipient` is a passphrase, with a work factor of 2^18 unless `set_work_factor` says otherwise, and must be a file's only recipient. For an armored file, `encrypt` writes to an `ArmoredWriter`, finished after it. Without `finish` a file lacks its last chunk and fails to decrypt. The random bytes come from the third argument, a `RandomSource`, or with `None` from `/dev/urandom`: where the system is not Unix a program gives its own, such as the `getrandom` crate, or `encrypt` fails. It fails before writing anything, whenever the source does.
 
 How the port follows age, and how it is checked, is in [docs/age.md](../../docs/age.md).
 

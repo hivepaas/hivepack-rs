@@ -1,5 +1,5 @@
 //! The cryptography shared by the stanzas and the header: port of
-//! `primitives.go`, the decrypting half, on hivepack-crypto in place of
+//! `primitives.go`, on hivepack-crypto in place of
 //! `golang.org/x/crypto`.
 
 use hivepack_crypto::{Hkdf, Hmac, HmacKey, POLY1305_TAG_LENGTH, Sha256, chacha20_poly1305, equal};
@@ -13,6 +13,15 @@ pub(crate) enum AeadError {
     Size,
     /// The tag does not match.
     Tag,
+}
+
+/// `aeadEncrypt`: `plaintext` sealed with `key` and a zero nonce, which is
+/// safe as each key wraps one file key only.
+pub(crate) fn aead_encrypt(key: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {
+    let mut sealed = plaintext.to_vec();
+    let tag = chacha20_poly1305(key, &[0; 12], &mut sealed, &[], true);
+    sealed.extend_from_slice(&tag);
+    sealed
 }
 
 /// `aeadDecrypt`: ChaCha20-Poly1305 with `key` and a zero nonce, which is
