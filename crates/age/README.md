@@ -2,7 +2,7 @@
 
 Decrypting and encrypting [age](https://age-encryption.org) files in safe Rust, ported from age v1.3.2, the reference implementation in Go (`filippo.io/age`).
 
-> **Status:** decrypts files encrypted with a passphrase, to X25519 keys (`AGE-SECRET-KEY-1…`) or to SSH Ed25519 keys, with or without a passphrase, armored or not, with age's outcomes on C2SP's test vectors and on files age encrypts. Encrypts with a passphrase or to X25519 and SSH Ed25519 keys, armored or not, writing what age writes, byte for byte, given the same random bytes. SSH RSA keys, post-quantum keys and plugins are not ported yet. This crate is not on crates.io.
+> **Status:** decrypts files encrypted with a passphrase, to X25519 keys (`AGE-SECRET-KEY-1…`) or to SSH Ed25519 keys, with or without a passphrase, armored or not, with age's outcomes on C2SP's test vectors and on files age encrypts. Encrypts with a passphrase or to X25519 and SSH Ed25519 keys, armored or not, writing what age writes, byte for byte, given the same random bytes. Reads and writes post-quantum keys (`age1pq1…`), from crates that have not been independently audited: see [docs/crypto.md](../../docs/crypto.md). SSH RSA keys and plugins are not ported yet. This crate is not on crates.io.
 
 ```rust
 use std::io::Read;

@@ -25,13 +25,14 @@
 //!   [`X25519Recipient`]s, [`SshEd25519Recipient`]s or a [`ScryptRecipient`],
 //!   armored through an [`ArmoredWriter`], byte for byte as age writes it with
 //!   the same random bytes.
+//! - [`HybridIdentity`] and [`HybridRecipient`] are post-quantum keys,
+//!   `AGE-SECRET-KEY-PQ-1…` and `age1pq1…`, which a file cannot mix with others.
 //! - [`parse_recipient`] and [`parse_recipients_file`] read what `age -r` and
 //!   `age -R` take, [`identities_to_recipients`] what encrypts to the keys of
 //!   `age -i`, and [`X25519Identity::generate`] makes a key, as `age-keygen`.
 //!
 //! The cryptography is hivepack-crypto's, in place of Go's
-//! `golang.org/x/crypto`. SSH RSA keys, post-quantum keys and plugins
-//! are not ported yet. How the port follows age, and how it is
+//! `golang.org/x/crypto`. SSH RSA keys and plugins are not ported yet. How the port follows age, and how it is
 //! checked, is in the repository: `docs/age.md`.
 //!
 //! ```no_run
@@ -70,6 +71,7 @@ mod format;
 mod identity_file;
 mod parse;
 mod pem;
+mod pq;
 mod primitives;
 mod recipient_file;
 mod scrypt;
@@ -92,6 +94,7 @@ pub use identity_file::{
     LazyScryptIdentity, PassphraseFor, PassphrasePrompt, parse_identities_file,
 };
 pub use parse::{BoxedIdentity, parse_identities};
+pub use pq::{HybridIdentity, HybridRecipient};
 pub use recipient_file::{Recipients, SkippedKey, parse_recipient, parse_recipients_file};
 pub use scrypt::{DEFAULT_MAX_WORK_FACTOR, DEFAULT_WORK_FACTOR, ScryptIdentity, ScryptRecipient};
 pub use x25519::{X25519Identity, X25519Recipient};

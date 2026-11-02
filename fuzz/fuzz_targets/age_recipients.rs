@@ -6,13 +6,20 @@
 
 #![no_main]
 
-use hivepack_age::{SshEd25519Recipient, parse_recipient, parse_recipients_file};
+use hivepack_age::{
+    HybridIdentity, HybridRecipient, SshEd25519Recipient, parse_recipient, parse_recipients_file,
+};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     let _ = parse_recipients_file(data);
     if let Ok(text) = std::str::from_utf8(data) {
         let _ = parse_recipient(text);
+        if let Ok(r) = HybridRecipient::parse(text) {
+            let again = HybridRecipient::parse(&r.to_string()).unwrap();
+            assert!(again == r, "another post-quantum key came back");
+        }
+        let _ = HybridIdentity::parse(text);
         if let Ok(r) = SshEd25519Recipient::parse(text) {
             let again = SshEd25519Recipient::parse(&r.to_string()).unwrap();
             assert!(again == r, "another key came back");

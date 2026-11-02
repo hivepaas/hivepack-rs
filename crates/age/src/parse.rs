@@ -4,6 +4,7 @@
 use std::io::Read;
 
 use crate::age::Identity;
+use crate::pq::HybridIdentity;
 use crate::x25519::X25519Identity;
 
 /// `privateKeySizeLimit`.
@@ -69,15 +70,12 @@ impl Drop for Wiped {
 }
 
 /// `parseIdentity`: one line of an identities file.
-///
-/// Differs from age: post-quantum identities (`AGE-SECRET-KEY-PQ-1…`) are
-/// recognised but not read yet.
 fn parse_identity(arg: &str) -> Result<BoxedIdentity, String> {
     if arg.starts_with("AGE-SECRET-KEY-1") {
         return Ok(Box::new(X25519Identity::parse(arg)?));
     }
     if arg.starts_with("AGE-SECRET-KEY-PQ-1") {
-        return Err("post-quantum identities are not supported yet".into());
+        return Ok(Box::new(HybridIdentity::parse(arg)?));
     }
     Err("unknown identity type".into())
 }

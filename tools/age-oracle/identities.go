@@ -7,8 +7,8 @@
 //
 // Recipients as age -r and -R read them: parseRecipient, parseRecipientsFile
 // and unsupportedSSHKey of cmd/age/parse.go, and identitiesToRecipients of
-// cmd/age/age.go. Plugins, post-quantum and tagged recipients are refused, as
-// the port does; its tests do not compare ssh-rsa keys age takes.
+// cmd/age/age.go. Plugins and tagged recipients are refused, as the port does;
+// its tests do not compare ssh-rsa keys age takes.
 //
 // Copyright 2019 The age Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
@@ -36,8 +36,10 @@ import (
 
 func parseRecipient(arg string) (age.Recipient, error) {
 	switch {
+	case strings.HasPrefix(arg, "age1pq1"):
+		return age.ParseHybridRecipient(arg)
 	case strings.HasPrefix(arg, "age1") && strings.Count(arg, "1") > 1:
-		return nil, errors.New("plugins, post-quantum and tagged recipients are refused")
+		return nil, errors.New("plugins and tagged recipients are refused")
 	case strings.HasPrefix(arg, "age1"):
 		return age.ParseX25519Recipient(arg)
 	case strings.HasPrefix(arg, "ssh-"):
@@ -134,6 +136,8 @@ func identitiesToRecipients(ids []age.Identity) ([]age.Recipient, error) {
 	for _, id := range ids {
 		switch id := id.(type) {
 		case *age.X25519Identity:
+			recipients = append(recipients, id.Recipient())
+		case *age.HybridIdentity:
 			recipients = append(recipients, id.Recipient())
 		case *agessh.Ed25519Identity:
 			recipients = append(recipients, id.Recipient())
@@ -234,6 +238,8 @@ func parseIdentities(f io.Reader) ([]age.Identity, error) {
 		switch {
 		case strings.HasPrefix(line, "AGE-SECRET-KEY-1"):
 			i, err = age.ParseX25519Identity(line)
+		case strings.HasPrefix(line, "AGE-SECRET-KEY-PQ-1"):
+			i, err = age.ParseHybridIdentity(line)
 		default:
 			err = fmt.Errorf("unknown identity type")
 		}

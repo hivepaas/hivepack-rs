@@ -14,6 +14,8 @@
 //! - [`x25519`], [`x25519_base`] and [`ed25519_public_to_x25519`]:
 //!   `curve25519-dalek`, age's keys and SSH keys.
 //! - [`scrypt()`]: `scrypt`, age's passphrases.
+//! - [`xwing_hpke_seal`] and [`xwing_hpke_open`]: `hpke` and `x-wing`, age's
+//!   post-quantum keys.
 //! - [`Blake2s`] and [`Blake2sp`]: `blake2s_simd`, RAR 5's file hashes.
 //! - [`equal`]: `subtle`, comparing tags in constant time.
 //! - [`RandomSource`] and [`system_random`]: where random bytes come from.
@@ -27,6 +29,7 @@ mod curve;
 mod digest;
 mod kdf;
 mod random;
+mod xwing;
 
 pub use aead::{
     CHACHA20_KEY_LENGTH, CHACHA20_NONCE_LENGTH, POLY1305_TAG_LENGTH, chacha20_poly1305_open,
@@ -41,6 +44,10 @@ pub use digest::{
 };
 pub use kdf::{ScryptError, scrypt};
 pub use random::{RandomSource, system_random};
+pub use xwing::{
+    XWING_ENC_LENGTH, XWING_PUBLIC_LENGTH, XWING_SEED_LENGTH, XwingOpenError, xwing_hpke_open,
+    xwing_hpke_seal, xwing_public, xwing_public_is_valid,
+};
 
 /// Whether `a` and `b` are the same, in a time that does not depend on where they
 /// differ. Slices of different lengths are not the same.

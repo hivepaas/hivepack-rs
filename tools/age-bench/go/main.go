@@ -3,12 +3,13 @@
 // first, outside the time.
 //
 //	keys DIR
-//	    Writes DIR/x25519.key, an age key; DIR/ssh.key, an OpenSSH Ed25519 key;
+//	    Writes DIR/x25519.key, an age key; DIR/pq.key, a post-quantum one;
+//	    DIR/ssh.key, an OpenSSH Ed25519 key;
 //	    DIR/many.keys, a file of 1,000 age keys; and DIR/many.pub, their
 //	    recipients.
 //	make OUT INPUT KIND
 //	    Encrypts the file INPUT to OUT. KIND is x25519, x25519-ten (nine other
-//	    recipients first), ssh, scrypt14, scrypt18 (age's default) or armored
+//	    recipients first), pq, ssh, scrypt14, scrypt18 (age's default) or armored
 //	    (x25519, in ASCII armor).
 //	decrypt PATH KIND DIR COUNT
 //	    Decrypts the file COUNT times, reading all of it. The value is the bytes
@@ -57,6 +58,13 @@ func keys(dir string) error {
 	if err := os.WriteFile(filepath.Join(dir, "x25519.key"), []byte(id.String()+"\n"), 0o600); err != nil {
 		return err
 	}
+	pq, err := age.GenerateHybridIdentity()
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pq.key"), []byte(pq.String()+"\n"), 0o600); err != nil {
+		return err
+	}
 	_, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return err
@@ -91,10 +99,20 @@ func x25519Identity(dir string) (*age.X25519Identity, error) {
 	return age.ParseX25519Identity(strings.TrimSpace(string(text)))
 }
 
+func pqIdentity(dir string) (*age.HybridIdentity, error) {
+	text, err := os.ReadFile(filepath.Join(dir, "pq.key"))
+	if err != nil {
+		return nil, err
+	}
+	return age.ParseHybridIdentity(strings.TrimSpace(string(text)))
+}
+
 func identity(kind, dir string) (age.Identity, error) {
 	switch kind {
 	case "x25519", "x25519-ten", "armored":
 		return x25519Identity(dir)
+	case "pq":
+		return pqIdentity(dir)
 	case "ssh":
 		text, err := os.ReadFile(filepath.Join(dir, "ssh.key"))
 		if err != nil {
@@ -111,6 +129,12 @@ func recipients(kind, dir string) ([]age.Recipient, error) {
 	switch kind {
 	case "x25519", "armored":
 		id, err := x25519Identity(dir)
+		if err != nil {
+			return nil, err
+		}
+		return []age.Recipient{id.Recipient()}, nil
+	case "pq":
+		id, err := pqIdentity(dir)
 		if err != nil {
 			return nil, err
 		}

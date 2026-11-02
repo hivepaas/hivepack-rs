@@ -24,10 +24,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use hivepack_age::{
-    ArmoredReader, ArmoredWriter, BoxedRecipient, EncryptError, Identity, PassphrasePrompt,
-    RandomSource, Recipient, ScryptIdentity, ScryptRecipient, SshEd25519Recipient, X25519Identity,
-    X25519Recipient, decrypt_file, encrypt, identities_to_recipients, parse_identities_file,
-    parse_recipient, parse_recipients_file,
+    ArmoredReader, ArmoredWriter, BoxedRecipient, EncryptError, Error, HybridIdentity,
+    HybridRecipient, Identity, PassphrasePrompt, RandomSource, Recipient, ScryptIdentity,
+    ScryptRecipient, SshEd25519Recipient, X25519Identity, X25519Recipient, decrypt_file, encrypt,
+    identities_to_recipients, parse_identities_file, parse_recipient, parse_recipients_file,
 };
 use hivepack_crypto::Sha256;
 use support::{Oracle, Rng, hex, repository, unhex};
@@ -255,6 +255,9 @@ fn request(n: u64) -> String {
     if rng.below(30) == 0 {
         return format!("keygen {}", hex(&bytes(&mut rng, 32)));
     }
+    if rng.below(30) == 0 {
+        return format!("keygenpq {}", hex(&bytes(&mut rng, 32)));
+    }
     let spec = match rng.below(16) {
         // An SSH key, or more, with an X25519 key or not.
         10..=12 => {
@@ -404,6 +407,15 @@ fn answer(request: &str, rng: &mut Rng) -> String {
     if let ["keygen", random] = words[..] {
         let (source, _) = counting_source(unhex(random));
         let identity = X25519Identity::generate(Some(&source)).unwrap();
+        return format!(
+            "ok {} {}",
+            hex(identity.to_secret_string().as_bytes()),
+            hex(identity.to_recipient().to_string().as_bytes())
+        );
+    }
+    if let ["keygenpq", random] = words[..] {
+        let (source, _) = counting_source(unhex(random));
+        let identity = HybridIdentity::generate(Some(&source)).unwrap();
         return format!(
             "ok {} {}",
             hex(identity.to_secret_string().as_bytes()),
@@ -563,6 +575,287 @@ fn identity_files_encrypt_as_in_age() {
     }
 }
 
+/// Bech32 of `data` under `hrp`, for keys made here that are well-formed text.
+fn bech32(hrp: &str, data: &[u8]) -> String {
+    const CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+    fn polymod(values: &[u8]) -> u32 {
+        const GEN: [u32; 5] = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+        let mut chk = 1u32;
+        for &v in values {
+            let top = chk >> 25;
+            chk = (chk & 0x1ffffff) << 5 ^ u32::from(v);
+            for (i, g) in GEN.iter().enumerate() {
+                if top >> i & 1 == 1 {
+                    chk ^= g;
+                }
+            }
+        }
+        chk
+    }
+    let (mut acc, mut bits, mut values) = (0u32, 0, Vec::new());
+    for &b in data {
+        acc = (acc << 8 | u32::from(b)) & 0xFFF;
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            values.push((acc >> bits & 31) as u8);
+        }
+    }
+    if bits > 0 {
+        values.push((acc << (5 - bits) & 31) as u8);
+    }
+    let mut all: Vec<u8> = hrp.bytes().map(|c| c >> 5).collect();
+    all.push(0);
+    all.extend(hrp.bytes().map(|c| c & 31));
+    all.extend(&values);
+    all.extend([0; 6]);
+    let check = polymod(&all) ^ 1;
+    values.extend((0..6).map(|i| (check >> (5 * (5 - i)) & 31) as u8));
+    let mut out = format!("{hrp}1");
+    out.extend(values.iter().map(|&v| char::from(CHARSET[usize::from(v)])));
+    out
+}
+
+/// A post-quantum key from a seed, as the port makes it.
+fn hybrid(seed: u8) -> HybridIdentity {
+    let (source, _) = counting_source(vec![seed; 32]);
+    HybridIdentity::generate(Some(&source)).unwrap()
+}
+
+/// Post-quantum keys read as age reads them: its checks on the text, the lengths,
+/// and the numbers of ML-KEM.
+#[test]
+fn hybrid_recipients_parse_as_in_age() {
+    let Some(mut oracle) = Oracle::spawn("age-oracle") else {
+        return;
+    };
+    let good = hybrid(1).to_recipient();
+    let bytes = *good.as_bytes();
+    let mut rng = Rng(0xa9e_e007);
+    let mut texts = vec![
+        good.to_string(),
+        good.to_string().to_uppercase(),
+        "age1pq1".to_string(),
+        bech32("age1pq", &bytes[..1215]),
+        bech32("age1pq", &[bytes.as_slice(), &[0]].concat()),
+        bech32("age", &bytes),
+        bech32("age1pq", &[0; 1216]),
+        bech32("age1pq", &[0xFF; 1216]),
+    ];
+    // The first number of ML-KEM's key at the top of its range, and just past it,
+    // and random bytes, of which few are in range.
+    for number in [3328u16, 3329, 4095] {
+        let mut key = bytes;
+        key[0] = number as u8;
+        key[1] = key[1] & 0xF0 | (number >> 8) as u8;
+        texts.push(bech32("age1pq", &key));
+    }
+    for _ in 0..50 {
+        let mut key = bytes;
+        let at = rng.below(1216) as usize;
+        key[at] ^= 1 << rng.below(8);
+        texts.push(bech32("age1pq", &key));
+        let random: Vec<u8> = (0..1216).map(|_| rng.next() as u8).collect();
+        texts.push(bech32("age1pq", &random));
+    }
+    let (mut taken, mut refused) = (0, 0);
+    for text in texts {
+        let got = match HybridRecipient::parse(&text) {
+            Ok(r) => format!("ok {}", hex(r.to_string().as_bytes())),
+            Err(_) => "err".to_string(),
+        };
+        let want = oracle.ask(&format!("recipientpq {}", hex(text.as_bytes())));
+        assert_eq!(got, want, "{:.60}", text);
+        if want == "err" {
+            refused += 1;
+        } else {
+            taken += 1;
+        }
+    }
+    assert!(taken > 10 && refused > 10, "{taken} and {refused}");
+}
+
+/// X-Wing's encapsulation takes random bytes that age cannot be given, so these are
+/// not compared byte for byte: each side decrypts what the other wrote, the right
+/// key and the wrong one, armored or not.
+#[test]
+fn hybrid_files_cross_with_age() {
+    let Some(mut oracle) = Oracle::spawn("age-oracle") else {
+        return;
+    };
+    let mut rng = Rng(0xa9e_e008);
+    for n in 0..60u8 {
+        let key = hybrid(n);
+        let other = hybrid(n.wrapping_add(100));
+        let to = key.to_recipient();
+        let spec = key.to_recipient().to_string();
+        let armored = n % 3 == 0;
+        let len = length(&mut rng);
+        let plaintext = bytes(&mut rng, len);
+        let text = if plaintext.is_empty() {
+            "-".to_string()
+        } else {
+            hex(&plaintext)
+        };
+        let digest = sha256(&plaintext);
+
+        // What age writes, the port reads.
+        let reply = oracle.ask(&format!("encrypt {spec} {} {text}", u8::from(armored)));
+        let file = unhex(reply.strip_prefix("ok ").unwrap());
+        let mut out = Vec::new();
+        decrypt_file(&file[..], &[&key as &dyn Identity])
+            .unwrap()
+            .read_to_end(&mut out)
+            .unwrap();
+        assert!(out == plaintext, "the port read another plaintext");
+        assert!(matches!(
+            decrypt_file(&file[..], &[&other as &dyn Identity]),
+            Err(Error::NoMatch(_))
+        ));
+
+        // What the port writes, age reads.
+        let source: RandomSource = Arc::new(move |out: &mut [u8]| {
+            let mut seed = u64::from(n) + 1;
+            for byte in out {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                *byte = (seed >> 32) as u8;
+            }
+            Ok(())
+        });
+        let file = file_of(
+            &[&to as &dyn Recipient],
+            armored,
+            &plaintext,
+            &source,
+            &mut rng,
+        )
+        .unwrap();
+        let identity = key.to_secret_string();
+        let reply = oracle.ask(&format!("decrypt {identity} {}", hex(&file)));
+        assert_eq!(reply, format!("success {} {digest} 0", plaintext.len()));
+        let wrong = other.to_secret_string();
+        let reply = oracle.ask(&format!("decrypt {wrong} {}", hex(&file)));
+        assert!(reply.starts_with("no-match "), "{reply}");
+    }
+}
+
+/// A key whose X25519 part has a low order reads as a key, and cannot be encrypted
+/// to, in both.
+#[test]
+fn hybrid_keys_of_low_order_are_refused_as_in_age() {
+    let Some(mut oracle) = Oracle::spawn("age-oracle") else {
+        return;
+    };
+    for point in [[0u8; 32], {
+        let mut one = [0u8; 32];
+        one[0] = 1;
+        one
+    }] {
+        let mut key = *hybrid(1).to_recipient().as_bytes();
+        key[1216 - 32..].copy_from_slice(&point);
+        let text = bech32("age1pq", &key);
+        let random = hex(&[5; 512]);
+        let reply = oracle.ask(&format!("encryptwith {random} {text} 0 -"));
+        assert_eq!(reply, "err");
+        let to = HybridRecipient::parse(&text).unwrap();
+        let source: RandomSource = Arc::new(|out: &mut [u8]| {
+            out.fill(5);
+            Ok(())
+        });
+        let got = encrypt(Vec::new(), &[&to as &dyn Recipient], Some(&source));
+        assert!(matches!(got, Err(EncryptError::Recipient(_))));
+    }
+}
+
+/// A post-quantum file has only post-quantum recipients, and several are fine.
+#[test]
+fn hybrid_recipients_are_not_mixed() {
+    let (one, two) = (hybrid(1), hybrid(2));
+    let (to_one, to_two) = (one.to_recipient(), two.to_recipient());
+    let key = a_key();
+    let mut pass = ScryptRecipient::new(b"password").unwrap();
+    pass.set_work_factor(1);
+    let source: RandomSource = Arc::new(|out: &mut [u8]| {
+        out.fill(9);
+        Ok(())
+    });
+    for mixed in [
+        [&to_one as &dyn Recipient, &key as &dyn Recipient],
+        [&key as &dyn Recipient, &to_one as &dyn Recipient],
+    ] {
+        let Err(EncryptError::Recipient(message)) = encrypt(Vec::new(), &mixed, Some(&source))
+        else {
+            panic!("post-quantum and classic mixed");
+        };
+        assert!(message.contains("post-quantum and classic"), "{message}");
+    }
+    assert!(
+        encrypt(
+            Vec::new(),
+            &[&to_one as &dyn Recipient, &pass as &dyn Recipient],
+            Some(&source)
+        )
+        .is_err()
+    );
+
+    let mut rng = Rng(0xa9e_e009);
+    let file = file_of(
+        &[&to_one as &dyn Recipient, &to_two as &dyn Recipient],
+        false,
+        b"data",
+        &source,
+        &mut rng,
+    )
+    .unwrap();
+    for identity in [&one, &two] {
+        let mut out = Vec::new();
+        decrypt_file(&file[..], &[identity as &dyn Identity])
+            .unwrap()
+            .read_to_end(&mut out)
+            .unwrap();
+        assert_eq!(out, b"data");
+    }
+}
+
+/// A new key, and the file `age-keygen -pq` writes for it, read back; what a file of
+/// keys holds encrypts to it; a source that fails makes none and seals nothing.
+#[test]
+fn hybrid_keys_read_back() {
+    let key = hybrid(7);
+    let text = key.to_key_file("2026-11-02T10:00:00Z");
+    let prompt: PassphrasePrompt = Arc::new(|_| Err("no passphrase".into()));
+    let read = parse_identities_file(text.as_bytes(), prompt).unwrap();
+    let read: Vec<&dyn Identity> = read.iter().map(|i| i.as_ref() as &dyn Identity).collect();
+    let to = identities_to_recipients(&read).unwrap();
+    assert_eq!(to.len(), 1);
+    let file = format!("# a comment\n{}\n", key.to_recipient());
+    assert_eq!(
+        parse_recipients_file(file.as_bytes())
+            .unwrap()
+            .recipients
+            .len(),
+        1
+    );
+    assert!(parse_recipient(&key.to_recipient().to_string()).is_ok());
+    assert_eq!(
+        HybridIdentity::parse(&key.to_secret_string())
+            .unwrap()
+            .to_recipient(),
+        key.to_recipient()
+    );
+
+    let failing: RandomSource = Arc::new(|_: &mut [u8]| Err(io::Error::other("no randomness")));
+    assert!(HybridIdentity::generate(Some(&failing)).is_err());
+    let to = key.to_recipient();
+    let (source, _) = counting_source(vec![1; 16]);
+    let mut out = Vec::new();
+    let got = encrypt(&mut out, &[&to as &dyn Recipient], Some(&source));
+    assert!(matches!(got, Err(EncryptError::Random(_))));
+    assert!(out.is_empty());
+    let got = encrypt(&mut out, &[&to as &dyn Recipient], Some(&failing));
+    assert!(matches!(got, Err(EncryptError::Random(_))));
+}
+
 /// What age takes and the port cannot encrypt to stops the file, rather than leave
 /// someone out of it; what age skips, the port skips and lists.
 #[test]
@@ -581,7 +874,7 @@ fn recipients_files_say_what_they_leave_out() {
         &rsa_line(4096, &[1, 0, 1]),
         "ssh-rsa keys are not supported yet",
     );
-    fails("age1pq1aaaaaaaaaaaaaaaaaaaaaaaa", "post-quantum");
+    fails("age1pq1aaaaaaaaaaaaaaaaaaaaaaaa", "malformed");
     fails("age1tag1aaaaaaaaaaaaaaaaaaaaaaa", "tagged");
     fails("age1plugin1aaaaaaaaaaaaaaaaaaaa", "plugins");
     fails(KEYS[1], "apparent identity");

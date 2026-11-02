@@ -3,8 +3,8 @@
 //!
 //! Differs from age: what the port cannot encrypt to is refused, and a file that
 //! has one fails, rather than leave a person out of it without a word. That is
-//! `ssh-rsa` keys that age takes, of 2048 bits or more, post-quantum and tagged
-//! recipients, and plugins, which are programs that the port does not run. The
+//! `ssh-rsa` keys that age takes, of 2048 bits or more, tagged recipients, and
+//! plugins, which are programs that the port does not run. The
 //! keys age skips with a warning are skipped here too, and listed for the caller
 //! to show: other SSH key types, and RSA keys of fewer bits.
 
@@ -13,6 +13,7 @@ use std::io::Read;
 use crate::age::BoxedRecipient;
 use crate::agessh::SshEd25519Recipient;
 use crate::base64;
+use crate::pq::HybridRecipient;
 use crate::ssh_keys::{parse_authorized_key, rsa_modulus_bits};
 use crate::x25519::X25519Recipient;
 
@@ -29,9 +30,8 @@ const MAX_SCAN_TOKEN_SIZE: usize = 64 * 1024;
 fn not_supported(arg: &str) -> Option<&'static str> {
     if arg.starts_with("age1tag1") || arg.starts_with("age1tagpq1") {
         Some("tagged recipients are not supported yet")
-    } else if arg.starts_with("age1pq1") {
-        Some("post-quantum recipients are not supported yet")
-    } else if arg.starts_with("age1") && arg.matches('1').count() > 1 {
+    } else if !arg.starts_with("age1pq1") && arg.starts_with("age1") && arg.matches('1').count() > 1
+    {
         Some("plugins are not supported")
     } else {
         None
@@ -43,6 +43,9 @@ fn not_supported(arg: &str) -> Option<&'static str> {
 pub fn parse_recipient(arg: &str) -> Result<BoxedRecipient, String> {
     if let Some(message) = not_supported(arg) {
         return Err(message.into());
+    }
+    if arg.starts_with("age1pq1") {
+        return Ok(Box::new(HybridRecipient::parse(arg)?));
     }
     if arg.starts_with("age1") {
         return Ok(Box::new(X25519Recipient::parse(arg)?));

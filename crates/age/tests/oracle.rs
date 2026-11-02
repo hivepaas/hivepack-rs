@@ -1,5 +1,5 @@
 //! Comparison with age v1.3.2 itself, through `tools/age-oracle`: files that
-//! age encrypts, to X25519 keys, SSH Ed25519 keys or a passphrase, armored
+//! age encrypts, to X25519 keys, post-quantum keys, SSH Ed25519 keys or a passphrase, armored
 //! or not, with payloads around the 64 KiB chunks, then damaged in many
 //! ways, are decrypted by both with right and wrong keys and passphrases,
 //! and with identity files as `age -i` reads them: SSH keys with and
@@ -32,8 +32,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use hivepack_age::{
-    Error, Identity, PassphrasePrompt, ScryptIdentity, X25519Identity, decrypt_file,
-    parse_identities_file,
+    Error, HybridIdentity, Identity, PassphrasePrompt, ScryptIdentity, X25519Identity,
+    decrypt_file, parse_identities_file,
 };
 use hivepack_crypto::Sha256;
 use support::{Oracle, Rng, hex, repository, unhex};
@@ -94,6 +94,8 @@ fn answer(request: &str, rng: &mut Rng) -> String {
             let mut i = ScryptIdentity::new(&unhex(pass)).unwrap();
             i.set_max_work_factor(log_n.parse().unwrap());
             identities.push(Box::new(i));
+        } else if s.starts_with("AGE-SECRET-KEY-PQ-1") {
+            identities.push(Box::new(HybridIdentity::parse(s).unwrap()));
         } else {
             identities.push(Box::new(X25519Identity::parse(s).unwrap()));
         }
@@ -315,6 +317,18 @@ fn ssh_keys(oracle: &mut Oracle) -> Vec<SshKey> {
         .collect()
 }
 
+/// (identity, recipient) of three post-quantum keys age makes from their seeds.
+fn pq_keys(oracle: &mut Oracle) -> Vec<(String, String)> {
+    (1..=3u8)
+        .map(|i| {
+            let reply = oracle.ask(&format!("keygenpq {}", hex(&[i; 32])));
+            let mut words = reply.split(' ').skip(1);
+            let mut text = || String::from_utf8(unhex(words.next().unwrap())).unwrap();
+            (text(), text())
+        })
+        .collect()
+}
+
 /// An identity file, damaged now and then: a bit flipped, or cut short.
 fn damage_identity_file(rng: &mut Rng, mut file: Vec<u8>) -> Vec<u8> {
     match rng.below(10) {
@@ -360,11 +374,28 @@ fn keys_file(rng: &mut Rng, keys: &[(String, String)], with: &[usize]) -> Vec<u8
 fn requests(oracle: &mut Oracle, rng: &mut Rng, count: usize, max: usize) -> Vec<String> {
     let keys = keys();
     let ssh = ssh_keys(oracle);
+    let pq = pq_keys(oracle);
     let mut requests = Vec::new();
     for _ in 0..count {
         let armored = rng.below(3) == 0;
-        let kind = rng.below(8);
-        let (recipients, identities) = if kind >= 6 {
+        let kind = rng.below(9);
+        let (recipients, identities) = if kind == 8 {
+            // To post-quantum keys; decrypted with the right one or not, and
+            // with an X25519 key or not.
+            let to: Vec<usize> = (0..3).filter(|_| rng.below(2) == 0).collect();
+            let to = if to.is_empty() { vec![0] } else { to };
+            let recipients: Vec<&str> = to.iter().map(|&i| pq[i].1.as_str()).collect();
+            let with = if rng.below(4) == 0 {
+                rng.below(3) as usize
+            } else {
+                to[rng.below(to.len() as u64) as usize]
+            };
+            let mut identities = vec![pq[with].0.clone()];
+            if rng.below(4) == 0 {
+                identities.push(keys[0].0.clone());
+            }
+            (recipients.join(","), identities)
+        } else if kind >= 6 {
             // To SSH keys, and maybe an X25519 key; decrypted with key
             // files, and their passphrases right, wrong or missing.
             let mut to: Vec<usize> = (0..3).filter(|_| rng.below(2) == 0).collect();
