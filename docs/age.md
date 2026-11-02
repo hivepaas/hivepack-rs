@@ -79,8 +79,21 @@ AMD Ryzen 9 9950X (16 cores, x86-64), 45 GiB of memory, Ubuntu 26.04 with Linux 
 | Big file | 905 MB/s | 2,279 MB/s | 0.40× |
 | Big file, in ASCII armor | 668 MB/s | 519 MB/s | 1.29× |
 | Files of 4 KiB | 30,981 files/s | 15,345 files/s | 2.02× |
-| **Parsing keys** | | | |
+| **Writing a file** (November 2026, the same machine) | | | |
+| Empty, to X25519 | 20,892 files/s | 10,302 files/s | 2.03× |
+| Empty, to ten X25519 keys | 2,247 files/s | 1,061 files/s | 2.12× |
+| Empty, to ssh-ed25519 | 14,138 files/s | 6,922 files/s | 2.04× |
+| Empty, scrypt at 2^14 | 76.5 files/s | 61.4 files/s | 1.25× |
+| Empty, scrypt at 2^18, age's default | 3.5 files/s | 3.4 files/s | 1.02× |
+| Big file | 990 MB/s | 3,380 MB/s | 0.29× |
+| Big file, in ASCII armor | 750 MB/s | 1,167 MB/s | 0.64× |
+| Files of 4 KiB | 19,221 files/s | 10,064 files/s | 1.91× |
+| **Parsing keys and making them** | | | |
 | A file of 1,000 age keys | 43 k keys/s | 20 k keys/s | 2.19× |
+| A file of 1,000 recipients (November 2026) | 1,317 k keys/s | 694 k keys/s | 1.90× |
+| Making a key (November 2026) | 46 k keys/s | 21 k keys/s | 2.16× |
+
+With the `unsafe-fast` feature, a big file is written at 1,715 MB/s (0.51×), and in ASCII armor at 1,091 MB/s (0.95×), three rounds. Files written go to a writer that only counts, and the port's random bytes come from `getrandom`.
 
 The big file's gap is ChaCha20-Poly1305, which Go runs in AVX2 assembly and the port in constant-time safe Rust ([crypto.md](crypto.md#speed)). ASCII armor went from 0.27× to 1.29×: a full line of 64 columns already in the reader's buffer is now decoded in place, with a table, where each line was two allocations and a `match` on each character. Anything else about a line goes the old way, with nothing consumed, so that errors stay as they were. The armor row was measured after that work, the others before it, which does not touch them. Parsing keys is X25519, for each key's public half. The rows with X25519 went from 0.72–0.92× to 2.02–2.35× with 51-bit words on 64-bit machines, measured after that work. Other work started on the machine towards the end of the run, though the best of the rounds should hide most of it.
 
