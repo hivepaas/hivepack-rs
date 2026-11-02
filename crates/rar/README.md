@@ -26,27 +26,15 @@ Against UnRAR 7.3.2, as the crate comes by default, each row the mean and the ra
 
 | Port / reference | Linux x86-64 | Windows x86-64 | macOS arm64 |
 |---|---|---|---|
-| RAR 4, each file apart | 1.17× (1.12–1.21×) | 1.25× (1.22–1.27×) | 0.97× (0.91–1.02×) |
-| RAR 4, with a password | 0.78× | 0.83× | 0.71× |
-| RAR 4, PPMd | 0.89× | 0.82× | 0.97× |
-| RAR 4, solid | 1.44× | 1.45× | 1.06× |
-| RAR 5, each file apart | 1.14× (1.12–1.15×) | 1.47× (1.45–1.50×) | 0.90× (0.89–0.92×) |
-| RAR 5, with a password | 0.88× | 1.09× | 0.77× |
-| RAR 5, solid | 1.24× | 1.32× | 0.95× |
+| RAR 4, each file apart | 0.97× (0.95–0.99×) | 1.31× (1.27–1.34×) | 0.99× (0.99–1.00×) |
+| RAR 4, with a password | 0.82× | 1.08× | 0.93× |
+| RAR 4, PPMd | 0.73× | 0.75× | 0.98× |
+| RAR 4, solid | 1.11× | 1.52× | 0.96× |
+| RAR 5, each file apart | 1.00× (1.00–1.00×) | 1.51× (1.50–1.52×) | 0.92× (0.91–0.93×) |
+| RAR 5, with a password | 1.22× | 1.76× | 1.34× |
+| RAR 5, solid | 1.03× | 1.44× | 0.77× |
 
-With the `unsafe-fast` feature, off by default (see [docs/unsafe.md](../../docs/unsafe.md)):
-
-| Port / reference | Linux x86-64 | Windows x86-64 | macOS arm64 |
-|---|---|---|---|
-| RAR 4, each file apart | 1.17× (1.14–1.20×) | 1.34× (1.31–1.38×) | 1.01× (0.99–1.03×) |
-| RAR 4, with a password | 0.98× | 1.11× | 0.88× |
-| RAR 4, PPMd, measured before its model read faster | 0.70× | 0.55× | 0.72× |
-| RAR 4, solid | 1.44× | 1.56× | 1.05× |
-| RAR 5, each file apart | 1.14× | 1.57× (1.57–1.58×) | 0.88× (0.87–0.89×) |
-| RAR 5, with a password | 1.50× | 1.97× | 1.43× |
-| RAR 5, solid | 1.26× | 1.51× | 0.87× |
-
-**Measured on** `.github/workflows/bench.yml`, on November 1, 2026, with rustc 1.99.1: Linux x86-64 on AMD EPYC 9V45 (4 threads); Windows x86-64 on AMD64 Family 26 Model 2 Stepping 1 (4 threads); macOS arm64 on Apple M2 Pro (Virtual) (5 threads). Each job gets what the runner has that day, so the two tables, and the formats, are not on the same processor, and they are shared machines: the ratios hold better than the speeds.
+**Measured on** `.github/workflows/bench.yml`, on November 2, 2026, with rustc 1.99.1: Linux x86-64 on Intel Xeon Platinum 8370C (4 threads); Windows x86-64 on AMD64 Family 25 Model 1 (4 threads); macOS arm64 on Apple M1 (Virtual) (3 threads). Each job gets what the runner has that day, so the formats are not on the same processor, and they are shared machines: the ratios hold better than the speeds.
 
 The archives are `testdata/rar`, each 8.3 MB unpacked: this repository's files and some bytes a script makes, not the Silesia corpus of the other formats. `tools/rar-bench` runs both sides on one thread. The first table's PPMd row is from a later run, after its model's reads were made faster.
 

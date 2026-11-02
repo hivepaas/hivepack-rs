@@ -62,39 +62,23 @@ Against age v1.3.2, as the crate comes by default, each row the mean and the ran
 
 | Port / reference | Linux x86-64 | Windows x86-64 | macOS arm64 |
 |---|---|---|---|
-| X25519 and ssh-ed25519, an empty file | 2.15× (2.14–2.16×) | 2.56× (2.34–2.73×) | 2.43× (2.39–2.51×) |
-| Passphrase, scrypt | 1.07× (0.96–1.19×) | 1.00× (0.96–1.05×) | 1.10× (1.10–1.11×) |
-| A big file's payload | 0.24× | 0.34× | 0.56× |
-| A big file in ASCII armor | 1.11× | 1.15× | 1.22× |
-| Files of 4 KiB | 1.85× | 2.35× | 2.06× |
-| Writing: to X25519 and ssh-ed25519, an empty file | 2.12× (2.07–2.19×) | 2.23× (2.15–2.33×) | 2.32× (2.11–2.59×) |
-| Writing: a passphrase, scrypt | 1.07× (0.96–1.18×) | 1.00× (0.98–1.02×) | 1.03× (1.00–1.06×) |
-| Writing: a big file | 0.17× | 0.26× | 0.50× |
-| Writing: a big file in ASCII armor | 0.45× | 0.53× | 0.70× |
-| Writing: files of 4 KiB | 1.92× | 2.04× | 2.15× |
-| Parsing age keys | 2.24× | 2.36× | 2.64× |
-| Reading age recipients | 1.97× | 1.54× | 1.84× |
-| Making a key | 2.24× | 2.40× | 2.56× |
+| X25519 and ssh-ed25519, an empty file | 1.85× (1.76–1.93×) | 2.27× (1.96–2.54×) | 2.30× (2.22–2.43×) |
+| ML-KEM-768 with X25519, an empty file | 0.35× | 0.38× | 0.46× |
+| Passphrase, scrypt | 1.14× (1.01–1.27×) | 1.14× (1.11–1.17×) | 0.97× (0.96–0.99×) |
+| A big file's payload | 0.69× | 0.82× | 0.90× |
+| A big file in ASCII armor | 2.35× | 1.99× | 1.72× |
+| Files of 4 KiB | 1.85× | 2.25× | 2.18× |
+| Writing: to X25519 and ssh-ed25519, an empty file | 2.45× (2.22–2.60×) | 2.53× (2.35–2.68×) | 2.89× (2.53–3.20×) |
+| Writing: to ML-KEM-768 with X25519, an empty file | 0.69× | 0.68× | 0.92× |
+| Writing: a passphrase, scrypt | 1.14× (1.02–1.26×) | 1.14× (1.11–1.17×) | 0.96× (0.95–0.97×) |
+| Writing: a big file | 0.53× | 0.67× | 0.81× |
+| Writing: a big file in ASCII armor | 1.01× | 1.03× | 1.02× |
+| Writing: files of 4 KiB | 2.48× | 2.54× | 2.85× |
+| Parsing age keys | 5.23× | 4.49× | 5.89× |
+| Reading age recipients | 1.98× | 1.52× | 1.38× |
+| Making a key | 5.46× | 4.83× | 5.76× |
 
-With the `unsafe-fast` feature, off by default (see [docs/unsafe.md](../../docs/unsafe.md)):
-
-| Port / reference | Linux x86-64 | Windows x86-64 | macOS arm64 |
-|---|---|---|---|
-| X25519 and ssh-ed25519, an empty file | 2.31× (2.19–2.43×) | 2.60× (2.38–2.77×) | 2.65× (2.48–2.79×) |
-| Passphrase, scrypt | 1.09× (0.95–1.23×) | 1.12× (1.10–1.14×) | 1.12× (1.01–1.23×) |
-| A big file's payload | 0.58× | 0.42× | 0.88× |
-| A big file in ASCII armor | 1.72× | 1.90× | 1.52× |
-| Files of 4 KiB | 2.23× | 2.39× | 2.23× |
-| Writing: to X25519 and ssh-ed25519, an empty file | 2.18× (2.16–2.20×) | 2.30× (2.28–2.31×) | 2.45× (2.33–2.56×) |
-| Writing: a passphrase, scrypt | 1.04× (0.89–1.20×) | 1.11× (1.09–1.13×) | 1.13× (1.06–1.20×) |
-| Writing: a big file | 0.50× | 0.33× | 0.67× |
-| Writing: a big file in ASCII armor | 0.90× | 0.78× | 0.95× |
-| Writing: files of 4 KiB | 2.11× | 2.22× | 2.63× |
-| Parsing age keys | 2.18× | 2.29× | 2.41× |
-| Reading age recipients | 1.96× | 1.55× | 1.72× |
-| Making a key | 2.20× | 2.32× | 2.37× |
-
-**Measured on** `.github/workflows/bench.yml`, on November 2, 2026, with rustc 1.99.1. Without the feature: Linux x86-64 on AMD EPYC 9V74 (4 threads); Windows x86-64 on Intel Family 6 Model 207 (4 threads); macOS arm64 on Apple M2 Pro (Virtual) (5 threads). With it: Linux x86-64 on AMD EPYC 9V45 (4 threads); Windows x86-64 on AMD64 Family 25 Model 1 (4 threads); macOS arm64 on Apple M1 (Virtual) (3 threads). Each job gets what the runner has that day, so the two tables, and the formats, are not on the same processor, and they are shared machines: the ratios hold better than the speeds.
+**Measured on** `.github/workflows/bench.yml`, on November 2, 2026, with rustc 1.99.1: Linux x86-64 on AMD EPYC 7763 (4 threads); Windows x86-64 on Intel64 Family 6 Model 207 (4 threads); macOS arm64 on Apple M1 (Virtual) (3 threads). Each job gets what the runner has that day, so the formats are not on the same processor, and they are shared machines: the ratios hold better than the speeds.
 
 Go's ChaCha20-Poly1305 is assembly, which is the big file's gap, in writing as in reading; the rest of a file's work, its key and its header, is faster here. Writing gives the port's random bytes from `getrandom`, as a program does, to a writer that only counts. On one machine with more detail, an AMD Ryzen 9 9950X, the whole table is in [docs/age.md](../../docs/age.md#the-speed).
 

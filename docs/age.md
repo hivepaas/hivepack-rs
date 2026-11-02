@@ -66,37 +66,39 @@ python3 scripts/testdata.py fetch --group bench
 cargo run --release -p age-bench -- [--only TEXT] [--rounds 5] [--seconds 0.5]
 ```
 
-AMD Ryzen 9 9950X (16 cores, x86-64), 45 GiB of memory, Ubuntu 26.04 with Linux 7.0 and the `powersave` governor, rustc 1.99.1 in the workspace's release profile, Go 1.27.2 with age v1.3.2, October 2026, the Silesia corpus cut to 64 MiB, in memory. Each speed is the best of five rounds taken in turn. Both read the same bytes.
+AMD Ryzen 9 9950X (16 cores, x86-64), 45 GiB of memory, Ubuntu 26.04 with Linux 7.0 and the `powersave` governor, rustc 1.99.1 in the workspace's release profile, Go 1.27.2 with age v1.3.2, November 2026, the Silesia corpus cut to 64 MiB, in memory. Each speed is the best of five rounds taken in turn. Both read the same bytes.
 
 | Workload | The port | age | Port / age |
 |---|---|---|---|
-| **Finding the file key, in an empty file** | | | |
-| X25519 | 35,903 files/s | 15,877 files/s | 2.26× |
-| X25519, the last of ten recipients | 4,069 files/s | 1,827 files/s | 2.23× |
-| ssh-ed25519 | 19,494 files/s | 8,306 files/s | 2.35× |
-| Passphrase, scrypt at 2^14 | 71.2 files/s | 55.7 files/s | 1.28× |
-| Passphrase, scrypt at 2^18, age's default | 3.3 files/s | 3.2 files/s | 1.02× |
-| **Reading the payload** | | | |
-| Big file | 905 MB/s | 2,279 MB/s | 0.40× |
-| Big file, in ASCII armor | 668 MB/s | 519 MB/s | 1.29× |
-| Files of 4 KiB | 30,981 files/s | 15,345 files/s | 2.02× |
-| **Writing a file** (November 2026, the same machine) | | | |
-| Empty, to X25519 | 20,892 files/s | 10,302 files/s | 2.03× |
-| Empty, to ten X25519 keys | 2,247 files/s | 1,061 files/s | 2.12× |
-| Empty, to ssh-ed25519 | 14,138 files/s | 6,922 files/s | 2.04× |
-| Empty, scrypt at 2^14 | 76.5 files/s | 61.4 files/s | 1.25× |
-| Empty, scrypt at 2^18, age's default | 3.5 files/s | 3.4 files/s | 1.02× |
-| Big file | 990 MB/s | 3,380 MB/s | 0.29× |
-| Big file, in ASCII armor | 750 MB/s | 1,167 MB/s | 0.64× |
-| Files of 4 KiB | 19,221 files/s | 10,064 files/s | 1.91× |
-| **Parsing keys and making them** | | | |
-| A file of 1,000 age keys | 43 k keys/s | 20 k keys/s | 2.19× |
-| A file of 1,000 recipients (November 2026) | 1,317 k keys/s | 694 k keys/s | 1.90× |
-| Making a key (November 2026) | 46 k keys/s | 21 k keys/s | 2.16× |
+| **Finding the file key, in an empty file** |  |  |  |
+| X25519 | 33,275 files/s | 18,009 files/s | 1.85× |
+| X25519, the last of ten recipients | 3,560 files/s | 1,995 files/s | 1.78× |
+| ML-KEM-768 with X25519 | 4,805 files/s | 13,177 files/s | 0.36× |
+| ssh-ed25519 | 17,544 files/s | 9,162 files/s | 1.91× |
+| Passphrase, scrypt at 2^14 | 38.4 files/s | 61.2 files/s | 0.63× |
+| Passphrase, scrypt at 2^18, age's default | 2.1 files/s | 3.4 files/s | 0.61× |
+| **Reading the payload** |  |  |  |
+| Big file | 1,639 MB/s | 2,469 MB/s | 0.66× |
+| Big file, in ASCII armor | 926 MB/s | 515 MB/s | 1.80× |
+| Files of 4 KiB | 30,831 files/s | 17,502 files/s | 1.76× |
+| **Writing a file** |  |  |  |
+| Empty, to X25519 | 25,623 files/s | 10,375 files/s | 2.47× |
+| Empty, to ten X25519 keys | 2,701 files/s | 1,059 files/s | 2.55× |
+| Empty, to ML-KEM-768 with X25519 | 9,012 files/s | 12,548 files/s | 0.72× |
+| Empty, to ssh-ed25519 | 15,149 files/s | 6,960 files/s | 2.18× |
+| Empty, scrypt at 2^14 | 38.5 files/s | 62.1 files/s | 0.62× |
+| Empty, scrypt at 2^18, age's default | 2.1 files/s | 3.4 files/s | 0.61× |
+| Big file | 1,655 MB/s | 3,348 MB/s | 0.49× |
+| Big file, in ASCII armor | 1,065 MB/s | 1,169 MB/s | 0.91× |
+| Files of 4 KiB | 24,087 files/s | 10,044 files/s | 2.40× |
+| **Parsing keys and making them** |  |  |  |
+| A file of 1,000 age keys | 102 k keys/s | 21.0 k keys/s | 4.86× |
+| A file of 1,000 recipients | 1,303 k keys/s | 692 k keys/s | 1.88× |
+| Making a key | 110 k keys/s | 22.0 k keys/s | 5.09× |
 
-With the `unsafe-fast` feature, a big file is written at 1,715 MB/s (0.51×), and in ASCII armor at 1,091 MB/s (0.95×), three rounds. Files written go to a writer that only counts, and the port's random bytes come from `getrandom`.
+All of this is from November 2026, on the crates of `hivepack-crypto`, which use the processor's instructions with nothing to turn on. scrypt is 0.62× here and above 1× on the runners' Intel Xeon and most of their machines, so it depends on the processor. Files written go to a writer that only counts, and the port's random bytes come from `getrandom`.
 
-The big file's gap is ChaCha20-Poly1305, which Go runs in one AVX2 assembly routine for both. ASCII armor went from 0.27× to 1.29×: a full line of 64 columns already in the reader's buffer is now decoded in place, with a table, where each line was two allocations and a `match` on each character. Anything else about a line goes the old way, with nothing consumed, so that errors stay as they were. The armor row was measured after that work, the others before it, which does not touch them. Parsing keys is X25519, for each key's public half. The rows with X25519 went from 0.72–0.92× to 2.02–2.35× with 51-bit words on 64-bit machines, measured after that work. Other work started on the machine towards the end of the run, though the best of the rounds should hide most of it.
+The big file's gap is ChaCha20-Poly1305, which Go runs in one AVX2 assembly routine for both. ASCII armor went from 0.27× to above 1×: a full line of 64 columns already in the reader's buffer is now decoded in place, with a table, where each line was two allocations and a `match` on each character. Anything else about a line goes the old way, with nothing consumed, so that errors stay as they were. The armor row was measured after that work, the others before it, which does not touch them. Parsing keys is X25519, for each key's public half. The rows with X25519 went from 0.72–0.92× to 2.02–2.35× with 51-bit words on 64-bit machines, measured after that work. Other work started on the machine towards the end of the run, though the best of the rounds should hide most of it.
 
 ## How it is shown
 
