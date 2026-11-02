@@ -38,6 +38,7 @@ hivepack-age = { path = "../crates/age" }
 hivepack-tar = { path = "../crates/tar" }
 hivepack-iso = { path = "../crates/iso" }
 hivepack-cpio = { path = "../crates/cpio" }
+hivepack-sign = { path = "../crates/sign" }
 hivepack-rar = { path = "../crates/rar" }
 hivepack-open = { path = "../crates/open" }
 hivepack-udf = { path = "../crates/udf" }
@@ -377,3 +378,9 @@ path = "fuzz_targets/extract_7z.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "sign"
+path = "fuzz_targets/sign.rs"
+test = false
+doc = false

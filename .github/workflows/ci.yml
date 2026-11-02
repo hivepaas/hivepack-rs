@@ -500,6 +500,7 @@ jobs:
                       n += 1
           PY
       - run: cargo fuzz run --target x86_64-unknown-linux-gnu age_keys -- -max_total_time=30
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu sign -- -max_total_time=30
       - name: Seed the lz4 corpus
         run: |
           mkdir -p fuzz/corpus/lz4

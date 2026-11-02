@@ -14,6 +14,7 @@ Until November 2026 this crate was a port of BearSSL in safe Rust, with hand-wri
 | `Hmac`, `HmacKey`, `hkdf`, `pbkdf2` | `hmac`, `hkdf`, `pbkdf2` | none stated | ZIP, RAR, age |
 | `scrypt` | `scrypt`, on `salsa20` | none stated | age's passphrases |
 | `x25519`, `x25519_base`, `ed25519_public_to_x25519` | `curve25519-dalek` | none stated in the README read | age's keys, SSH keys |
+| `ed25519_public`, `ed25519_sign`, `ed25519_verify` | `ed25519-dalek`, on `curve25519-dalek` | none stated in the README read | [signatures](sign.md) |
 | `Blake2s`, `Blake2sp` | `blake2s_simd` | none stated | RAR 5's file hashes. RustCrypto's `blake2` has no tree mode |
 | `xwing_public`, `xwing_hpke_seal`, `xwing_hpke_open` | `hpke`, on `x-wing` and `ml-kem` | **`x-wing` and `ml-kem` state that they have never been independently audited.** `hpke` states no paid audit, and a review by Cloudflare of an earlier version | age's post-quantum keys |
 | `equal` | `subtle` | none stated | age's tags and MACs |

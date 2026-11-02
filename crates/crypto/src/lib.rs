@@ -13,6 +13,8 @@
 //!   what age encrypts with.
 //! - [`x25519`], [`x25519_base`] and [`ed25519_public_to_x25519`]:
 //!   `curve25519-dalek`, age's keys and SSH keys.
+//! - [`ed25519_public`], [`ed25519_sign`] and [`ed25519_verify`]: `ed25519-dalek`,
+//!   signatures.
 //! - [`scrypt()`]: `scrypt`, age's passphrases.
 //! - [`xwing_hpke_seal`] and [`xwing_hpke_open`]: `hpke` and `x-wing`, age's
 //!   post-quantum keys.
@@ -27,6 +29,7 @@ mod aes;
 mod blake2;
 mod curve;
 mod digest;
+mod ed25519;
 mod kdf;
 mod random;
 mod xwing;
@@ -41,6 +44,10 @@ pub use curve::{X25519_LENGTH, ed25519_public_to_x25519, x25519, x25519_base};
 pub use digest::{
     Digest, Hmac, HmacKey, MD5_LENGTH, Md5, SHA1_LENGTH, SHA256_LENGTH, SHA512_LENGTH, Sha1,
     Sha256, Sha512, hkdf, pbkdf2,
+};
+pub use ed25519::{
+    ED25519_PUBLIC_LENGTH, ED25519_SEED_LENGTH, ED25519_SIGNATURE_LENGTH, ed25519_public,
+    ed25519_sign, ed25519_verify,
 };
 pub use kdf::{ScryptError, scrypt};
 pub use random::{RandomSource, system_random};

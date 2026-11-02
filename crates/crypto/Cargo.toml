@@ -24,6 +24,7 @@ aes = { version = "0.9", features = ["zeroize"] }
 blake2s_simd = "1"
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["zeroize"] }
 curve25519-dalek = { version = "5", default-features = false, features = ["precomputed-tables", "zeroize"] }
+ed25519-dalek = { version = "3", default-features = false, features = ["fast", "zeroize"] }
 hkdf = "0.13"
 # X-Wing under HPKE, age's post-quantum keys. Not independently audited: see
 # docs/crypto.md.

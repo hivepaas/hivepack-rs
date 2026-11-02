@@ -27,8 +27,21 @@ const PRIVATE_KEY_AUTH_MAGIC: &[u8] = b"openssh-key-v1\0";
 /// 128 times OpenSSH's default, a few seconds.
 const MAX_ROUNDS: u32 = 1 << 11;
 
-/// An Ed25519 private key: the seed, then the public key.
-pub(crate) struct Ed25519PrivateKey(pub(crate) [u8; 64]);
+/// An Ed25519 private key: the seed, then the public key, as the key's file holds
+/// them; nothing has checked that the one is the other's.
+pub struct Ed25519PrivateKey(pub(crate) [u8; 64]);
+
+impl Ed25519PrivateKey {
+    /// The seed.
+    pub fn seed(&self) -> &[u8] {
+        &self.0[..32]
+    }
+
+    /// The public key the file gives.
+    pub fn public(&self) -> &[u8] {
+        &self.0[32..]
+    }
+}
 
 impl Drop for Ed25519PrivateKey {
     fn drop(&mut self) {
@@ -39,7 +52,7 @@ impl Drop for Ed25519PrivateKey {
 
 /// Why a private key did not parse.
 #[derive(Debug)]
-pub(crate) enum KeyError {
+pub enum KeyError {
     /// `PassphraseMissingError`: the key is encrypted. The public key, in
     /// the wire format, when the file has it unencrypted.
     PassphraseMissing(Option<Vec<u8>>),
@@ -304,6 +317,28 @@ fn unsupported_pem(kind: &str) -> KeyError {
         }
         _ => other(format!("ssh: unsupported key type {kind:?}")),
     }
+}
+
+/// An Ed25519 key from an SSH private key file, as `hivepack-sign` takes one:
+/// `passphrase` is used only if the key is encrypted, and is asked for with
+/// [`KeyError::PassphraseMissing`] if it is and there is none.
+pub fn parse_ssh_private_key(
+    pem_bytes: &[u8],
+    passphrase: Option<&[u8]>,
+) -> Result<Ed25519PrivateKey, KeyError> {
+    match (parse_raw_private_key(pem_bytes), passphrase) {
+        (Err(KeyError::PassphraseMissing(_)), Some(passphrase)) => {
+            parse_raw_private_key_with_passphrase(pem_bytes, passphrase)
+        }
+        (read, _) => read,
+    }
+}
+
+/// An SSH public key's line, `ssh-ed25519 AAAA… comment`: its type, and for an
+/// Ed25519 key the key itself.
+pub fn parse_ssh_public_key(line: &[u8]) -> Result<(String, Option<[u8; 32]>), KeyError> {
+    let key = parse_authorized_key(line)?;
+    Ok((key.kind, key.ed25519))
 }
 
 /// `ParseRawPrivateKey`: an unencrypted key, or `PassphraseMissing`.
