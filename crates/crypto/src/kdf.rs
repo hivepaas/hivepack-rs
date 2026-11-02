@@ -1,6 +1,6 @@
 //! scrypt, from the `scrypt` crate.
 
-/// Why [`scrypt`] did not derive a key.
+/// Why [`scrypt()`] did not derive a key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScryptError {
     /// The parameters are out of range.
