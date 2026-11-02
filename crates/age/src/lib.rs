@@ -97,6 +97,10 @@ pub use parse::{BoxedIdentity, parse_identities};
 pub use pq::{HybridIdentity, HybridRecipient};
 pub use recipient_file::{Recipients, SkippedKey, parse_recipient, parse_recipients_file};
 pub use scrypt::{DEFAULT_MAX_WORK_FACTOR, DEFAULT_WORK_FACTOR, ScryptIdentity, ScryptRecipient};
+pub use ssh_keys::{
+    Ed25519PrivateKey as SshPrivateKey, KeyError as SshKeyError, parse_ssh_private_key,
+    parse_ssh_public_key,
+};
 pub use x25519::{X25519Identity, X25519Recipient};
 
 /// The age release this crate follows.

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/7z", "crates/age", "crates/bzip2", "crates/cpio", "crates/crypto", "crates/deflate", "crates/extract", "crates/iso", "crates/lz4", "crates/open", "crates/rar", "crates/tar", "crates/udf", "crates/xar", "crates/xz", "crates/zip", "crates/zstd", "tools/7z-bench", "tools/age-bench", "tools/bzip2-bench", "tools/deflate-bench", "tools/lz4-bench", "tools/rar-bench", "tools/tar-bench", "tools/xz-bench", "tools/ziptool", "tools/zip-bench", "tools/zstd-bench"]
+members = ["crates/7z", "crates/age", "crates/bzip2", "crates/cpio", "crates/crypto", "crates/deflate", "crates/extract", "crates/iso", "crates/lz4", "crates/open", "crates/rar", "crates/sign", "crates/tar", "crates/udf", "crates/xar", "crates/xz", "crates/zip", "crates/zstd", "tools/7z-bench", "tools/age-bench", "tools/bzip2-bench", "tools/deflate-bench", "tools/lz4-bench", "tools/rar-bench", "tools/tar-bench", "tools/xz-bench", "tools/ziptool", "tools/zip-bench", "tools/zstd-bench"]
 
 [workspace.package]
 edition = "2024"
@@ -22,6 +22,7 @@ hivepack-iso = { path = "crates/iso" }
 hivepack-lz4 = { path = "crates/lz4" }
 hivepack-open = { path = "crates/open" }
 hivepack-rar = { path = "crates/rar" }
+hivepack-sign = { path = "crates/sign" }
 hivepack-tar = { path = "crates/tar" }
 hivepack-udf = { path = "crates/udf" }
 hivepack-xar = { path = "crates/xar" }
