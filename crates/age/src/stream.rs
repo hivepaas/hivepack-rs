@@ -9,7 +9,7 @@
 use std::io::{self, Read, Write};
 
 use hivepack_crypto::{
-    CHACHA20_NONCE_LENGTH, POLY1305_TAG_LENGTH, chacha20, chacha20_poly1305, equal,
+    CHACHA20_NONCE_LENGTH, POLY1305_TAG_LENGTH, chacha20_poly1305_open, chacha20_poly1305_seal,
 };
 
 use crate::error::Error;
@@ -138,20 +138,16 @@ impl<R: Read> DecryptReader<R> {
     }
 
     /// `Open` of `buf[..n]` with the current nonce, in place. If the tag
-    /// does not match, the ciphertext is put back and nothing is given
-    /// out.
+    /// does not match, nothing is decrypted and nothing is given out.
     fn open(&mut self, n: usize) -> bool {
         let Some(len) = n.checked_sub(POLY1305_TAG_LENGTH) else {
             return false;
         };
         let (data, tag) = self.buf[..n].split_at_mut(len);
-        let computed = chacha20_poly1305(&self.key, &self.nonce, data, &[], false);
-        if equal(&computed, tag) {
-            return true;
-        }
-        // Encrypted again: ChaCha20 is its own inverse.
-        chacha20(&self.key, &self.nonce, 1, data);
-        false
+        let Ok(tag) = <&[u8; POLY1305_TAG_LENGTH]>::try_from(&*tag) else {
+            return false;
+        };
+        chacha20_poly1305_open(&self.key, &self.nonce, data, &[], tag)
     }
 
     /// After the last chunk: the end of `src`, or trailing data.
@@ -300,7 +296,7 @@ impl<W: Write> EncryptWriter<W> {
             s.nonce[CHACHA20_NONCE_LENGTH - 1] = LAST_CHUNK_FLAG;
         }
         let (plaintext, rest) = s.buf.split_at_mut(s.len);
-        let tag = chacha20_poly1305(&s.key, &s.nonce, plaintext, &[], true);
+        let tag = chacha20_poly1305_seal(&s.key, &s.nonce, plaintext, &[]);
         rest[..POLY1305_TAG_LENGTH].copy_from_slice(&tag);
         self.dst.write_all(&s.buf[..s.len + POLY1305_TAG_LENGTH])?;
         s.len = 0;

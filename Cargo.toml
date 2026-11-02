@@ -4,7 +4,7 @@ members = ["crates/7z", "crates/age", "crates/bzip2", "crates/cpio", "crates/cry
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "MIT"
 authors = ["HivePaaS"]
 repository = "https://github.com/hivepaas/hivepack-rs"

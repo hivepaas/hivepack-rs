@@ -11,7 +11,8 @@ rust-version.workspace = true
 workspace = true
 
 [features]
-unsafe-fast = ["hivepack-rar/unsafe-fast"]
+# Nothing now: hivepack-crypto always has the fast code. For bench.yml.
+unsafe-fast = []
 
 [dependencies]
 hivepack-rar.workspace = true

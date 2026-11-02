@@ -12,8 +12,8 @@
 mod support;
 
 use hivepack_crypto::{
-    Aes, Digest, Hkdf, Hmac, HmacKey, Md5, ScryptError, Sha1, Sha256, Sha512, chacha20,
-    chacha20_poly1305, equal, pbkdf2, scrypt, x25519, x25519_base,
+    Aes, Digest, Hmac, HmacKey, Md5, ScryptError, Sha1, Sha256, Sha512, chacha20_poly1305_open,
+    chacha20_poly1305_seal, equal, hkdf, pbkdf2, scrypt, x25519, x25519_base,
 };
 use support::{hex, unhex};
 
@@ -531,40 +531,36 @@ fn pbkdf2_hmac_sha256_rfc_7914() {
     );
 }
 
-/// HKDF-SHA256 of `ikm` with `salt` and `info`, `length` bytes, taken in
-/// pieces of `piece` bytes.
-fn hkdf(ikm: &str, salt: Option<&str>, info: &str, length: usize, piece: usize) -> String {
+/// HKDF-SHA256 of `ikm` with `salt` and `info`, `length` bytes.
+fn hkdf_hex(ikm: &str, salt: Option<&str>, info: &str, length: usize) -> String {
     let salt = salt.map(unhex);
-    let mut extract = Hkdf::<Sha256>::new(salt.as_deref());
-    extract.inject(&unhex(ikm));
-    let mut expand = extract.flip();
     let mut out = vec![0; length];
-    for chunk in out.chunks_mut(piece) {
-        assert_eq!(expand.produce(&unhex(info), chunk), chunk.len());
-    }
+    assert!(hkdf::<Sha256>(
+        salt.as_deref(),
+        &unhex(ikm),
+        &unhex(info),
+        &mut out
+    ));
     hex(&out)
 }
 
 #[test]
 fn hkdf_sha256_rfc_5869() {
     let ikm = "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b";
-    for piece in [1, 7, 32, 100] {
-        assert_eq!(
-            hkdf(
-                ikm,
-                Some("000102030405060708090a0b0c"),
-                "f0f1f2f3f4f5f6f7f8f9",
-                42,
-                piece
-            ),
-            "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"
-        );
-    }
+    assert_eq!(
+        hkdf_hex(
+            ikm,
+            Some("000102030405060708090a0b0c"),
+            "f0f1f2f3f4f5f6f7f8f9",
+            42
+        ),
+        "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"
+    );
     let ikm_2: Vec<u8> = (0x00..=0x4f).collect();
     let salt: Vec<u8> = (0x60..=0xaf).collect();
     let info: Vec<u8> = (0xb0..=0xff).collect();
     assert_eq!(
-        hkdf(&hex(&ikm_2), Some(&hex(&salt)), &hex(&info), 82, 82),
+        hkdf_hex(&hex(&ikm_2), Some(&hex(&salt)), &hex(&info), 82),
         "b11e398dc80327a1c8e7f78c596a49344f012eda2d4efad8a050cc4c19afa97c\
          59045a99cac7827271cb41c65e590e09da3275600c2f09b8367793a9aca3db71\
          cc30c58179ec3e87c14c01d5c1f3434f1d87"
@@ -572,7 +568,7 @@ fn hkdf_sha256_rfc_5869() {
     // Test case 3: no salt and no info; an empty salt is the same.
     for salt in [None, Some("-")] {
         assert_eq!(
-            hkdf(ikm, salt, "-", 42, 42),
+            hkdf_hex(ikm, salt, "-", 42),
             "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8"
         );
     }
@@ -580,34 +576,10 @@ fn hkdf_sha256_rfc_5869() {
 
 #[test]
 fn hkdf_stops_at_255_blocks() {
-    let mut expand = Hkdf::<Sha256>::new(None).flip();
+    let mut out = vec![0; 255 * 32];
+    assert!(hkdf::<Sha256>(None, b"", b"", &mut out));
     let mut out = vec![0; 255 * 32 + 1];
-    assert_eq!(expand.produce(b"", &mut out), 255 * 32);
-    assert_eq!(expand.produce(b"", &mut out), 0);
-    assert_eq!(expand.produce(b"", &mut out), 0);
-}
-
-#[test]
-fn chacha20_rfc_8439() {
-    // Section 2.4.2.
-    let key: [u8; 32] = std::array::from_fn(|i| i as u8);
-    let nonce = [0, 0, 0, 0, 0, 0, 0, 0x4a, 0, 0, 0, 0];
-    let plaintext = b"Ladies and Gentlemen of the class of '99: If I could offer you \
-        only one tip for the future, sunscreen would be it.";
-    let ciphertext = "6e2e359a2568f98041ba0728dd0d6981e97e7aec1d4360c20a27afccfd9fae0b\
-        f91b65c5524733ab8f593dabcd62b3571639d624e65152ab8f530c359f0861d8\
-        07ca0dbf500d6a6156a38e088a22b65e52bc514d16ccf806818ce91ab7793736\
-        5af90bbf74a35be6b40b8eedf2785e42874d";
-    let mut data = plaintext.to_vec();
-    assert_eq!(chacha20(&key, &nonce, 1, &mut data), 3);
-    assert_eq!(hex(&data), ciphertext);
-    // The same in two calls, the second going on from the counter the
-    // first returned.
-    let mut data = plaintext.to_vec();
-    let (first, second) = data.split_at_mut(64);
-    let next = chacha20(&key, &nonce, 1, first);
-    chacha20(&key, &nonce, next, second);
-    assert_eq!(hex(&data), ciphertext);
+    assert!(!hkdf::<Sha256>(None, b"", b"", &mut out));
 }
 
 #[test]
@@ -628,20 +600,21 @@ fn chacha20_poly1305_rfc_8439() {
 
     let mut data = plaintext.to_vec();
     assert_eq!(
-        hex(&chacha20_poly1305(&key, &nonce, &mut data, &aad, true)),
+        hex(&chacha20_poly1305_seal(&key, &nonce, &mut data, &aad)),
         tag
     );
     assert_eq!(hex(&data), ciphertext);
 
-    let computed = chacha20_poly1305(&key, &nonce, &mut data, &aad, false);
-    assert!(equal(&computed, &unhex(tag)));
+    let tag: [u8; 16] = unhex(tag).try_into().unwrap();
+    assert!(chacha20_poly1305_open(&key, &nonce, &mut data, &aad, &tag));
     assert_eq!(data, plaintext);
 
-    // One bit off in the ciphertext changes the tag.
+    // One bit off in the ciphertext fails, and leaves it as it was.
     let mut data = unhex(ciphertext);
     data[50] ^= 4;
-    let computed = chacha20_poly1305(&key, &nonce, &mut data, &aad, false);
-    assert!(!equal(&computed, &unhex(tag)));
+    let before = data.clone();
+    assert!(!chacha20_poly1305_open(&key, &nonce, &mut data, &aad, &tag));
+    assert_eq!(data, before);
 }
 
 #[test]

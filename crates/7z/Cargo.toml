@@ -15,9 +15,9 @@ repository.workspace = true
 homepage.workspace = true
 
 [features]
-# Faster CRC-32 from hivepack-deflate and AES from hivepack-crypto. See
+# Faster CRC-32 from hivepack-deflate. See
 # docs/unsafe.md.
-unsafe-fast = ["hivepack-deflate/unsafe-fast", "hivepack-crypto/unsafe-fast"]
+unsafe-fast = ["hivepack-deflate/unsafe-fast"]
 
 [lints]
 workspace = true
