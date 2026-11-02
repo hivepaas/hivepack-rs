@@ -1,13 +1,11 @@
 [package]
 name = "hivepack-zip"
-version = "0.0.0"
+version = "0.1.0"
 description = "ZIP archives in safe Rust, the container logic ported from libzip"
 license = "BSD-3-Clause"
 readme = "README.md"
 keywords = ["zip", "archive", "libzip"]
 categories = ["compression", "encoding"]
-# Nothing to publish yet.
-publish = false
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true

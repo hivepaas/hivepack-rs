@@ -402,7 +402,7 @@ dependencies = [
 
 [[package]]
 name = "hivepack-7z"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "hivepack-bzip2",
  "hivepack-crypto",
@@ -413,7 +413,7 @@ dependencies = [
 
 [[package]]
 name = "hivepack-age"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "hivepack-crypto",
  "hivepack-deflate",
@@ -421,14 +421,14 @@ dependencies = [
 
 [[package]]
 name = "hivepack-bzip2"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bzip2",
 ]
 
 [[package]]
 name = "hivepack-cpio"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "hivepack-bzip2",
  "hivepack-deflate",
@@ -436,7 +436,7 @@ dependencies = [
 
 [[package]]
 name = "hivepack-crypto"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "aes",
  "blake2s_simd",
@@ -458,7 +458,7 @@ dependencies = [
 
 [[package]]
 name = "hivepack-deflate"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "flate2",
  "libz-sys",
@@ -466,7 +466,7 @@ dependencies = [
 
 [[package]]
 name = "hivepack-extract"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
@@ -487,7 +487,7 @@ dependencies = [
 
 [[package]]
 name = "hivepack-iso"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "hivepack-deflate",
  "hivepack-xz",
@@ -495,7 +495,7 @@ dependencies = [
 
 [[package]]
 name = "hivepack-lz4"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "lz4",
  "lz4-sys",
@@ -503,7 +503,7 @@ dependencies = [
 
 [[package]]
 name = "hivepack-open"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bzip2",
  "flate2",
@@ -528,7 +528,7 @@ dependencies = [
 
 [[package]]
 name = "hivepack-rar"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "hivepack-crypto",
  "hivepack-deflate",
@@ -536,7 +536,7 @@ dependencies = [
 
 [[package]]
 name = "hivepack-sign"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "hivepack-age",
  "hivepack-crypto",
@@ -544,7 +544,7 @@ dependencies = [
 
 [[package]]
 name = "hivepack-tar"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "hivepack-bzip2",
  "hivepack-crypto",
@@ -552,7 +552,7 @@ dependencies = [
 
 [[package]]
 name = "hivepack-udf"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "hivepack-crypto",
  "hivepack-xz",
@@ -560,7 +560,7 @@ dependencies = [
 
 [[package]]
 name = "hivepack-xar"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "hivepack-bzip2",
  "hivepack-crypto",
@@ -570,11 +570,11 @@ dependencies = [
 
 [[package]]
 name = "hivepack-xz"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "hivepack-zip"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "hivepack-bzip2",
  "hivepack-crypto",
@@ -585,7 +585,7 @@ dependencies = [
 
 [[package]]
 name = "hivepack-zstd"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",

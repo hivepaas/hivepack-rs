@@ -1,13 +1,11 @@
 [package]
 name = "hivepack-iso"
-version = "0.0.0"
+version = "0.1.0"
 description = "Reading ISO 9660 images in safe Rust, ported from libarchive"
 license = "BSD-2-Clause"
 readme = "README.md"
 keywords = ["iso", "iso9660", "joliet", "rockridge", "archive"]
 categories = ["compression", "encoding", "filesystem"]
-# Nothing to publish yet.
-publish = false
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true

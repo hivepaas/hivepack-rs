@@ -2,7 +2,7 @@
 
 Read and write archives and compressed files in Rust: one library for many formats, in the spirit of [libarchive](https://github.com/libarchive/libarchive).
 
-> **Status:** early development. Nothing is published on crates.io yet.
+> **Status:** version 0.1.0, the first release. The crates are published on crates.io; before 1.0 a minor release may change an API, and [CHANGELOG.md](CHANGELOG.md) says how. Security reports: [SECURITY.md](SECURITY.md).
 
 ## 📦 Crates
 
@@ -66,7 +66,7 @@ The test files come from zstd itself and from other zstd implementations (Go, Ja
 
 ## 🦀 Rust versions
 
-- **Oldest supported: 1.88**, `rust-version` in `Cargo.toml`, which CI checks.
+- **Oldest supported: 1.89**, `rust-version` in `Cargo.toml`, which CI checks.
   It is a promise to the crates' users: raised only when the code needs
   something newer, never to a Rust less than a year old, and, once the crates
   are published, in a minor release with a line in its notes.

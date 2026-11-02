@@ -1,13 +1,11 @@
 [package]
 name = "hivepack-age"
-version = "0.0.0"
+version = "0.1.0"
 description = "Decrypting and encrypting age files in safe Rust, ported from age, the reference implementation in Go"
 license = "BSD-3-Clause"
 readme = "README.md"
 keywords = ["age", "encryption", "decryption", "x25519", "scrypt"]
 categories = ["cryptography"]
-# Nothing to publish yet.
-publish = false
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true

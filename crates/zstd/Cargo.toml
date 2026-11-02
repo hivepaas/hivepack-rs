@@ -1,13 +1,11 @@
 [package]
 name = "hivepack-zstd"
-version = "0.0.0"
+version = "0.1.0"
 description = "Zstandard (zstd) compression and decompression in safe Rust, ported from the official library"
 license = "BSD-3-Clause AND MIT"
 readme = "README.md"
 keywords = ["zstd", "zstandard", "compression", "decompression"]
 categories = ["compression"]
-# Nothing to publish until the decoder works.
-publish = false
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true

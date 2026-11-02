@@ -1,13 +1,11 @@
 [package]
 name = "hivepack-crypto"
-version = "0.0.0"
+version = "0.1.0"
 description = "The cryptography of hivepack's formats, behind one small interface, from crates many others depend on"
 license = "MIT"
 readme = "README.md"
 keywords = ["aes", "chacha20", "x25519", "scrypt"]
 categories = ["cryptography"]
-# Nothing to publish yet.
-publish = false
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true

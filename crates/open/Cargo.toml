@@ -1,13 +1,11 @@
 [package]
 name = "hivepack-open"
-version = "0.0.0"
+version = "0.1.0"
 description = "Opening what hivepack reads: age, zstd, xz, lz4, gzip, bzip2, pbzx and RPM layers found and stacked, then the container told"
 license = "MIT"
 readme = "README.md"
 keywords = ["archive", "decompression", "age", "tar", "zstd"]
 categories = ["compression"]
-# Nothing to publish yet.
-publish = false
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -34,7 +32,10 @@ bzip2.workspace = true
 liblzma.workspace = true
 lz4.workspace = true
 hivepack-tar.workspace = true
-hivepack-extract.workspace = true
+# By path, without a version: `hivepack-extract` needs this crate, so cargo
+# leaves it out of the published package, and the tests that use it stay in
+# the repository.
+hivepack-extract = { path = "../extract" }
 hivepack-iso.workspace = true
 # For the UDF volumes it finds.
 hivepack-udf.workspace = true

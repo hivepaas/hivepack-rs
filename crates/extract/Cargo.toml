@@ -1,13 +1,11 @@
 [package]
 name = "hivepack-extract"
-version = "0.0.0"
+version = "0.1.0"
 description = "Extracting archives to disk, safe by default: nothing outside the destination, through links, or past limits"
 license = "MIT AND Unicode-3.0"
 readme = "README.md"
 keywords = ["extract", "unzip", "archive", "zip-slip", "zip-bomb"]
 categories = ["filesystem", "compression"]
-# Nothing to publish yet.
-publish = false
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "hivepack-rar"
-version = "0.0.0"
+version = "0.1.0"
 description = "Reading RAR archives in safe Rust, ported from RARLAB's UnRAR; reads RAR, never writes it"
 # UnRAR's own license: RAR archives may be read with it in any software,
 # but it may not be used to write RAR or re-create its compression. See
@@ -9,8 +9,6 @@ license = "UnRAR"
 readme = "README.md"
 keywords = ["rar", "unrar", "archive", "decompression"]
 categories = ["compression"]
-# Nothing to publish yet.
-publish = false
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true

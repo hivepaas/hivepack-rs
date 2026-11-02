@@ -1,13 +1,11 @@
 [package]
 name = "hivepack-tar"
-version = "0.0.0"
+version = "0.1.0"
 description = "Reading and writing tar archives in safe Rust, ported from Go's archive/tar"
 license = "BSD-3-Clause"
 readme = "README.md"
 keywords = ["tar", "archive", "pax", "ustar"]
 categories = ["compression", "encoding"]
-# Nothing to publish yet.
-publish = false
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true

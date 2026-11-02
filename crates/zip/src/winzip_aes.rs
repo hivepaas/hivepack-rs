@@ -34,9 +34,9 @@ impl WinzipAes {
         for byte in data {
             if self.pad_offset == PAD_LENGTH {
                 for block in self.pad.as_chunks_mut::<AES_BLOCK_LENGTH>().0 {
-                    for j in 0..8 {
-                        self.counter[j] = self.counter[j].wrapping_add(1);
-                        if self.counter[j] != 0 {
+                    for digit in self.counter.iter_mut().take(8) {
+                        *digit = digit.wrapping_add(1);
+                        if *digit != 0 {
                             break;
                         }
                     }
