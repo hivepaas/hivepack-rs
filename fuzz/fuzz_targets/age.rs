@@ -1,7 +1,7 @@
-//! hivepack-age on any input: the bytes are a file, decrypted with
+//! hivepack::age on any input: the bytes are a file, decrypted with
 //! `decrypt_file` by CCTV's usual X25519 identity and the passphrase
 //! `password` (work factors up to 2^4, so that a run stays quick), which
-//! are those of the files `crates/age/tests/oracle.rs` records. A panic is
+//! are those of the files `crates/hivepack/tests/age_oracle.rs` records. A panic is
 //! a bug.
 //!
 //! The file is read twice, in pieces of different sizes from its first
@@ -13,7 +13,7 @@
 use std::io::Read;
 use std::sync::{Arc, OnceLock};
 
-use hivepack_age::{
+use hivepack::age::{
     Error, HybridIdentity, Identity, RandomSource, ScryptIdentity, X25519Identity, decrypt_file,
 };
 use libfuzzer_sys::fuzz_target;

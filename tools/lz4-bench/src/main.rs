@@ -1,4 +1,4 @@
-//! Times hivepack-lz4 against liblz4 1.10.0 and lz4_flex on the same
+//! Times hivepack::lz4 against liblz4 1.10.0 and lz4_flex on the same
 //! inputs: decoding the blocks liblz4 compressed at each level, or, with
 //! `--frame`, reading the frames it wrote.
 //!
@@ -128,12 +128,12 @@ fn c_mode(level: i32) -> lz4::block::CompressionMode {
     }
 }
 
-/// hivepack-lz4.
+/// hivepack::lz4.
 struct Port;
 
 impl Codec for Port {
     fn name(&self) -> String {
-        if hivepack_lz4::UNSAFE_FAST {
+        if hivepack::lz4::UNSAFE_FAST {
             "hivepack-lz4 (unsafe-fast)".into()
         } else {
             "hivepack-lz4".into()
@@ -143,30 +143,30 @@ impl Codec for Port {
     fn decompress(&mut self, input: &[u8], size: usize, output: &mut Vec<u8>) -> Result<()> {
         output.clear();
         output.resize(size, 0);
-        match hivepack_lz4::block::decompress_safe(input, output) {
+        match hivepack::lz4::block::decompress_safe(input, output) {
             Ok(len) if len == size => Ok(()),
             other => Err(format!("port: {other:?}")),
         }
     }
 
     fn read_frame(&mut self, input: &[u8], size: usize, output: &mut Vec<u8>) -> Result<()> {
-        read_all(hivepack_lz4::Decoder::new(input), size, output)
+        read_all(hivepack::lz4::Decoder::new(input), size, output)
     }
 
     fn compress(&mut self, input: &[u8], level: i32, output: &mut Vec<u8>) -> Result<()> {
         output.clear();
         output.resize(bound(input.len()), 0);
         let n = match level {
-            1 => hivepack_lz4::block::compress_default(input, output),
-            l if l > 1 => hivepack_lz4::hc::compress_hc(input, output, l),
-            l => hivepack_lz4::block::compress_fast(input, output, -l),
+            1 => hivepack::lz4::block::compress_default(input, output),
+            l if l > 1 => hivepack::lz4::hc::compress_hc(input, output, l),
+            l => hivepack::lz4::block::compress_fast(input, output, -l),
         };
         output.truncate(n);
         Ok(())
     }
 
     fn write_frame(&mut self, input: &[u8], level: i32, output: &mut Vec<u8>) -> Result<()> {
-        use hivepack_lz4::frame::{BlockSizeId, FrameInfo, Preferences};
+        use hivepack::lz4::frame::{BlockSizeId, FrameInfo, Preferences};
         let prefs = Preferences {
             frame_info: FrameInfo {
                 block_size_id: BlockSizeId::Max4Mb,
@@ -177,7 +177,7 @@ impl Codec for Port {
             ..Preferences::default()
         };
         output.clear();
-        let mut encoder = hivepack_lz4::Encoder::new(std::mem::take(output), Some(&prefs))
+        let mut encoder = hivepack::lz4::Encoder::new(std::mem::take(output), Some(&prefs))
             .map_err(|e| e.to_string())?;
         std::io::Write::write_all(&mut encoder, input).map_err(|e| e.to_string())?;
         *output = encoder.finish().map_err(|e| e.to_string())?;
@@ -185,7 +185,7 @@ impl Codec for Port {
     }
 }
 
-/// hivepack-lz4's frame context, in one call: what the port's frame decoding
+/// hivepack::lz4's frame context, in one call: what the port's frame decoding
 /// costs without a reader around it.
 struct PortContext;
 
@@ -199,7 +199,7 @@ impl Codec for PortContext {
     }
 
     fn read_frame(&mut self, input: &[u8], size: usize, output: &mut Vec<u8>) -> Result<()> {
-        use hivepack_lz4::frame::{DecompressOptions, DecompressionContext, InBuffer, OutBuffer};
+        use hivepack::lz4::frame::{DecompressOptions, DecompressionContext, InBuffer, OutBuffer};
         output.clear();
         output.resize(size, 0);
         let mut dctx = DecompressionContext::new();

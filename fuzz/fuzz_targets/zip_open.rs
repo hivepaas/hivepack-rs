@@ -1,14 +1,14 @@
-//! Opens the input as a ZIP archive with hivepack-zip, leniently and with
+//! Opens the input as a ZIP archive with hivepack::zip, leniently and with
 //! `ZIP_CHECKCONS`, asks everything the reading API answers about each
 //! entry, and reads each entry's data, decompressed and raw, in pieces, and
 //! decrypted with the password "foo", which some of the recorded archives
 //! are encrypted with. A panic is a bug. libzip is not built here:
-//! `crates/zip/tests/oracle.rs` compares the answers with it through the
+//! `crates/hivepack/tests/zip_oracle.rs` compares the answers with it through the
 //! oracle.
 
 #![no_main]
 
-use hivepack_zip::{Archive, ArchiveFlags, Flags, OpenFlags, ReadAt, em};
+use hivepack::zip::{Archive, ArchiveFlags, Flags, OpenFlags, ReadAt, em};
 use libfuzzer_sys::fuzz_target;
 
 /// Reads entry `i` to its end, in pieces of growing sizes, and closes it.

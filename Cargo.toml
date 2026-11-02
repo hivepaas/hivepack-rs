@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/7z", "crates/age", "crates/bzip2", "crates/cpio", "crates/crypto", "crates/deflate", "crates/extract", "crates/iso", "crates/lz4", "crates/open", "crates/rar", "crates/sign", "crates/tar", "crates/udf", "crates/xar", "crates/xz", "crates/zip", "crates/zstd", "tools/7z-bench", "tools/age-bench", "tools/bzip2-bench", "tools/deflate-bench", "tools/lz4-bench", "tools/rar-bench", "tools/tar-bench", "tools/xz-bench", "tools/ziptool", "tools/zip-bench", "tools/zstd-bench"]
+members = ["crates/hivepack", "tools/7z-bench", "tools/age-bench", "tools/bzip2-bench", "tools/deflate-bench", "tools/lz4-bench", "tools/rar-bench", "tools/tar-bench", "tools/xz-bench", "tools/ziptool", "tools/zip-bench", "tools/zstd-bench"]
 
 [workspace.package]
 edition = "2024"
@@ -11,57 +11,40 @@ repository = "https://github.com/hivepaas/hivepack-rs"
 homepage = "https://github.com/hivepaas/hivepack-rs"
 
 [workspace.dependencies]
-hivepack-7z = { path = "crates/7z" }
-hivepack-age = { path = "crates/age" }
-hivepack-bzip2 = { path = "crates/bzip2" }
-hivepack-cpio = { path = "crates/cpio" }
-hivepack-crypto = { path = "crates/crypto" }
-hivepack-deflate = { path = "crates/deflate" }
-hivepack-extract = { path = "crates/extract" }
-hivepack-iso = { path = "crates/iso" }
-hivepack-lz4 = { path = "crates/lz4" }
-hivepack-open = { path = "crates/open" }
-hivepack-rar = { path = "crates/rar" }
-hivepack-sign = { path = "crates/sign" }
-hivepack-tar = { path = "crates/tar" }
-hivepack-udf = { path = "crates/udf" }
-hivepack-xar = { path = "crates/xar" }
-hivepack-xz = { path = "crates/xz" }
-hivepack-zip = { path = "crates/zip" }
-hivepack-zstd = { path = "crates/zstd" }
+hivepack = { path = "crates/hivepack", version = "0.1.0", default-features = false }
 # The official libraries, used only as the reference in tests and
-# benchmarks. zstd 0.14.3 builds libzstd 1.5.7, the release hivepack-zstd
+# benchmarks. zstd 0.14.3 builds libzstd 1.5.7, the release hivepack::zstd
 # ports. The legacy formats (v0.1 to v0.7) are left out, as the port does not
 # read them. With its worker threads (`zstdmt`), for the frames compressed
 # with `ZSTD_c_nbWorkers`.
 zstd = { version = "0.14.3", default-features = false, features = ["zdict_builder", "experimental", "zstdmt"] }
-# libz-sys 1.1.31 bundles zlib 1.3.2, the release hivepack-deflate ports, and
+# libz-sys 1.1.31 bundles zlib 1.3.2, the release hivepack::deflate ports, and
 # its `static` feature builds that rather than linking the system's zlib,
 # which may be another version. flate2, with its zlib backend, is the safe
 # interface to it.
 libz-sys = { version = "=1.1.31", features = ["static"] }
 flate2 = { version = "1.1", default-features = false, features = ["zlib"] }
-# bzip2-sys 0.1.13 bundles libbzip2 1.0.8, the release hivepack-bzip2
+# bzip2-sys 0.1.13 bundles libbzip2 1.0.8, the release hivepack::bzip2
 # ports, and its `static` feature builds that rather than linking the
 # system's libbz2, which distributions patch. The bzip2 crate is the safe
 # interface to it, with its default backend, libbz2-rs-sys (a translation
 # of the same C), left out.
 bzip2 = { version = "0.6.1", default-features = false, features = ["bzip2-sys", "static"] }
-# lz4-sys 1.11.1 bundles liblz4 1.10.0, the release hivepack-lz4 ports,
+# lz4-sys 1.11.1 bundles liblz4 1.10.0, the release hivepack::lz4 ports,
 # and builds it rather than linking the system's liblz4. The lz4 crate is
 # the safe interface to it.
 lz4 = "=1.28.1"
 lz4-sys = "=1.11.1"
 # lz4_flex, another LZ4 in Rust, only for tools/lz4-bench to compare with.
 lz4_flex = { version = "=0.14.0", default-features = false }
-# liblzma-sys 0.4.9 bundles liblzma 5.8.4, the release hivepack-xz ports,
+# liblzma-sys 0.4.9 bundles liblzma 5.8.4, the release hivepack::xz ports,
 # and its `static` feature builds that rather than linking the system's
 # liblzma, which may be another version. The liblzma crate is the safe
 # interface to it.
 liblzma = { version = "0.4.9", features = ["static"] }
 liblzma-sys = { version = "=0.4.9", features = ["static"] }
 # Directories opened by handle, where nothing resolves outside them or
-# through a symbolic link: hivepack-extract's way to write, until the
+# through a symbolic link: hivepack::extract's way to write, until the
 # standard library's directory handles (`std::fs::Dir`) are stable. A
 # dependency with `unsafe` code, in that crate only; see docs/safety.md.
 cap-std = { version = "4.0.3", default-features = false }
@@ -103,15 +86,10 @@ opt-level = 3
 [profile.dev.package.liblzma-sys]
 opt-level = 3
 
-# hivepack-zip's tests compress and decompress gigabytes (libzip's
-# zip64_creation adds 4 GiB): optimized, as the C libraries are, though
-# with the checks of a dev build.
-[profile.dev.package.hivepack-deflate]
-opt-level = 3
-
-# hivepack-iso's tests compare thousands of images with libarchive, some of
-# them 25 MiB, passed to the oracle in hexadecimal.
-[profile.dev.package.hivepack-iso]
+# The tests compress and decompress gigabytes (libzip's zip64_creation adds
+# 4 GiB) and compare thousands of images of up to 25 MiB with libarchive:
+# optimized, as the C libraries are, though with the checks of a dev build.
+[profile.dev.package.hivepack]
 opt-level = 3
 
 # scrypt's work is the same at any level of the tests: age's and signing's key

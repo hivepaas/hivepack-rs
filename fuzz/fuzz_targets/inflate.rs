@@ -1,4 +1,4 @@
-//! Decodes the input with hivepack-deflate and with zlib, given in the same
+//! Decodes the input with hivepack::deflate and with zlib, given in the same
 //! pieces, and checks that every call agrees: the same result and message,
 //! the same bytes read and written, and the same output. A panic or a
 //! difference is a bug.
@@ -9,7 +9,7 @@
 #![no_main]
 
 use flate2::{Decompress, FlushDecompress};
-use hivepack_deflate::{ErrorCode, Flush, InBuffer, Inflate, OutBuffer, Status};
+use hivepack::deflate::{ErrorCode, Flush, InBuffer, Inflate, OutBuffer, Status};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Debug, PartialEq)]

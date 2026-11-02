@@ -1,4 +1,4 @@
-//! Extracts the input as a UDF volume with hivepack-extract, as the
+//! Extracts the input as a UDF volume with hivepack::extract, as the
 //! `extract` target does a ZIP archive: its first byte choosing the
 //! options (and whether hidden entries are listed), the rest the image as
 //! the `udf` target reads it, into a scratch folder beside a file that must
@@ -8,7 +8,7 @@
 //! it, a count of files the summary does not give, or a file left cut off:
 //! the files left hold the bytes of the entries written in full, however
 //! the extraction ends. A hard link's file counts once.
-//! `crates/extract/tests/udf.rs` has the cases made by hand.
+//! `crates/hivepack/tests/extract_udf.rs` has the cases made by hand.
 
 #![no_main]
 
@@ -21,8 +21,8 @@ use std::sync::{Arc, Mutex};
 use std::collections::HashSet;
 use std::os::unix::fs::MetadataExt;
 
-use hivepack_extract::{Cancel, Links, Names, OnRefused, Options, Progress, extract_udf};
-use hivepack_udf::Udf;
+use hivepack::extract::{Cancel, Links, Names, OnRefused, Options, Progress, extract_udf};
+use hivepack::udf::Udf;
 use libfuzzer_sys::fuzz_target;
 use udf_image::Sparse;
 
@@ -78,10 +78,10 @@ fuzz_target!(|data: &[u8]| {
     let Some(sparse) = Sparse::new(image) else {
         return;
     };
-    let mount = hivepack_udf::Options {
+    let mount = hivepack::udf::Options {
         sector_size: Some(sparse.sector_size as u32),
         unhide: choice & 1 != 0,
-        ..hivepack_udf::Options::default()
+        ..hivepack::udf::Options::default()
     };
     let Ok(mut udf) = Udf::with_options(sparse, &mount) else {
         return;

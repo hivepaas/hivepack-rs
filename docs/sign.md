@@ -1,6 +1,6 @@
 # Signing files
 
-`hivepack-sign` signs a file with an SSH Ed25519 key, or a hybrid key of Ed25519 and ML-DSA-65, and checks such a signature. A signature shows that a file is the one the holder of a key signed. It hides nothing: the file stays as readable as it was.
+`hivepack::sign` signs a file with an SSH Ed25519 key, or a hybrid key of Ed25519 and ML-DSA-65, and checks such a signature. A signature shows that a file is the one the holder of a key signed. It hides nothing: the file stays as readable as it was.
 
 > **Status:** Ed25519 and hybrid keys, whole files, signatures kept beside them. Not yet in packwing.
 
@@ -9,12 +9,12 @@
 The format is `ssh-keygen -Y sign`'s, from OpenSSH's description of it, [`PROTOCOL.sshsig`](https://github.com/openssh/openssh-portable/blob/master/PROTOCOL.sshsig). It was chosen for what a user already has: an SSH key to sign with, and on most systems a program that checks the result without hivepack:
 
 ```sh
-ssh-keygen -Y sign -f ~/.ssh/id_ed25519 -n file backup.zip   # or hivepack_sign::sign
+ssh-keygen -Y sign -f ~/.ssh/id_ed25519 -n file backup.zip   # or hivepack::sign::sign
 echo "me $(cat ~/.ssh/id_ed25519.pub)" > allowed_signers
 ssh-keygen -Y verify -f allowed_signers -I me -n file -s backup.zip.sig < backup.zip
 ```
 
-This is not a port: the format is short, and the code is written from its description. The signing itself is `ed25519-dalek`'s, through `hivepack-crypto`, and keys are read by `hivepack-age`'s port of Go's SSH key parser.
+This is not a port: the format is short, and the code is written from its description. The signing itself is `ed25519-dalek`'s, through `hivepack::crypto`, and keys are read by `hivepack::age`'s port of Go's SSH key parser.
 
 ## Why beside the file
 
@@ -43,7 +43,7 @@ Also refused here: a public key of small order, whose signatures can be made wit
 
 So one signature has one form here, white space aside.
 
-**A private key whose two public keys differ is refused** (`Error::KeyMismatch`). A key file holds the public key beside the private one. Ed25519 signing hashes the public key in, so signing with one that is not the private key's own gives the private key away to anyone who sees two such signatures. `hivepack-crypto` signs with the seed's own key in any case; this tells the user that the file is wrong.
+**A private key whose two public keys differ is refused** (`Error::KeyMismatch`). A key file holds the public key beside the private one. Ed25519 signing hashes the public key in, so signing with one that is not the private key's own gives the private key away to anyone who sees two such signatures. `hivepack::crypto` signs with the seed's own key in any case; this tells the user that the file is wrong.
 
 ## Hybrid keys
 
@@ -65,7 +65,7 @@ They keep SSH's frame, with a type of their own, `mldsa65-ed25519@hivepaas.com`,
 
 **Signing is deterministic in both halves**, FIPS 204's optional form for ML-DSA: a key signs a file in one way, with no random bytes to get wrong, which also lets the tests compare with OpenSSL byte for byte.
 
-**A hybrid key's file is this crate's.** `PrivateKey::generate_hybrid` makes a key, from two seeds of 32 bytes kept rather than the expanded keys, and `PrivateKey::to_file` writes it: Base64 in armor, or with a passphrase that text in an armored age file under scrypt, so that `hivepack-age` does the encryption and `age --decrypt` can recover the seeds. The public key's line is written by `Display`, and read back by `PublicKey::parse`.
+**A hybrid key's file is this crate's.** `PrivateKey::generate_hybrid` makes a key, from two seeds of 32 bytes kept rather than the expanded keys, and `PrivateKey::to_file` writes it: Base64 in armor, or with a passphrase that text in an armored age file under scrypt, so that `hivepack::age` does the encryption and `age --decrypt` can recover the seeds. The public key's line is written by `Display`, and read back by `PublicKey::parse`.
 
 ## Limits
 
@@ -78,8 +78,8 @@ They keep SSH's frame, with a type of their own, `mldsa65-ed25519@hivepaas.com`,
 
 - **`tests/oracle.rs`**, where there is an `ssh-keygen`: signatures equal to its own byte for byte, across sizes around the hash's block and this crate's buffer, for three namespaces; each checks the other's; SHA-256 signatures read; encrypted keys, fingerprints, and RSA keys refused. Of signatures and files damaged at random, `ssh-keygen` takes everything taken here, and what is taken here has the signature's own bytes, for the file's own bytes. `HIVEPACK_SIGN_DAMAGED` sets how many, 300 by default.
 - **`tests/sign.rs`**, everywhere: signatures `ssh-keygen` made, kept in the test; another key's signature that names this one; a file that cannot be read; every cut of a signature; a private key whose halves do not match.
-- **`tests/hybrid.rs`**: a hybrid signature rebuilt by hand, each half checked apart, ML-DSA's by OpenSSL where it has it; either half damaged fails; the Ed25519 half given to `ssh-keygen` as its own fails; key files with and without a passphrase, the former opened by `hivepack-age` too.
-- **`hivepack-crypto`'s `tests/mldsa.rs`**: keys and deterministic signatures equal to OpenSSL 3.5's, byte for byte, each checking the other's, and what it gave, kept for where it has none.
+- **`tests/hybrid.rs`**: a hybrid signature rebuilt by hand, each half checked apart, ML-DSA's by OpenSSL where it has it; either half damaged fails; the Ed25519 half given to `ssh-keygen` as its own fails; key files with and without a passphrase, the former opened by `hivepack::age` too.
+- **`hivepack::crypto`'s `tests/mldsa.rs`**: keys and deterministic signatures equal to OpenSSL 3.5's, byte for byte, each checking the other's, and what it gave, kept for where it has none.
 - **The `sign` fuzz target**: what reads must write back as it came, and a signature made must pass, and fail on a changed file, with both kinds of key.
 
 ## What comes next

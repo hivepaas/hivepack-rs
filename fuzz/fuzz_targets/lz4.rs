@@ -1,4 +1,4 @@
-//! hivepack-lz4 against liblz4. A panic or a difference is a bug.
+//! hivepack::lz4 against liblz4. A panic or a difference is a bug.
 //!
 //! The first byte chooses what is done with the rest, after eight bytes
 //! that seed the sizes:
@@ -35,8 +35,8 @@
 use std::io::{Read, Write};
 use std::sync::Arc;
 
-use hivepack_lz4::block;
-use hivepack_lz4::frame::{
+use hivepack::lz4::block;
+use hivepack::lz4::frame::{
     self, BlockMode, BlockSizeId, CDict, CompressionContext, DecompressOptions,
     DecompressionContext, FrameInfo, InBuffer, OutBuffer, Preferences,
 };
@@ -194,7 +194,7 @@ fn frame(src: &[u8], next: &mut impl FnMut(usize) -> usize) {
 }
 
 fn reader(src: &[u8], next: &mut impl FnMut(usize) -> usize) {
-    let mut decoder = hivepack_lz4::Decoder::new(src);
+    let mut decoder = hivepack::lz4::Decoder::new(src);
     let mut buf = vec![0; 1 << 16];
     for _ in 0..100_000 {
         let size = 1 + next(buf.len());
@@ -217,7 +217,7 @@ fn compress_block(src: &[u8], next: &mut impl FnMut(usize) -> usize) {
         lz4::block::CompressionMode::DEFAULT => block::compress_default(src, &mut got),
         lz4::block::CompressionMode::FAST(accel) => block::compress_fast(src, &mut got, accel),
         lz4::block::CompressionMode::HIGHCOMPRESSION(level) => {
-            hivepack_lz4::hc::compress_hc(src, &mut got, level)
+            hivepack::lz4::hc::compress_hc(src, &mut got, level)
         }
     };
     assert!(got[..n] == want[..], "block");
@@ -304,7 +304,7 @@ fn compress_frame(src: &[u8], next: &mut impl FnMut(usize) -> usize) {
         .auto_flush(prefs.auto_flush)
         .favor_dec_speed(prefs.favor_dec_speed);
     let mut c = builder.build(Vec::new()).expect("an encoder");
-    let mut port = hivepack_lz4::Encoder::new(Vec::new(), Some(&prefs)).expect("an encoder");
+    let mut port = hivepack::lz4::Encoder::new(Vec::new(), Some(&prefs)).expect("an encoder");
     let mut at = 0;
     while at < src.len() {
         let piece = (1 + next(src.len())).min(src.len() - at);
@@ -338,7 +338,7 @@ fn compress_other(src: &[u8], next: &mut impl FnMut(usize) -> usize) {
         let mut back = vec![0; src.len()];
         assert_eq!(block::decompress_safe(&out[..n], &mut back), Ok(src.len()));
     }
-    let mut state = hivepack_lz4::hc::StateHc::new();
+    let mut state = hivepack::lz4::hc::StateHc::new();
     let level = next(14) as i32;
     for hc in [false, true] {
         let (n, read) = if hc {
@@ -357,7 +357,7 @@ fn compress_other(src: &[u8], next: &mut impl FnMut(usize) -> usize) {
     // Streams of blocks after the dictionary.
     let mut stream = block::Stream::new();
     stream.load_dict(dict);
-    let mut stream_hc = hivepack_lz4::hc::StreamHc::new();
+    let mut stream_hc = hivepack::lz4::hc::StreamHc::new();
     stream_hc.reset(next(14) as i32);
     stream_hc.load_dict_hc(dict);
     let mut history = dict[dict.len() - dict.len().min(64 << 10)..].to_vec();

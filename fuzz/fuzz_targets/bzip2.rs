@@ -1,4 +1,4 @@
-//! hivepack-bzip2 against libbzip2, call by call. A panic or a difference
+//! hivepack::bzip2 against libbzip2, call by call. A panic or a difference
 //! is a bug.
 //!
 //! The first byte chooses what is done with the rest:
@@ -15,11 +15,11 @@
 
 #![no_main]
 
-use hivepack_bzip2::{Action, Compress, Decompress, InBuffer, OutBuffer, Status};
+use hivepack::bzip2::{Action, Compress, Decompress, InBuffer, OutBuffer, Status};
 use libfuzzer_sys::fuzz_target;
 
 /// What a call returned, in libbzip2's numbers.
-fn port_code(ret: hivepack_bzip2::Result<Status>) -> i32 {
+fn port_code(ret: hivepack::bzip2::Result<Status>) -> i32 {
     match ret {
         Ok(status) => status.number(),
         Err(e) => e.number(),

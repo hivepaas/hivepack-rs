@@ -392,7 +392,7 @@ def build_xar_oracle(libarchive: Path, sources: list, folder: Path, extra: list,
 
 
 # archive_string.c without the Unicode normalization of names converted from
-# UTF-16 or UTF-8 (NFC, or NFD on macOS), which hivepack-iso leaves out: Joliet
+# UTF-16 or UTF-8 (NFC, or NFD on macOS), which hivepack::iso leaves out: Joliet
 # names come out as the image has them.
 LIBARCHIVE_NORMALIZATION = """\
 	if ((flag & SCONV_FROM_CHARSET) &&

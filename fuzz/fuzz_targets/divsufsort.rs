@@ -46,7 +46,7 @@ fuzz_target!(|data: &[u8]| {
     let text = text(data);
     let n = text.len();
     let mut sa = vec![0i32; n];
-    hivepack_zstd::divsufsort(&text, &mut sa).expect("a text of any bytes is sorted");
+    hivepack::zstd::divsufsort(&text, &mut sa).expect("a text of any bytes is sorted");
 
     // A permutation: each position once.
     let mut rank = vec![usize::MAX; n];

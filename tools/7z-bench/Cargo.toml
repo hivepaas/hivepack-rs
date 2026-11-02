@@ -1,7 +1,7 @@
 [package]
 name = "sevenz-bench"
 version = "0.0.0"
-description = "Times hivepack-7z against the LZMA SDK's 7z decoder and 7-Zip on the same archives"
+description = "Times hivepack::sevenz against the LZMA SDK's 7z decoder and 7-Zip on the same archives"
 publish = false
 license.workspace = true
 edition.workspace = true
@@ -11,7 +11,7 @@ rust-version.workspace = true
 workspace = true
 
 [features]
-unsafe-fast = ["hivepack-7z/unsafe-fast"]
+unsafe-fast = ["hivepack/deflate-unsafe-fast"]
 
 [dependencies]
-hivepack-7z.workspace = true
+hivepack = { workspace = true, features = ["sevenz"] }

@@ -1,0 +1,505 @@
+[package]
+name = "hivepack"
+version = "0.1.0"
+description = "Read and write archives and compressed files: ZIP, tar, 7z, RAR, zstd, xz, bzip2, lz4, deflate, age, ISO, UDF, cpio, XAR and more, in safe Rust"
+license = "MIT AND BSD-2-Clause AND BSD-3-Clause AND Zlib AND 0BSD AND bzip2-1.0.6 AND Unicode-3.0 AND UnRAR"
+readme = "README.md"
+keywords = ["archive", "zip", "compression", "zstd", "extract"]
+categories = ["compression", "encoding", "filesystem"]
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+# Safe Rust, rule by rule: docs/safety.md. Modules without `unsafe-fast` code
+# forbid `unsafe` in their own `mod.rs`; the three with it deny it, and allow
+# it in the files that document each use (docs/unsafe.md).
+[lints.rust]
+unsafe_code = "deny"
+# `cargo fuzz` builds with `--cfg fuzzing`.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+# Each format's module keeps the file names of the crate it was: `zip::zip`.
+module_inception = "allow"
+
+[features]
+# Every format but RAR, whose code is under UnRAR's license: see LICENSE.md.
+default = ["full"]
+
+full = ["age", "bzip2", "cpio", "crypto", "deflate", "extract", "iso", "lz4", "open", "sevenz", "sign", "tar", "udf", "xar", "xz", "zip", "zstd"]
+
+# Faster code with some `unsafe` in it, off by default: docs/unsafe.md.
+unsafe-fast = ["zstd-unsafe-fast", "lz4-unsafe-fast", "deflate-unsafe-fast"]
+zstd-unsafe-fast = []
+lz4-unsafe-fast = []
+deflate-unsafe-fast = []
+
+# One feature for each format; the ones it needs come with it.
+
+age = ["crypto"]
+
+bzip2 = []
+
+cpio = []
+
+crypto = [
+  "dep:aes",
+  "dep:blake2s_simd",
+  "dep:chacha20poly1305",
+  "dep:curve25519-dalek",
+  "dep:ed25519-dalek",
+  "dep:hkdf",
+  "dep:hpke",
+  "dep:ml-dsa",
+  "dep:rand_core",
+  "dep:hmac",
+  "dep:md-5",
+  "dep:pbkdf2",
+  "dep:scrypt",
+  "dep:sha1",
+  "dep:sha2",
+  "dep:subtle",
+]
+
+deflate = []
+
+extract = ["zip", "tar", "iso", "cpio", "xar", "open", "udf", "sevenz", "dep:cap-std", "dep:cap-fs-ext", "dep:rustix"]
+
+iso = ["deflate"]
+
+lz4 = []
+
+open = ["age", "bzip2", "cpio", "deflate", "lz4", "xz", "zstd"]
+
+rar = ["crypto", "deflate"]
+
+sevenz = ["bzip2", "crypto", "deflate", "xz", "zstd"]
+
+sign = ["age", "crypto"]
+
+tar = []
+
+udf = []
+
+xar = ["bzip2", "crypto", "deflate", "xz"]
+
+xz = []
+
+zip = ["bzip2", "crypto", "deflate", "xz", "zstd"]
+
+zstd = []
+
+[dependencies]
+# The cryptography itself, in crates many others depend on. Their `unsafe` code
+# stays in them: see docs/safety.md and docs/crypto.md.
+aes = { version = "0.9", features = ["zeroize"], optional = true }
+blake2s_simd = { version = "1", optional = true }
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["zeroize"], optional = true }
+curve25519-dalek = { version = "5", default-features = false, features = ["precomputed-tables", "zeroize"], optional = true }
+ed25519-dalek = { version = "3", default-features = false, features = ["fast", "zeroize"], optional = true }
+hkdf = { version = "0.13", optional = true }
+# X-Wing under HPKE, age's post-quantum keys. Not independently audited: see
+# docs/crypto.md.
+hpke = { version = "0.15", default-features = false, features = ["alloc", "mlkem", "x25519", "chacha"], optional = true }
+# ML-DSA, signatures that hold against a quantum computer. Not independently
+# audited: see docs/crypto.md.
+ml-dsa = { version = "0.1", default-features = false, features = ["alloc", "zeroize"], optional = true }
+rand_core = { version = "0.10", default-features = false, optional = true }
+hmac = { version = "0.13", optional = true }
+md-5 = { version = "0.11", default-features = false, optional = true }
+pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"], optional = true }
+scrypt = { version = "0.12", default-features = false, optional = true }
+sha1 = { version = "0.11", default-features = false, optional = true }
+sha2 = { version = "0.11", default-features = false, optional = true }
+subtle = { version = "2", default-features = false, optional = true }
+# Directories opened by handle, for `extract`.
+cap-std = { workspace = true, optional = true }
+cap-fs-ext = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+rustix = { workspace = true, optional = true }
+
+[dev-dependencies]
+# The reference libraries, to compress, decompress and compare with in tests.
+zstd = { workspace = true, features = ["no_asm"] }
+libz-sys.workspace = true
+flate2.workspace = true
+bzip2.workspace = true
+lz4.workspace = true
+lz4-sys.workspace = true
+liblzma.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[[example]]
+name = "sevenz_sevenz"
+path = "examples/sevenz_sevenz.rs"
+required-features = ["sevenz"]
+
+[[test]]
+name = "age_cctv"
+path = "tests/age_cctv.rs"
+required-features = ["age", "crypto", "deflate"]
+
+[[test]]
+name = "age_encrypt"
+path = "tests/age_encrypt.rs"
+required-features = ["age", "crypto"]
+
+[[test]]
+name = "age_oracle"
+path = "tests/age_oracle.rs"
+required-features = ["age", "crypto"]
+
+[[test]]
+name = "bzip2_bzip2"
+path = "tests/bzip2_bzip2.rs"
+required-features = ["bzip2"]
+
+[[test]]
+name = "bzip2_oracle"
+path = "tests/bzip2_oracle.rs"
+required-features = ["bzip2"]
+
+[[test]]
+name = "cpio_oracle"
+path = "tests/cpio_oracle.rs"
+required-features = ["bzip2", "cpio", "deflate"]
+
+[[test]]
+name = "crypto_bearssl"
+path = "tests/crypto_bearssl.rs"
+required-features = ["crypto"]
+
+[[test]]
+name = "crypto_blake2"
+path = "tests/crypto_blake2.rs"
+required-features = ["crypto"]
+
+[[test]]
+name = "crypto_go_oracle"
+path = "tests/crypto_go_oracle.rs"
+required-features = ["crypto"]
+
+[[test]]
+name = "crypto_mldsa"
+path = "tests/crypto_mldsa.rs"
+required-features = ["crypto"]
+
+[[test]]
+name = "crypto_oracle"
+path = "tests/crypto_oracle.rs"
+required-features = ["crypto"]
+
+[[test]]
+name = "crypto_vectors"
+path = "tests/crypto_vectors.rs"
+required-features = ["crypto"]
+
+[[test]]
+name = "deflate_deflate"
+path = "tests/deflate_deflate.rs"
+required-features = ["deflate"]
+
+[[test]]
+name = "deflate_deflate64"
+path = "tests/deflate_deflate64.rs"
+required-features = ["deflate"]
+
+[[test]]
+name = "deflate_infcover"
+path = "tests/deflate_infcover.rs"
+required-features = ["deflate"]
+
+[[test]]
+name = "deflate_oracle"
+path = "tests/deflate_oracle.rs"
+required-features = ["deflate"]
+
+[[test]]
+name = "deflate_zlib"
+path = "tests/deflate_zlib.rs"
+required-features = ["deflate"]
+
+[[test]]
+name = "extract_cpio"
+path = "tests/extract_cpio.rs"
+required-features = ["cpio", "extract", "xz", "zip"]
+
+[[test]]
+name = "extract_cves"
+path = "tests/extract_cves.rs"
+required-features = ["extract", "xz", "zip"]
+
+[[test]]
+name = "extract_extract"
+path = "tests/extract_extract.rs"
+required-features = ["extract", "xz", "zip"]
+
+[[test]]
+name = "extract_iso"
+path = "tests/extract_iso.rs"
+required-features = ["deflate", "extract", "iso", "xz", "zip"]
+
+[[test]]
+name = "extract_names"
+path = "tests/extract_names.rs"
+required-features = ["extract", "tar", "xz", "zip"]
+
+[[test]]
+name = "extract_rar"
+path = "tests/extract_rar.rs"
+required-features = ["extract", "rar", "xz", "zip"]
+
+[[test]]
+name = "extract_select"
+path = "tests/extract_select.rs"
+required-features = ["extract", "sevenz", "tar", "xz", "zip"]
+
+[[test]]
+name = "extract_sevenz"
+path = "tests/extract_sevenz.rs"
+required-features = ["deflate", "extract", "sevenz", "xz", "zip"]
+
+[[test]]
+name = "extract_tar"
+path = "tests/extract_tar.rs"
+required-features = ["extract", "tar"]
+
+[[test]]
+name = "extract_udf"
+path = "tests/extract_udf.rs"
+required-features = ["crypto", "extract", "udf", "xz", "zip"]
+
+[[test]]
+name = "extract_xar"
+path = "tests/extract_xar.rs"
+required-features = ["deflate", "extract", "xz", "zip"]
+
+[[test]]
+name = "iso_oracle"
+path = "tests/iso_oracle.rs"
+required-features = ["deflate", "iso", "xz"]
+
+[[test]]
+name = "lz4_compress"
+path = "tests/lz4_compress.rs"
+required-features = ["lz4"]
+
+[[test]]
+name = "lz4_decoder"
+path = "tests/lz4_decoder.rs"
+required-features = ["lz4"]
+
+[[test]]
+name = "lz4_lz4"
+path = "tests/lz4_lz4.rs"
+required-features = ["lz4"]
+
+[[test]]
+name = "lz4_oracle"
+path = "tests/lz4_oracle.rs"
+required-features = ["lz4"]
+
+[[test]]
+name = "lz4_unchecked"
+path = "tests/lz4_unchecked.rs"
+required-features = ["lz4"]
+
+[[test]]
+name = "open_age"
+path = "tests/open_age.rs"
+required-features = ["age", "extract", "open"]
+
+[[test]]
+name = "open_open"
+path = "tests/open_open.rs"
+required-features = ["cpio", "extract", "iso", "open", "sevenz", "udf", "xar", "zip"]
+
+[[test]]
+name = "rar_oracle"
+path = "tests/rar_oracle.rs"
+required-features = ["deflate", "rar"]
+
+[[test]]
+name = "sevenz_methods"
+path = "tests/sevenz_methods.rs"
+required-features = ["crypto", "deflate", "sevenz", "zstd"]
+
+[[test]]
+name = "sevenz_oracle"
+path = "tests/sevenz_oracle.rs"
+required-features = ["deflate", "sevenz"]
+
+[[test]]
+name = "sevenz_writer"
+path = "tests/sevenz_writer.rs"
+required-features = ["deflate", "sevenz"]
+
+[[test]]
+name = "sign_hybrid"
+path = "tests/sign_hybrid.rs"
+required-features = ["age", "crypto", "sign"]
+
+[[test]]
+name = "sign_oracle"
+path = "tests/sign_oracle.rs"
+required-features = ["sign"]
+
+[[test]]
+name = "sign_sign"
+path = "tests/sign_sign.rs"
+required-features = ["sign"]
+
+[[test]]
+name = "tar_oracle"
+path = "tests/tar_oracle.rs"
+required-features = ["bzip2", "crypto", "tar"]
+
+[[test]]
+name = "tar_writer"
+path = "tests/tar_writer.rs"
+required-features = ["bzip2", "crypto", "tar"]
+
+[[test]]
+name = "udf_crafted"
+path = "tests/udf_crafted.rs"
+required-features = ["crypto", "udf", "xz"]
+
+[[test]]
+name = "udf_edge"
+path = "tests/udf_edge.rs"
+required-features = ["crypto", "udf", "xz"]
+
+[[test]]
+name = "udf_linux"
+path = "tests/udf_linux.rs"
+required-features = ["crypto", "udf", "xz"]
+
+[[test]]
+name = "xar_oracle"
+path = "tests/xar_oracle.rs"
+required-features = ["bzip2", "crypto", "deflate", "xar", "xz"]
+
+[[test]]
+name = "xz_files"
+path = "tests/xz_files.rs"
+required-features = ["xz"]
+
+[[test]]
+name = "xz_mt"
+path = "tests/xz_mt.rs"
+required-features = ["xz"]
+
+[[test]]
+name = "xz_oracle"
+path = "tests/xz_oracle.rs"
+required-features = ["xz"]
+
+[[test]]
+name = "xz_raw_again"
+path = "tests/xz_raw_again.rs"
+required-features = ["xz"]
+
+[[test]]
+name = "zip_deflate64"
+path = "tests/zip_deflate64.rs"
+required-features = ["deflate", "zip"]
+
+[[test]]
+name = "zip_oracle"
+path = "tests/zip_oracle.rs"
+required-features = ["bzip2", "deflate", "xz", "zip", "zstd"]
+
+[[test]]
+name = "zip_ppmd"
+path = "tests/zip_ppmd.rs"
+required-features = ["deflate", "zip"]
+
+[[test]]
+name = "zip_split"
+path = "tests/zip_split.rs"
+required-features = ["deflate", "zip"]
+
+[[test]]
+name = "zip_stream"
+path = "tests/zip_stream.rs"
+required-features = ["zip"]
+
+[[test]]
+name = "zstd_bufferless"
+path = "tests/zstd_bufferless.rs"
+required-features = ["zstd"]
+
+[[test]]
+name = "zstd_compress"
+path = "tests/zstd_compress.rs"
+required-features = ["zstd"]
+
+[[test]]
+name = "zstd_compress_dict"
+path = "tests/zstd_compress_dict.rs"
+required-features = ["zstd"]
+
+[[test]]
+name = "zstd_compress_mt"
+path = "tests/zstd_compress_mt.rs"
+required-features = ["zstd"]
+
+[[test]]
+name = "zstd_compress_params"
+path = "tests/zstd_compress_params.rs"
+required-features = ["zstd"]
+
+[[test]]
+name = "zstd_compress_stream"
+path = "tests/zstd_compress_stream.rs"
+required-features = ["zstd"]
+
+[[test]]
+name = "zstd_compress_target"
+path = "tests/zstd_compress_target.rs"
+required-features = ["zstd"]
+
+[[test]]
+name = "zstd_dctx"
+path = "tests/zstd_dctx.rs"
+required-features = ["zstd"]
+
+[[test]]
+name = "zstd_decompress"
+path = "tests/zstd_decompress.rs"
+required-features = ["zstd"]
+
+[[test]]
+name = "zstd_dict_builder"
+path = "tests/zstd_dict_builder.rs"
+required-features = ["zstd"]
+
+[[test]]
+name = "zstd_sequences"
+path = "tests/zstd_sequences.rs"
+required-features = ["zstd"]
+
+[[test]]
+name = "zstd_stream"
+path = "tests/zstd_stream.rs"
+required-features = ["zstd"]
+
+[[test]]
+name = "zstd_testdata"
+path = "tests/zstd_testdata.rs"
+required-features = ["zstd"]
+
+[[test]]
+name = "zstd_unchecked"
+path = "tests/zstd_unchecked.rs"
+required-features = ["zstd"]

@@ -1,17 +1,17 @@
-//! Writing age files with hivepack-age, post-quantum ones among them: the first
+//! Writing age files with hivepack::age, post-quantum ones among them: the first
 //! byte chooses the recipients and the armor, the next eight the random bytes and the pieces, and the rest is the
 //! plaintext. Written whole and in pieces, the file must be the same; it must
 //! decrypt to the plaintext; and, not armored, without its last byte it must not
 //! decrypt in full. A panic is a bug.
 //!
-//! `crates/age/tests/encrypt.rs` compares the files with age's.
+//! `crates/hivepack/tests/age_encrypt.rs` compares the files with age's.
 
 #![no_main]
 
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
-use hivepack_age::{
+use hivepack::age::{
     ArmoredWriter, HybridIdentity, Identity, RandomSource, Recipient, ScryptIdentity, ScryptRecipient,
     X25519Identity, X25519Recipient, decrypt_file, encrypt,
 };

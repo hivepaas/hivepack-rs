@@ -1,0 +1,72 @@
+//! Read and write archives and compressed files in safe Rust: one crate for many
+//! formats, in the spirit of libarchive.
+//!
+//! Each format is a module behind a feature of the same name, and the ones it
+//! needs come with it. All but `rar` are on by default; use
+//! `default-features = false` and name the ones you want to compile less.
+//!
+//! | Module | Feature | What it is |
+//! |---|---|---|
+//! | [`age`] | `age` | age encryption (decrypt, encrypt, keys) |
+//! | [`bzip2`] | `bzip2` | bzip2 (libbzip2 1.0.8) |
+//! | [`cpio`] | `cpio` | cpio archives and RPM payloads |
+//! | [`crypto`] | `crypto` | the cryptography of the formats, behind one interface |
+//! | [`deflate`] | `deflate` | Deflate, zlib, gzip (zlib 1.3.2) |
+//! | [`extract`] | `extract` | extracting archives to disk, safe by default |
+//! | [`iso`] | `iso` | ISO 9660 images |
+//! | [`lz4`] | `lz4` | LZ4 (liblz4 1.10.0) |
+//! | [`open`] | `open` | opening files through their layers (age, zstd, xz, gzip, ...) |
+//! | [`rar`] | `rar` | reading RAR (UnRAR 7.3.2), under UnRAR's license |
+//! | [`sevenz`] | `sevenz` | 7z archives |
+//! | [`sign`] | `sign` | file signatures (Ed25519 and Ed25519 + ML-DSA-65) |
+//! | [`tar`] | `tar` | tar archives |
+//! | [`udf`] | `udf` | UDF volumes |
+//! | [`xar`] | `xar` | XAR archives (macOS `.pkg` and `.xip`) |
+//! | [`xz`] | `xz` | XZ and LZMA (liblzma 5.8.4) |
+//! | [`zip`] | `zip` | ZIP archives (libzip 1.12.1) |
+//! | [`zstd`] | `zstd` | Zstandard (libzstd 1.5.7) |
+//!
+//! The crate is under several licenses, one for each port's origin: see
+//! `LICENSE.md`. The `rar` feature is under UnRAR's, which does not allow
+//! writing RAR.
+
+// So that code shared with the integration tests names the crate one way.
+#[cfg(test)]
+extern crate self as hivepack;
+
+#[cfg(feature = "age")]
+pub mod age;
+#[cfg(feature = "bzip2")]
+pub mod bzip2;
+#[cfg(feature = "cpio")]
+pub mod cpio;
+#[cfg(feature = "crypto")]
+pub mod crypto;
+#[cfg(feature = "deflate")]
+pub mod deflate;
+#[cfg(feature = "extract")]
+pub mod extract;
+#[cfg(feature = "iso")]
+pub mod iso;
+#[cfg(feature = "lz4")]
+pub mod lz4;
+#[cfg(feature = "open")]
+pub mod open;
+#[cfg(feature = "rar")]
+pub mod rar;
+#[cfg(feature = "sevenz")]
+pub mod sevenz;
+#[cfg(feature = "sign")]
+pub mod sign;
+#[cfg(feature = "tar")]
+pub mod tar;
+#[cfg(feature = "udf")]
+pub mod udf;
+#[cfg(feature = "xar")]
+pub mod xar;
+#[cfg(feature = "xz")]
+pub mod xz;
+#[cfg(feature = "zip")]
+pub mod zip;
+#[cfg(feature = "zstd")]
+pub mod zstd;

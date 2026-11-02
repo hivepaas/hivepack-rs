@@ -8,8 +8,8 @@
 use std::io::Read;
 use std::process::ExitCode;
 
-use hivepack_deflate::crc32;
-use hivepack_zip::{Archive, Error, Flags, OpenFlags};
+use hivepack::deflate::crc32;
+use hivepack::zip::{Archive, Error, Flags, OpenFlags};
 use ziptool::{Getopt, Src, zip_open};
 
 const PROGRAM: &str = "zipcmp";

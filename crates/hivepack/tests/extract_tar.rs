@@ -1,0 +1,1029 @@
+//! Extracting tar archives made to attack extractors, as `tests/extract.rs`
+//! does for ZIP: names that climb out, the same path twice, symbolic and
+//! hard links, devices, the limits, archives cut short, a stream that
+//! fails after the archive's end, and an archive that changes between its
+//! two readings. Each must stop with its reason and leave nothing outside
+//! the destination, and nothing at all when the checks before writing stop
+//! it. Then Go's test archives, each extracted or stopped with its reason.
+
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use std::cell::Cell;
+use std::io::Cursor;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+use hivepack::extract::{
+    ErrorKind, Limits, Links, NameError, OnRefused, Options, Progress, Summary, extract_tar,
+};
+
+/// The time the test entries have.
+const MTIME: u64 = 1_600_000_000;
+
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new() -> Scratch {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "hivepack-extract-tar-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        Scratch(path)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+
+    /// The destination inside it, not created yet.
+    fn out(&self) -> PathBuf {
+        self.0.join("out")
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The paths under `dir`, sorted, with `/` after directories.
+fn listing(dir: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(next) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&next) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.unwrap().path();
+            let relative = path
+                .strip_prefix(dir)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            if path.symlink_metadata().unwrap().is_dir() {
+                found.push(format!("{relative}/"));
+                stack.push(path);
+            } else {
+                found.push(relative);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// An entry of a test archive.
+enum E<'a> {
+    File(&'a [u8], &'a [u8]),
+    Mode(&'a [u8], &'a [u8], u32),
+    Dir(&'a [u8]),
+    Symlink(&'a [u8], &'a [u8]),
+    HardLink(&'a [u8], &'a [u8]),
+    /// Another type, with no data.
+    Type(&'a [u8], u8),
+    /// A file whose header says `size`, whatever the data.
+    Sized(&'a [u8], &'a [u8], u64),
+}
+
+/// A USTAR header block, its checksum written.
+fn header(name: &[u8], typeflag: u8, size: u64, mode: u32, linkname: &[u8]) -> Vec<u8> {
+    assert!(name.len() <= 100 && linkname.len() <= 100);
+    let mut b = vec![0u8; 512];
+    b[..name.len()].copy_from_slice(name);
+    b[100..108].copy_from_slice(format!("{mode:07o}\0").as_bytes());
+    b[108..116].copy_from_slice(b"0001750\0");
+    b[116..124].copy_from_slice(b"0001750\0");
+    b[124..136].copy_from_slice(format!("{size:011o}\0").as_bytes());
+    b[136..148].copy_from_slice(format!("{MTIME:011o}\0").as_bytes());
+    b[156] = typeflag;
+    b[157..157 + linkname.len()].copy_from_slice(linkname);
+    b[257..265].copy_from_slice(b"ustar\x0000");
+    b[148..156].fill(b' ');
+    let sum: u32 = b.iter().map(|&c| u32::from(c)).sum();
+    b[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+    b
+}
+
+/// A tar archive of `entries`, ended by two zero blocks.
+fn tar(entries: &[E<'_>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut add = |h: Vec<u8>, data: &[u8]| {
+        out.extend(h);
+        out.extend_from_slice(data);
+        out.resize(out.len().div_ceil(512) * 512, 0);
+    };
+    for entry in entries {
+        match *entry {
+            E::File(name, data) => add(header(name, b'0', data.len() as u64, 0o644, b""), data),
+            E::Mode(name, data, mode) => {
+                add(header(name, b'0', data.len() as u64, mode, b""), data)
+            }
+            E::Dir(name) => add(header(name, b'5', 0, 0o755, b""), b""),
+            E::Symlink(name, target) => add(header(name, b'2', 0, 0o777, target), b""),
+            E::HardLink(name, target) => add(header(name, b'1', 0, 0o644, target), b""),
+            E::Type(name, t) => add(header(name, t, 0, 0o644, b""), b""),
+            E::Sized(name, data, size) => add(header(name, b'0', size, 0o644, b""), data),
+        }
+    }
+    out.extend([0u8; 1024]);
+    out
+}
+
+fn extract(
+    data: &[u8],
+    out: &Path,
+    options: &Options,
+) -> Result<Summary, hivepack::extract::Error> {
+    extract_tar(|| Ok(Cursor::new(data)), out, options)
+}
+
+fn options(change: impl FnOnce(&mut Options)) -> Options {
+    let mut options = Options::default();
+    change(&mut options);
+    options
+}
+
+#[test]
+fn extracts_files_directories_and_dot_slash_names() {
+    let s = Scratch::new();
+    let data = tar(&[
+        E::Dir(b"./"),
+        E::Dir(b"./a/"),
+        E::File(b"./a/one.txt", b"one"),
+        E::File(b"two.txt", b"two two"),
+        E::Mode(b"run.sh", b"#!/bin/sh\n", 0o4777),
+        E::Type(b"globals", b'g'),
+    ]);
+    let summary = extract(&data, &s.out(), &Options::default()).unwrap();
+    assert_eq!(
+        (summary.files, summary.directories, summary.bytes),
+        (3, 1, 20)
+    );
+    assert_eq!(listing(&s.out()), ["a/", "a/one.txt", "run.sh", "two.txt"]);
+    assert_eq!(std::fs::read(s.out().join("a/one.txt")).unwrap(), b"one");
+    let mtime = std::fs::metadata(s.out().join("two.txt"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert_eq!(
+        mtime,
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(MTIME)
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(s.out().join("run.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        // No setuid, nothing writable by group or others.
+        assert_eq!(mode & 0o7777, 0o755);
+    }
+}
+
+#[test]
+fn refused_names_write_nothing() {
+    let cases: [(&[u8], NameError); 7] = [
+        (b"../escape.txt", NameError::Dot),
+        (b"a/../../escape.txt", NameError::Dot),
+        (b"/etc/passwd", NameError::Absolute),
+        (b"a\\b.txt", NameError::Backslash),
+        (b"C:x.txt", NameError::Colon),
+        (b"aux.txt", NameError::Device),
+        (b"bell\x07.txt", NameError::Control),
+    ];
+    for (name, reason) in cases {
+        let s = Scratch::new();
+        let data = tar(&[E::File(b"first.txt", b"x"), E::File(name, b"y")]);
+        let e = extract(&data, &s.out(), &Options::default()).unwrap_err();
+        assert!(
+            matches!(e.kind, ErrorKind::Name(r) if r == reason),
+            "{name:?}: {e}"
+        );
+        assert_eq!(e.index, Some(1));
+        // Checked before anything is written: not even the destination.
+        assert!(!s.out().exists(), "{name:?}");
+        assert_eq!(listing(s.path()), Vec::<String>::new());
+    }
+    // Not UTF-8.
+    let s = Scratch::new();
+    let e = extract(
+        &tar(&[E::File(b"caf\xe9.txt", b"x")]),
+        &s.out(),
+        &Options::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(e.kind, ErrorKind::Name(NameError::NotUtf8)), "{e}");
+}
+
+#[test]
+fn the_same_path_twice_is_refused() {
+    for second in [&b"README.txt"[..], b"readme.TXT", b"./readme.txt"] {
+        let s = Scratch::new();
+        let data = tar(&[E::File(b"readme.txt", b"a"), E::File(second, b"b")]);
+        let e = extract(&data, &s.out(), &Options::default()).unwrap_err();
+        assert!(
+            matches!(e.kind, ErrorKind::Duplicate { first: 0 }),
+            "{second:?}: {e}"
+        );
+        assert!(!s.out().exists());
+    }
+    // A file, then a directory of its name.
+    let s = Scratch::new();
+    let data = tar(&[E::File(b"x", b"a"), E::File(b"x/y", b"b")]);
+    assert!(matches!(
+        extract(&data, &s.out(), &Options::default())
+            .unwrap_err()
+            .kind,
+        ErrorKind::Duplicate { .. }
+    ));
+}
+
+#[test]
+fn symbolic_links_follow_the_options() {
+    let data = tar(&[
+        E::Dir(b"d/"),
+        E::File(b"d/f", b"data"),
+        E::Symlink(b"l", b"d/f"),
+    ]);
+    // Refused by default.
+    let s = Scratch::new();
+    let e = extract(&data, &s.out(), &Options::default()).unwrap_err();
+    assert!(matches!(e.kind, ErrorKind::Link), "{e}");
+    assert!(!s.out().exists());
+    // As a file holding the target.
+    let s = Scratch::new();
+    extract(&data, &s.out(), &options(|o| o.links = Links::AsFile)).unwrap();
+    assert_eq!(std::fs::read(s.out().join("l")).unwrap(), b"d/f");
+    // Created, inside.
+    #[cfg(unix)]
+    {
+        let s = Scratch::new();
+        let summary = extract(&data, &s.out(), &options(|o| o.links = Links::Inside)).unwrap();
+        assert_eq!(summary.links, 1);
+        assert_eq!(
+            std::fs::read_link(s.out().join("l")).unwrap(),
+            Path::new("d/f")
+        );
+        assert_eq!(std::fs::read(s.out().join("l")).unwrap(), b"data");
+    }
+    // Climbing out, absolute, or through another link: refused before
+    // anything is written.
+    let cases: [(&[u8], &[u8]); 3] = [
+        (b"l", b"../../etc/passwd"),
+        (b"l", b"/etc/passwd"),
+        (b"d/l2", b"../l/x"),
+    ];
+    for (name, target) in cases {
+        let s = Scratch::new();
+        let data = tar(&[
+            E::Dir(b"d/"),
+            E::Symlink(b"l", b"d"),
+            E::Symlink(name, target),
+        ]);
+        let e = extract(&data, &s.out(), &options(|o| o.links = Links::Inside)).unwrap_err();
+        assert!(
+            matches!(
+                e.kind,
+                ErrorKind::LinkTarget(_)
+                    | ErrorKind::LinkChain { .. }
+                    | ErrorKind::Duplicate { .. }
+            ),
+            "{target:?}: {e}"
+        );
+        assert!(!s.out().exists());
+    }
+}
+
+#[test]
+fn hard_links_name_files_extracted_before_them() {
+    let data = tar(&[
+        E::File(b"a.txt", b"shared"),
+        E::HardLink(b"b.txt", b"./a.txt"),
+    ]);
+    let s = Scratch::new();
+    let summary = extract(&data, &s.out(), &Options::default()).unwrap();
+    assert_eq!(summary.files, 2);
+    assert_eq!(std::fs::read(s.out().join("b.txt")).unwrap(), b"shared");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let a = std::fs::metadata(s.out().join("a.txt")).unwrap();
+        let b = std::fs::metadata(s.out().join("b.txt")).unwrap();
+        assert_eq!((a.dev(), a.ino()), (b.dev(), b.ino()));
+    }
+    // As a copy with Links::AsFile.
+    let s = Scratch::new();
+    let summary = extract(&data, &s.out(), &options(|o| o.links = Links::AsFile)).unwrap();
+    assert_eq!(summary.bytes, 12);
+    assert_eq!(std::fs::read(s.out().join("b.txt")).unwrap(), b"shared");
+
+    // To nothing, to a later file, outside, or to a directory: refused
+    // before anything is written.
+    let cases: [Vec<u8>; 4] = [
+        tar(&[
+            E::File(b"a.txt", b"x"),
+            E::HardLink(b"b.txt", b"missing.txt"),
+        ]),
+        tar(&[E::HardLink(b"b.txt", b"a.txt"), E::File(b"a.txt", b"x")]),
+        tar(&[E::File(b"a.txt", b"x"), E::HardLink(b"b.txt", b"../a.txt")]),
+        tar(&[E::Dir(b"d/"), E::HardLink(b"b", b"d")]),
+    ];
+    for data in cases {
+        let s = Scratch::new();
+        let e = extract(&data, &s.out(), &Options::default()).unwrap_err();
+        assert!(
+            matches!(e.kind, ErrorKind::HardLinkTarget | ErrorKind::LinkTarget(_)),
+            "{e}"
+        );
+        assert!(!s.out().exists());
+    }
+}
+
+#[test]
+fn devices_and_fifos_are_not_created() {
+    for t in *b"346" {
+        let s = Scratch::new();
+        let data = tar(&[E::File(b"a.txt", b"x"), E::Type(b"dev", t)]);
+        let e = extract(&data, &s.out(), &Options::default()).unwrap_err();
+        assert!(matches!(e.kind, ErrorKind::Special), "{e}");
+        assert!(!s.out().exists());
+        // Left out with Skip.
+        let s = Scratch::new();
+        let summary = extract(
+            &data,
+            &s.out(),
+            &options(|o| o.on_refused = OnRefused::Skip),
+        )
+        .unwrap();
+        assert_eq!(summary.skipped.len(), 1);
+        assert_eq!(listing(&s.out()), ["a.txt"]);
+    }
+}
+
+/// An old GNU sparse entry of `real` bytes, whose `data` lies at each `offset`,
+/// and the archive around it.
+fn sparse(real: u64, offset: &[u64], data: &[u8]) -> Vec<u8> {
+    let mut b = header(
+        b"big",
+        b'S',
+        offset.len() as u64 * data.len() as u64,
+        0o644,
+        b"",
+    );
+    for (i, at) in offset.iter().enumerate() {
+        let entry = 386 + i * 24;
+        b[entry..entry + 12].copy_from_slice(format!("{at:011o}\0").as_bytes());
+        let length = format!("{:011o}\0", data.len());
+        b[entry + 12..entry + 24].copy_from_slice(length.as_bytes());
+    }
+    b[483..495].copy_from_slice(format!("{real:011o}\0").as_bytes());
+    b[257..265].copy_from_slice(b"ustar  \0");
+    b[148..156].fill(b' ');
+    let sum: u32 = b.iter().map(|&c| u32::from(c)).sum();
+    b[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+    let mut out = b;
+    for _ in offset {
+        out.extend_from_slice(data);
+    }
+    out.resize(out.len().div_ceil(512) * 512 + 1024, 0);
+    out
+}
+
+/// What the file holds, its bytes at `offset` being `data`, and zeros otherwise.
+fn check_sparse(path: &Path, real: u64, offset: &[u64], data: &[u8]) {
+    let got = std::fs::read(path).unwrap();
+    assert_eq!(got.len() as u64, real);
+    let mut want = vec![0; real as usize];
+    for &at in offset {
+        want[at as usize..at as usize + data.len()].copy_from_slice(data);
+    }
+    assert!(got == want);
+}
+
+#[test]
+fn sparse_files_keep_their_holes() {
+    const REAL: u64 = 32 << 20;
+    let data = vec![b'x'; 4096];
+    let scratch = Scratch::new();
+    let out = scratch.out();
+    let archive = sparse(REAL, &[0, REAL - 4096], &data);
+    let summary = extract(&archive, &out, &Options::default()).unwrap();
+    // A hole counts as what the file comes to.
+    assert_eq!(summary.bytes, REAL);
+    check_sparse(&out.join("big"), REAL, &[0, REAL - 4096], &data);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let blocks = std::fs::metadata(out.join("big")).unwrap().blocks();
+        assert!(blocks * 512 < REAL / 2, "{blocks} blocks");
+    }
+}
+
+#[test]
+fn sparse_files_that_end_in_a_hole_have_their_length() {
+    const REAL: u64 = 1 << 20;
+    let data = vec![b'x'; 512];
+    let scratch = Scratch::new();
+    let out = scratch.out();
+    let archive = sparse(REAL, &[4096], &data);
+    extract(&archive, &out, &Options::default()).unwrap();
+    check_sparse(&out.join("big"), REAL, &[4096], &data);
+}
+
+#[test]
+fn a_sparse_file_replacing_another_leaves_nothing_of_it() {
+    const REAL: u64 = 1 << 20;
+    let data = vec![b'x'; 512];
+    let scratch = Scratch::new();
+    let out = scratch.out();
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join("big"), vec![b'o'; 2 << 20]).unwrap();
+    let archive = sparse(REAL, &[4096], &data);
+    extract(&archive, &out, &options(|o| o.overwrite = true)).unwrap();
+    check_sparse(&out.join("big"), REAL, &[4096], &data);
+}
+
+#[test]
+fn holes_count_against_the_limits() {
+    const REAL: u64 = 1 << 20;
+    let data = vec![b'x'; 512];
+    let scratch = Scratch::new();
+    let out = scratch.out();
+    let archive = sparse(REAL, &[4096], &data);
+    let limited = options(|o| o.limits.max_entry_size = REAL - 1);
+    let error = extract(&archive, &out, &limited).unwrap_err();
+    assert!(matches!(error.kind, ErrorKind::EntryTooLarge), "{error}");
+}
+
+#[test]
+fn limits_stop_archive_bombs_before_writing() {
+    let limits = |change: fn(&mut Limits)| {
+        let mut limits = Limits::default();
+        change(&mut limits);
+        options(|o| o.limits = limits)
+    };
+    let data = tar(&[E::File(b"a", &[0; 3000]), E::File(b"b", &[0; 3000])]);
+    type Case = (Options, fn(&ErrorKind) -> bool);
+    let cases: [Case; 3] = [
+        (limits(|l| l.max_entries = 1), |k| {
+            matches!(k, ErrorKind::TooManyEntries)
+        }),
+        (limits(|l| l.max_entry_size = 2999), |k| {
+            matches!(k, ErrorKind::EntryTooLarge)
+        }),
+        (limits(|l| l.max_total_size = 5999), |k| {
+            matches!(k, ErrorKind::TotalTooLarge)
+        }),
+    ];
+    for (options, expect) in cases {
+        let s = Scratch::new();
+        let e = extract(&data, &s.out(), &options).unwrap_err();
+        assert!(expect(&e.kind), "{e}");
+        assert!(!s.out().exists());
+    }
+}
+
+#[test]
+fn an_archive_cut_short_leaves_no_file_cut_off() {
+    let mut data = tar(&[E::File(b"a.txt", b"whole"), E::File(b"b.txt", &[7; 5000])]);
+    // Cut in the middle of b.txt's data: the first reading reads past it,
+    // so it already fails there.
+    data.truncate(512 + 512 + 512 + 2000);
+    let s = Scratch::new();
+    let e = extract(&data, &s.out(), &Options::default()).unwrap_err();
+    assert!(
+        matches!(e.kind, ErrorKind::Tar(hivepack::tar::Error::UnexpectedEof)),
+        "{e}"
+    );
+    assert!(!s.out().exists());
+
+    // A header that says more data than the archive holds before its end.
+    let data = tar(&[
+        E::File(b"a.txt", b"whole"),
+        E::Sized(b"b.txt", b"short", 100_000),
+    ]);
+    let s = Scratch::new();
+    let e = extract(&data, &s.out(), &Options::default()).unwrap_err();
+    assert!(matches!(e.kind, ErrorKind::Tar(_)), "{e}");
+    assert!(!s.out().exists());
+}
+
+/// A stream that fails once `data` is read, as a compressor fails its
+/// check at its end.
+struct FailsAtTheEnd(Cursor<Vec<u8>>);
+
+impl std::io::Read for FailsAtTheEnd {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self.0.read(buf)? {
+            0 => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the check at the end failed",
+            )),
+            n => Ok(n),
+        }
+    }
+}
+
+#[test]
+fn the_stream_is_read_past_the_archive_to_its_end() {
+    // What follows the archive's end is read, so that a check at the end
+    // of the stream fails before anything is written.
+    let mut data = tar(&[E::File(b"a.txt", b"whole")]);
+    data.extend([0; 10_000]);
+    let s = Scratch::new();
+    let e = extract_tar(
+        || Ok(FailsAtTheEnd(Cursor::new(data.clone()))),
+        &s.out(),
+        &Options::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(e.kind, ErrorKind::Io(_)), "{e}");
+    assert!(!s.out().exists());
+
+    // In the second reading too, after the first passed.
+    let calls = Cell::new(0);
+    let s = Scratch::new();
+    let e = extract_tar(
+        || -> std::io::Result<Box<dyn std::io::Read>> {
+            calls.set(calls.get() + 1);
+            Ok(if calls.get() == 1 {
+                Box::new(Cursor::new(data.clone()))
+            } else {
+                Box::new(FailsAtTheEnd(Cursor::new(data.clone())))
+            })
+        },
+        &s.out(),
+        &Options::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(e.kind, ErrorKind::Io(_)), "{e}");
+
+    // What follows is limited by the limit on all that is written, or by
+    // 1 MiB, the largest record tar pads to, if that is less.
+    let limited = options(|o| o.limits.max_total_size = 5_000);
+    let mut padded = tar(&[E::File(b"a.txt", b"whole")]);
+    padded.resize(padded.len() + (1 << 20), 0);
+    let s = Scratch::new();
+    assert_eq!(extract(&padded, &s.out(), &limited).unwrap().files, 1);
+    padded.push(0);
+    let s = Scratch::new();
+    let e = extract(&padded, &s.out(), &limited).unwrap_err();
+    assert!(matches!(e.kind, ErrorKind::TotalTooLarge), "{e}");
+    assert!(!s.out().exists());
+}
+
+#[test]
+fn an_archive_that_changes_between_readings_stops() {
+    let first = tar(&[E::File(b"a.txt", b"one"), E::File(b"b.txt", b"two")]);
+    let cases = [
+        // Another name for the second entry.
+        tar(&[E::File(b"a.txt", b"one"), E::File(b"evil.txt", b"two")]),
+        // Another size.
+        tar(&[E::File(b"a.txt", b"one"), E::File(b"b.txt", b"three")]),
+        // An entry more, and one fewer.
+        tar(&[
+            E::File(b"a.txt", b"one"),
+            E::File(b"b.txt", b"two"),
+            E::File(b"c.txt", b"x"),
+        ]),
+        tar(&[E::File(b"a.txt", b"one")]),
+    ];
+    for second in cases {
+        let s = Scratch::new();
+        let calls = Cell::new(0);
+        let result = extract_tar(
+            || {
+                calls.set(calls.get() + 1);
+                Ok(Cursor::new(if calls.get() == 1 {
+                    first.clone()
+                } else {
+                    second.clone()
+                }))
+            },
+            &s.out(),
+            &Options::default(),
+        );
+        let e = result.unwrap_err();
+        assert!(matches!(e.kind, ErrorKind::Changed), "{e}");
+        assert_eq!(calls.get(), 2);
+        // Only what the first reading checked was written.
+        for name in listing(&s.out()) {
+            assert!(["a.txt", "b.txt"].contains(&name.as_str()), "{name}");
+        }
+    }
+}
+
+#[test]
+fn progress_counts_links_written_as_files() {
+    // With Links::AsFile, a symbolic link's target and a hard link's copy
+    // are written, which tar's sizes do not count: the totals must. The
+    // `extract_tar` fuzz target found them missing.
+    let data = tar(&[
+        E::File(b"a.txt", b"shared"),
+        E::Symlink(b"s", b"a.txt"),
+        E::HardLink(b"h", b"a.txt"),
+        E::HardLink(b"h2", b"h"),
+    ]);
+    let seen: Arc<Mutex<Vec<Progress>>> = Arc::default();
+    let record = Arc::clone(&seen);
+    let s = Scratch::new();
+    let summary = extract(
+        &data,
+        &s.out(),
+        &options(|o| {
+            o.links = Links::AsFile;
+            o.progress = Some(Arc::new(move |p: &Progress| {
+                record.lock().unwrap().push(*p)
+            }));
+        }),
+    )
+    .unwrap();
+    // "shared", "a.txt" and two copies of "shared".
+    assert_eq!(summary.bytes, 6 + 5 + 6 + 6);
+    let seen = seen.lock().unwrap();
+    let last = seen.last().unwrap();
+    assert_eq!((last.bytes, last.total_bytes), (23, 23));
+    assert_eq!((last.entries, last.total_entries), (4, 4));
+    assert!(
+        seen.iter()
+            .all(|p| p.bytes <= p.total_bytes && p.entries <= p.total_entries)
+    );
+}
+
+#[test]
+fn a_time_limit_of_zero_stops_before_writing() {
+    let s = Scratch::new();
+    let data = tar(&[E::File(b"a.txt", b"x")]);
+    let e = extract(
+        &data,
+        &s.out(),
+        &options(|o| o.time_limit = Some(std::time::Duration::ZERO)),
+    )
+    .unwrap_err();
+    assert!(matches!(e.kind, ErrorKind::TimeLimit), "{e}");
+}
+
+#[test]
+fn nothing_is_overwritten_unless_asked() {
+    let s = Scratch::new();
+    std::fs::create_dir_all(s.out()).unwrap();
+    std::fs::write(s.out().join("a.txt"), b"old").unwrap();
+    let data = tar(&[E::File(b"a.txt", b"new")]);
+    let e = extract(&data, &s.out(), &Options::default()).unwrap_err();
+    assert!(matches!(e.kind, ErrorKind::Exists), "{e}");
+    assert_eq!(std::fs::read(s.out().join("a.txt")).unwrap(), b"old");
+    extract(&data, &s.out(), &options(|o| o.overwrite = true)).unwrap();
+    assert_eq!(std::fs::read(s.out().join("a.txt")).unwrap(), b"new");
+}
+
+/// Go's test archives (`testdata/go-tar`), the plain ones.
+fn go_archives() -> Vec<(String, Vec<u8>)> {
+    let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/go-tar");
+    let mut archives: Vec<(String, Vec<u8>)> = std::fs::read_dir(&folder)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "tar"))
+        .map(|p| {
+            (
+                p.file_name().unwrap().to_string_lossy().into_owned(),
+                std::fs::read(&p).unwrap(),
+            )
+        })
+        .collect();
+    archives.sort();
+    archives
+}
+
+#[test]
+fn go_test_archives_extract_or_stop_with_their_reason() {
+    let mut outcomes = std::collections::BTreeMap::new();
+    for (name, data) in go_archives() {
+        for skip in [false, true] {
+            let s = Scratch::new();
+            // Beside the destination: must stay as it is.
+            std::fs::write(s.path().join("beside.txt"), b"beside").unwrap();
+            let opts = options(|o| {
+                if skip {
+                    o.on_refused = OnRefused::Skip;
+                }
+            });
+            let outcome = match extract(&data, &s.out(), &opts) {
+                Ok(summary) => format!("ok {} files", summary.files),
+                // Not the name, whose bytes are not UTF-8.
+                Err(e) if matches!(e.kind, ErrorKind::Name(NameError::NotUtf8)) => {
+                    format!("entry {}: {}", e.index.unwrap(), e.kind)
+                }
+                Err(e) => format!("{e}"),
+            };
+            assert_eq!(
+                std::fs::read(s.path().join("beside.txt")).unwrap(),
+                b"beside"
+            );
+            for path in listing(s.path()) {
+                assert!(
+                    path == "beside.txt" || path.starts_with("out/") || path == "out/",
+                    "{name}: {path}"
+                );
+            }
+            outcomes.insert(
+                format!("{name} {}", if skip { "skip" } else { "stop" }),
+                outcome,
+            );
+        }
+    }
+    // Each as it went when this test was written, so that a change shows:
+    // the links and the FIFO refused, or left out with Skip; the names not
+    // UTF-8; the archives Go's reader refuses; and writer-big.tar, whose
+    // 16 GiB file is cut short, which the first reading finds.
+    let expected: &[(&str, &str)] = &[
+        ("file-and-dir.tar skip", "ok 1 files"),
+        ("file-and-dir.tar stop", "ok 1 files"),
+        ("gnu-incremental.tar skip", "ok 2 files"),
+        ("gnu-incremental.tar stop", "ok 2 files"),
+        ("gnu-long-nul.tar skip", "ok 1 files"),
+        ("gnu-long-nul.tar stop", "ok 1 files"),
+        ("gnu-multi-hdrs.tar skip", "ok 0 files"),
+        (
+            "gnu-multi-hdrs.tar stop",
+            "entry 0 (GNU2/GNU2/long-path-name): link",
+        ),
+        ("gnu-nil-sparse-data.tar skip", "ok 1 files"),
+        ("gnu-nil-sparse-data.tar stop", "ok 1 files"),
+        ("gnu-nil-sparse-hole.tar skip", "ok 1 files"),
+        ("gnu-nil-sparse-hole.tar stop", "ok 1 files"),
+        ("gnu-not-utf8.tar skip", "ok 0 files"),
+        ("gnu-not-utf8.tar stop", "entry 0: name refused: not UTF-8"),
+        ("gnu-utf8.tar skip", "ok 1 files"),
+        ("gnu-utf8.tar stop", "ok 1 files"),
+        ("gnu.tar skip", "ok 2 files"),
+        ("gnu.tar stop", "ok 2 files"),
+        ("hardlink.tar skip", "ok 2 files"),
+        ("hardlink.tar stop", "ok 2 files"),
+        ("hdr-only.tar skip", "ok 2 files"),
+        ("hdr-only.tar stop", "entry 1 (fifo): device or FIFO"),
+        ("invalid-go17.tar skip", "ok 1 files"),
+        ("invalid-go17.tar stop", "ok 1 files"),
+        (
+            "issue10968.tar skip",
+            "archive: archive/tar: invalid tar header",
+        ),
+        (
+            "issue10968.tar stop",
+            "archive: archive/tar: invalid tar header",
+        ),
+        (
+            "issue11169.tar skip",
+            "archive: archive/tar: invalid tar header",
+        ),
+        (
+            "issue11169.tar stop",
+            "archive: archive/tar: invalid tar header",
+        ),
+        (
+            "issue12435.tar skip",
+            "archive: archive/tar: invalid tar header",
+        ),
+        (
+            "issue12435.tar stop",
+            "archive: archive/tar: invalid tar header",
+        ),
+        ("nil-uid.tar skip", "ok 1 files"),
+        ("nil-uid.tar stop", "ok 1 files"),
+        (
+            "pax-bad-hdr-file.tar skip",
+            "archive: archive/tar: invalid tar header",
+        ),
+        (
+            "pax-bad-hdr-file.tar stop",
+            "archive: archive/tar: invalid tar header",
+        ),
+        (
+            "pax-bad-mtime-file.tar skip",
+            "archive: archive/tar: invalid tar header",
+        ),
+        (
+            "pax-bad-mtime-file.tar stop",
+            "archive: archive/tar: invalid tar header",
+        ),
+        ("pax-global-records.tar skip", "ok 4 files"),
+        ("pax-global-records.tar stop", "ok 4 files"),
+        ("pax-multi-hdrs.tar skip", "ok 0 files"),
+        ("pax-multi-hdrs.tar stop", "entry 0 (bar): link"),
+        ("pax-nil-sparse-data.tar skip", "ok 1 files"),
+        ("pax-nil-sparse-data.tar stop", "ok 1 files"),
+        ("pax-nil-sparse-hole.tar skip", "ok 1 files"),
+        ("pax-nil-sparse-hole.tar stop", "ok 1 files"),
+        (
+            "pax-nul-path.tar skip",
+            "archive: archive/tar: invalid tar header",
+        ),
+        (
+            "pax-nul-path.tar stop",
+            "archive: archive/tar: invalid tar header",
+        ),
+        (
+            "pax-nul-xattrs.tar skip",
+            "archive: archive/tar: invalid tar header",
+        ),
+        (
+            "pax-nul-xattrs.tar stop",
+            "archive: archive/tar: invalid tar header",
+        ),
+        ("pax-path-hdr.tar skip", "ok 0 files"),
+        ("pax-path-hdr.tar stop", "ok 0 files"),
+        ("pax-pos-size-file.tar skip", "ok 1 files"),
+        ("pax-pos-size-file.tar stop", "ok 1 files"),
+        ("pax-records.tar skip", "ok 1 files"),
+        ("pax-records.tar stop", "ok 1 files"),
+        ("pax.tar skip", "ok 1 files"),
+        ("pax.tar stop", "entry 1 (a/b): link"),
+        ("sparse-formats.tar skip", "ok 5 files"),
+        ("sparse-formats.tar stop", "ok 5 files"),
+        ("star.tar skip", "ok 2 files"),
+        ("star.tar stop", "ok 2 files"),
+        ("trailing-slash.tar skip", "ok 0 files"),
+        ("trailing-slash.tar stop", "ok 0 files"),
+        ("ustar-file-devs.tar skip", "ok 1 files"),
+        ("ustar-file-devs.tar stop", "ok 1 files"),
+        ("ustar-file-reg.tar skip", "ok 1 files"),
+        ("ustar-file-reg.tar stop", "ok 1 files"),
+        ("ustar.tar skip", "ok 1 files"),
+        ("ustar.tar stop", "ok 1 files"),
+        ("v7.tar skip", "ok 2 files"),
+        ("v7.tar stop", "ok 2 files"),
+        ("writer-big.tar skip", "archive: unexpected EOF"),
+        ("writer-big.tar stop", "archive: unexpected EOF"),
+        ("writer.tar skip", "ok 2 files"),
+        ("writer.tar stop", "entry 2 (link.txt): link"),
+        ("xattrs.tar skip", "ok 2 files"),
+        ("xattrs.tar stop", "ok 2 files"),
+    ];
+    let expected: std::collections::BTreeMap<String, String> = expected
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    assert_eq!(outcomes, expected);
+}
+
+/// A tar archive of symbolic links and directories with names of any length,
+/// in PAX records as Python's tarfile writes them.
+fn long_tar(entries: &[(u8, Vec<u8>, Vec<u8>)]) -> Vec<u8> {
+    let mut writer = hivepack::tar::Writer::new(Vec::new());
+    for (typeflag, name, linkname) in entries {
+        let header = hivepack::tar::Header {
+            typeflag: *typeflag,
+            name: name.clone(),
+            linkname: linkname.clone(),
+            mode: 0o755,
+            ..Default::default()
+        };
+        writer.write_header(&header).unwrap();
+    }
+    writer.close().unwrap();
+    writer.into_inner()
+}
+
+/// Python's CVE-2025-4517, as its finders built it: links to directories of
+/// long names, past `PATH_MAX`, where `os.path.realpath` gave up and the
+/// filter saw a path inside, then a link that climbs through them and out, and
+/// a file through that. Nothing here asks the system where a path leads.
+#[cfg(unix)]
+#[test]
+fn cve_2025_4517_a_climb_through_links_past_path_max() {
+    let long = vec![b'd'; 247];
+    let mut entries = Vec::new();
+    let mut path = Vec::<u8>::new();
+    for step in b'a'..=b'p' {
+        let mut dir = path.clone();
+        dir.extend_from_slice(&long);
+        entries.push((b'5', dir, Vec::new()));
+        let mut link = path.clone();
+        link.push(step);
+        entries.push((b'2', link.clone(), long.clone()));
+        path = link;
+        path.push(b'/');
+    }
+    let mut up = path.clone();
+    up.extend_from_slice(&[b'l'; 254]);
+    entries.push((b'2', up.clone(), b"../".repeat(16)));
+    let mut out = up;
+    out.extend_from_slice(b"/../../../../../../../secret");
+    entries.push((b'2', b"escape".to_vec(), out));
+    entries.push((b'1', b"flag".to_vec(), b"escape".to_vec()));
+    let data = long_tar(&entries);
+
+    let inside = options(|o| o.links = Links::Inside);
+    let s = Scratch::new();
+    std::fs::write(s.path().join("secret"), b"outside").unwrap();
+    // A path under a link is the same path as the link.
+    let error = extract(&data, &s.out(), &inside).unwrap_err();
+    assert!(
+        matches!(error.kind, ErrorKind::Duplicate { first: 1 }),
+        "{error}"
+    );
+    assert!(!s.out().exists());
+
+    // Going on past what is refused: no link there leads out.
+    let skipping = options(|o| {
+        o.links = Links::Inside;
+        o.on_refused = OnRefused::Skip;
+    });
+    let s = Scratch::new();
+    std::fs::write(s.path().join("secret"), b"outside").unwrap();
+    let summary = extract(&data, &s.out(), &skipping).unwrap();
+    let last = summary.skipped.last().unwrap();
+    assert!(matches!(last.kind, ErrorKind::HardLinkTarget), "{last:?}");
+    let escape = &summary.skipped[summary.skipped.len() - 2];
+    assert!(
+        matches!(escape.kind, ErrorKind::LinkChain { other: 1 }),
+        "{escape:?}"
+    );
+    assert!(std::fs::read(s.out().join("escape")).is_err());
+    assert!(std::fs::read(s.out().join("flag")).is_err());
+    assert_eq!(std::fs::read(s.path().join("secret")).unwrap(), b"outside");
+}
+
+/// Python's CVE-2025-4138 and CVE-2025-4330: a link's target checked by its
+/// text, which stays inside, where the system goes through another link of the
+/// archive and out. `a/up/../secret` reads as `a/secret`.
+#[cfg(unix)]
+#[test]
+fn cve_2025_4138_a_target_inside_by_its_text_only() {
+    let data = tar(&[
+        E::Dir(b"a"),
+        E::Symlink(b"a/up", b".."),
+        E::Symlink(b"esc", b"a/up/../secret"),
+    ]);
+    let s = Scratch::new();
+    std::fs::write(s.path().join("secret"), b"outside").unwrap();
+    let inside = options(|o| o.links = Links::Inside);
+    let error = extract(&data, &s.out(), &inside).unwrap_err();
+    assert!(
+        matches!(error.kind, ErrorKind::LinkChain { other: 1 }),
+        "{error}"
+    );
+    assert!(!s.out().exists());
+
+    let skipping = options(|o| {
+        o.links = Links::Inside;
+        o.on_refused = OnRefused::Skip;
+    });
+    let summary = extract(&data, &s.out(), &skipping).unwrap();
+    assert_eq!(summary.skipped.len(), 1);
+    assert!(std::fs::symlink_metadata(s.out().join("esc")).is_err());
+    assert!(std::fs::read(s.out().join("a/up")).is_err());
+}
+
+/// Python's CVE-2024-12718: a file's metadata set outside, through a link to a
+/// file there, then an entry of the link's name with its mode and time.
+#[cfg(unix)]
+#[test]
+fn cve_2024_12718_metadata_through_a_link() {
+    use std::os::unix::fs::PermissionsExt;
+    let data = tar(&[E::Symlink(b"l", b"../secret"), E::Mode(b"l", b"", 0o777)]);
+    let s = Scratch::new();
+    let secret = s.path().join("secret");
+    std::fs::write(&secret, b"outside").unwrap();
+    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let before = std::fs::metadata(&secret).unwrap().modified().unwrap();
+    for links in [Links::Refuse, Links::Inside, Links::AsFile] {
+        let chosen = options(|o| o.links = links);
+        assert!(extract(&data, &s.out(), &chosen).is_err(), "{links:?}");
+        assert!(!s.out().exists(), "{links:?}");
+    }
+    let meta = std::fs::metadata(&secret).unwrap();
+    assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    assert_eq!(meta.modified().unwrap(), before);
+}
+
+/// Python's CVE-2025-4435: with `errorlevel=0` the members a filter refused
+/// were extracted all the same, and those after one could depend on it.
+/// Here one left out stays out, and what comes after is under a real directory.
+#[test]
+fn cve_2025_4435_what_is_skipped_stays_out() {
+    let data = tar(&[
+        E::Symlink(b"l", b"../outside"),
+        E::File(b"after.txt", b"after"),
+        E::File(b"../climbs.txt", b"out"),
+        E::HardLink(b"hard", b"l"),
+    ]);
+    let s = Scratch::new();
+    let inside = options(|o| {
+        o.links = Links::Inside;
+        o.on_refused = OnRefused::Skip;
+    });
+    let summary = extract(&data, &s.out(), &inside).unwrap();
+    assert_eq!(summary.skipped.len(), 3);
+    assert_eq!(std::fs::read(s.out().join("after.txt")).unwrap(), b"after");
+    assert!(std::fs::symlink_metadata(s.out().join("l")).is_err());
+    assert!(std::fs::symlink_metadata(s.out().join("hard")).is_err());
+    assert!(!s.path().join("climbs.txt").exists());
+    assert!(!s.path().join("outside").exists());
+}

@@ -1,14 +1,14 @@
-//! hivepack-7z's writer on any input: its first bytes pick how the archive is
+//! hivepack::sevenz's writer on any input: its first bytes pick how the archive is
 //! written, and the rest makes its entries, in writes of different sizes. What is
 //! read back must be what was written, and a panic is a bug.
-//! `crates/7z/tests/writer.rs` has `7zz` and the LZMA SDK read what it writes.
+//! `crates/hivepack/tests/sevenz_writer.rs` has `7zz` and the LZMA SDK read what it writes.
 
 #![no_main]
 
 use std::io::{Cursor, Read, Write};
 use std::sync::Arc;
 
-use hivepack_7z::{Archive, Filter, Method, NewEntry, Options, WriteOptions, Writer};
+use hivepack::sevenz::{Archive, Filter, Method, NewEntry, Options, WriteOptions, Writer};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|input: &[u8]| {

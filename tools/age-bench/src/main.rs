@@ -1,4 +1,4 @@
-//! Times hivepack-age against age v1.3.2, the reference implementation in Go, on
+//! Times hivepack::age against age v1.3.2, the reference implementation in Go, on
 //! the same files: finding the file key with each kind of identity, reading the
 //! payload, writing files to each kind of recipient, parsing keys and making them.
 //!
@@ -28,7 +28,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, ExitCode, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use hivepack_age::{
+use hivepack::age::{
     ArmoredWriter, BoxedIdentity, BoxedRecipient, Identity, RandomSource, Recipient,
     ScryptIdentity, ScryptRecipient, X25519Identity, decrypt_file, encrypt,
     identities_to_recipients, parse_identities, parse_identities_file, parse_recipients_file,

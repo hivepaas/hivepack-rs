@@ -1,9 +1,9 @@
-//! hivepack-rar on any input, its first byte choosing whether a broken main
+//! hivepack::rar on any input, its first byte choosing whether a broken main
 //! header is read past: the archive opened and every header read and
 //! stepped over, twice. Both reads must see the same headers, and a panic
-//! is a bug (`crates/rar/tests/oracle.rs` compares the answers with UnRAR).
+//! is a bug (`crates/hivepack/tests/rar_oracle.rs` compares the answers with UnRAR).
 //!
-//! UnRAR's license, which hivepack-rar is under:
+//! UnRAR's license, which hivepack::rar is under:
 //!
 //! UnRAR source code may be used in any software to handle RAR archives
 //! without limitations free of charge, but cannot be used to develop RAR
@@ -16,10 +16,10 @@
 
 #![no_main]
 
-use hivepack_rar::{Archive, Error, Extract};
+use hivepack::rar::{Archive, Error, Extract};
 use libfuzzer_sys::fuzz_target;
 
-#[path = "../../crates/rar/tests/support/patch.rs"]
+#[path = "../../crates/hivepack/tests/rar_support/patch.rs"]
 mod patch;
 
 /// What came out for each header, then how the going through ended.

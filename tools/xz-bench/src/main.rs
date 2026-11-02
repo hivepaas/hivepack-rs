@@ -1,4 +1,4 @@
-//! Times hivepack-xz against liblzma on the same inputs: decoding the .xz
+//! Times hivepack::xz against liblzma on the same inputs: decoding the .xz
 //! Streams liblzma wrote at each preset, with a check, CRC64 unless
 //! `--check` says otherwise, or with `--compress`, encoding them. Both must
 //! give the input back, and the same Streams.
@@ -45,14 +45,14 @@ impl Filter {
             };
         }
         let id = match text {
-            "x86" => hivepack_xz::FILTER_X86,
-            "powerpc" => hivepack_xz::FILTER_POWERPC,
-            "ia64" => hivepack_xz::FILTER_IA64,
-            "arm" => hivepack_xz::FILTER_ARM,
-            "armthumb" => hivepack_xz::FILTER_ARMTHUMB,
-            "arm64" => hivepack_xz::FILTER_ARM64,
-            "sparc" => hivepack_xz::FILTER_SPARC,
-            "riscv" => hivepack_xz::FILTER_RISCV,
+            "x86" => hivepack::xz::FILTER_X86,
+            "powerpc" => hivepack::xz::FILTER_POWERPC,
+            "ia64" => hivepack::xz::FILTER_IA64,
+            "arm" => hivepack::xz::FILTER_ARM,
+            "armthumb" => hivepack::xz::FILTER_ARMTHUMB,
+            "arm64" => hivepack::xz::FILTER_ARM64,
+            "sparc" => hivepack::xz::FILTER_SPARC,
+            "riscv" => hivepack::xz::FILTER_RISCV,
             _ => return Err(format!("bad filter {text:?}")),
         };
         Ok(Filter::Bcj(id))
@@ -131,25 +131,25 @@ impl Liblzma {
                     .delta_properties(&[(distance - 1) as u8])
                     .map_err(|e| format!("liblzma: {e}"))?;
             }
-            Some(Filter::Bcj(hivepack_xz::FILTER_X86)) => {
+            Some(Filter::Bcj(hivepack::xz::FILTER_X86)) => {
                 filters.x86();
             }
-            Some(Filter::Bcj(hivepack_xz::FILTER_POWERPC)) => {
+            Some(Filter::Bcj(hivepack::xz::FILTER_POWERPC)) => {
                 filters.powerpc();
             }
-            Some(Filter::Bcj(hivepack_xz::FILTER_IA64)) => {
+            Some(Filter::Bcj(hivepack::xz::FILTER_IA64)) => {
                 filters.ia64();
             }
-            Some(Filter::Bcj(hivepack_xz::FILTER_ARM)) => {
+            Some(Filter::Bcj(hivepack::xz::FILTER_ARM)) => {
                 filters.arm();
             }
-            Some(Filter::Bcj(hivepack_xz::FILTER_ARMTHUMB)) => {
+            Some(Filter::Bcj(hivepack::xz::FILTER_ARMTHUMB)) => {
                 filters.arm_thumb();
             }
-            Some(Filter::Bcj(hivepack_xz::FILTER_ARM64)) => {
+            Some(Filter::Bcj(hivepack::xz::FILTER_ARM64)) => {
                 filters.arm64();
             }
-            Some(Filter::Bcj(hivepack_xz::FILTER_SPARC)) => {
+            Some(Filter::Bcj(hivepack::xz::FILTER_SPARC)) => {
                 filters.sparc();
             }
             Some(Filter::Bcj(_)) => {
@@ -198,7 +198,7 @@ impl Codec for Liblzma {
         output.clear();
         // The threaded encoder's Blocks each have their header.
         output.resize(
-            hivepack_xz::stream_buffer_bound(input.len()) + (input.len() >> 10) + 4096,
+            hivepack::xz::stream_buffer_bound(input.len()) + (input.len() >> 10) + 4096,
             0,
         );
         match stream.process(input, output, liblzma::stream::Action::Finish) {
@@ -235,7 +235,7 @@ impl Codec for Liblzma {
     }
 }
 
-/// hivepack-xz.
+/// hivepack::xz.
 struct Port;
 
 impl Codec for Port {
@@ -252,49 +252,49 @@ impl Codec for Port {
         input: &[u8],
         output: &mut Vec<u8>,
     ) -> Result<()> {
-        let check = hivepack_xz::Check(check_number(check));
+        let check = hivepack::xz::Check(check_number(check));
         let filters = match filter {
             None => None,
             Some(filter) => {
-                let lzma2 = hivepack_xz::LzmaOptions::preset(preset).ok_or("port: bad preset")?;
+                let lzma2 = hivepack::xz::LzmaOptions::preset(preset).ok_or("port: bad preset")?;
                 Some(vec![
                     match filter {
-                        Filter::Bcj(id) => hivepack_xz::Filter::bcj(id, 0),
-                        Filter::Delta(distance) => hivepack_xz::Filter::delta(distance),
+                        Filter::Bcj(id) => hivepack::xz::Filter::bcj(id, 0),
+                        Filter::Delta(distance) => hivepack::xz::Filter::delta(distance),
                     },
-                    hivepack_xz::Filter::lzma2(lzma2),
+                    hivepack::xz::Filter::lzma2(lzma2),
                 ])
             }
         };
         let mut stream = match (threads, filters) {
             (Some(threads), filters) => {
-                hivepack_xz::Stream::stream_encoder_mt(&hivepack_xz::MtOptions {
+                hivepack::xz::Stream::stream_encoder_mt(&hivepack::xz::MtOptions {
                     threads,
                     preset,
                     check,
                     filters,
-                    ..hivepack_xz::MtOptions::default()
+                    ..hivepack::xz::MtOptions::default()
                 })
             }
-            (None, None) => hivepack_xz::Stream::easy_encoder(preset, check),
-            (None, Some(filters)) => hivepack_xz::Stream::stream_encoder(&filters, check),
+            (None, None) => hivepack::xz::Stream::easy_encoder(preset, check),
+            (None, Some(filters)) => hivepack::xz::Stream::stream_encoder(&filters, check),
         }
         .map_err(|e| format!("port: {e}"))?;
         output.clear();
         // The threaded encoder's Blocks each have their header.
         output.resize(
-            hivepack_xz::stream_buffer_bound(input.len()) + (input.len() >> 10) + 4096,
+            hivepack::xz::stream_buffer_bound(input.len()) + (input.len() >> 10) + 4096,
             0,
         );
-        let mut out = hivepack_xz::OutBuffer::new(output);
+        let mut out = hivepack::xz::OutBuffer::new(output);
         let status = stream.code(
             &mut out,
-            &mut hivepack_xz::InBuffer::new(input),
-            hivepack_xz::Action::Finish,
+            &mut hivepack::xz::InBuffer::new(input),
+            hivepack::xz::Action::Finish,
         );
         let len = out.pos;
         match status {
-            Ok(hivepack_xz::Status::StreamEnd) => {
+            Ok(hivepack::xz::Status::StreamEnd) => {
                 output.truncate(len);
                 Ok(())
             }
@@ -310,23 +310,23 @@ impl Codec for Port {
         output: &mut Vec<u8>,
     ) -> Result<()> {
         let mut stream = match threads {
-            Some(threads) => hivepack_xz::Stream::stream_decoder_mt(&hivepack_xz::MtOptions {
+            Some(threads) => hivepack::xz::Stream::stream_decoder_mt(&hivepack::xz::MtOptions {
                 threads,
-                ..hivepack_xz::MtOptions::default()
+                ..hivepack::xz::MtOptions::default()
             }),
-            None => hivepack_xz::Stream::stream_decoder(u64::MAX, 0),
+            None => hivepack::xz::Stream::stream_decoder(u64::MAX, 0),
         }
         .map_err(|e| format!("port: {e}"))?;
         output.clear();
         output.resize(size, 0);
-        let mut out = hivepack_xz::OutBuffer::new(output);
+        let mut out = hivepack::xz::OutBuffer::new(output);
         let status = stream.code(
             &mut out,
-            &mut hivepack_xz::InBuffer::new(input),
-            hivepack_xz::Action::Finish,
+            &mut hivepack::xz::InBuffer::new(input),
+            hivepack::xz::Action::Finish,
         );
         match status {
-            Ok(hivepack_xz::Status::StreamEnd) if out.pos == size => Ok(()),
+            Ok(hivepack::xz::Status::StreamEnd) if out.pos == size => Ok(()),
             other => Err(format!("port: {other:?}")),
         }
     }

@@ -36,11 +36,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo clippy --workspace --all-targets --locked --features hivepack-zstd/unsafe-fast,hivepack-lz4/unsafe-fast,hivepack-deflate/unsafe-fast,hivepack-extract/rar -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked --all-features -- -D warnings
       - run: cargo doc --workspace --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
-      - run: cargo doc --workspace --no-deps --locked --features hivepack-zstd/unsafe-fast,hivepack-lz4/unsafe-fast,hivepack-deflate/unsafe-fast,hivepack-extract/rar
+      - run: cargo doc --workspace --no-deps --locked --all-features
         env:
           RUSTDOCFLAGS: -D warnings
       - run: python3 -m py_compile scripts/testdata.py
@@ -60,25 +60,25 @@ jobs:
           v=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
           rustup toolchain install "$v" --profile minimal
           echo "RUSTUP_TOOLCHAIN=$v" >> "$GITHUB_ENV"
-      - run: cargo check -p hivepack-7z --lib --locked
-      - run: cargo check -p hivepack-age --lib --locked
-      - run: cargo check -p hivepack-bzip2 --lib --locked
-      - run: cargo check -p hivepack-cpio --lib --locked
-      - run: cargo check -p hivepack-xz --lib --locked
-      - run: cargo check -p hivepack-crypto --lib --locked
-      - run: cargo check -p hivepack-deflate --lib --locked
-      - run: cargo check -p hivepack-deflate --lib --locked --features unsafe-fast
-      - run: cargo check -p hivepack-extract --lib --locked
-      - run: cargo check -p hivepack-iso --lib --locked
-      - run: cargo check -p hivepack-lz4 --lib --locked
-      - run: cargo check -p hivepack-lz4 --lib --locked --features unsafe-fast
-      - run: cargo check -p hivepack-open --lib --locked
-      - run: cargo check -p hivepack-tar --lib --locked
-      - run: cargo check -p hivepack-udf --lib --locked
-      - run: cargo check -p hivepack-xar --lib --locked
-      - run: cargo check -p hivepack-zip --lib --locked
-      - run: cargo check -p hivepack-zstd --lib --locked
-      - run: cargo check -p hivepack-zstd --lib --locked --features unsafe-fast
+      - run: cargo check -p hivepack --lib --locked --no-default-features --features sevenz
+      - run: cargo check -p hivepack --lib --locked --no-default-features --features age
+      - run: cargo check -p hivepack --lib --locked --no-default-features --features bzip2
+      - run: cargo check -p hivepack --lib --locked --no-default-features --features cpio
+      - run: cargo check -p hivepack --lib --locked --no-default-features --features xz
+      - run: cargo check -p hivepack --lib --locked --no-default-features --features crypto
+      - run: cargo check -p hivepack --lib --locked --no-default-features --features deflate
+      - run: cargo check -p hivepack --lib --locked --no-default-features --features deflate,deflate-unsafe-fast
+      - run: cargo check -p hivepack --lib --locked --no-default-features --features extract
+      - run: cargo check -p hivepack --lib --locked --no-default-features --features iso
+      - run: cargo check -p hivepack --lib --locked --no-default-features --features lz4
+      - run: cargo check -p hivepack --lib --locked --no-default-features --features lz4,lz4-unsafe-fast
+      - run: cargo check -p hivepack --lib --locked --no-default-features --features open
+      - run: cargo check -p hivepack --lib --locked --no-default-features --features tar
+      - run: cargo check -p hivepack --lib --locked --no-default-features --features udf
+      - run: cargo check -p hivepack --lib --locked --no-default-features --features xar
+      - run: cargo check -p hivepack --lib --locked --no-default-features --features zip
+      - run: cargo check -p hivepack --lib --locked --no-default-features --features zstd
+      - run: cargo check -p hivepack --lib --locked --no-default-features --features zstd,zstd-unsafe-fast
 
   licenses:
     name: Dependency licenses and advisories
@@ -131,7 +131,7 @@ jobs:
           python-version: '3.13'
       # The oracles written in Go, tools/age-oracle and tools/tar-oracle,
       # with the Go tar-oracle's go.mod names: the release whose archive/tar
-      # hivepack-tar ports, new enough for age-oracle.
+      # hivepack::tar ports, new enough for age-oracle.
       - if: contains(matrix.groups, 'generated')
         uses: actions/setup-go@v7
         with:
@@ -148,13 +148,13 @@ jobs:
           for group in ${HIVEPACK_TESTDATA_REQUIRED//,/ }; do args+=(--group "$group"); done
           python scripts/testdata.py fetch "${args[@]}"
       - run: cargo test --workspace --locked
-      - run: cargo test -p hivepack-extract --locked --features rar --test rar
+      - run: cargo test -p hivepack --locked --features rar --test extract_rar --test rar_oracle
       - if: matrix.unsafe-fast
-        run: cargo test -p hivepack-zstd --locked --features unsafe-fast
+        run: cargo test -p hivepack --locked --no-default-features --features zstd,zstd-unsafe-fast
       - if: matrix.unsafe-fast
-        run: cargo test -p hivepack-lz4 --locked --features unsafe-fast
+        run: cargo test -p hivepack --locked --no-default-features --features lz4,lz4-unsafe-fast
       - if: matrix.unsafe-fast
-        run: cargo test -p hivepack-deflate --locked --features unsafe-fast
+        run: cargo test -p hivepack --locked --no-default-features --features deflate,deflate-unsafe-fast
 
   cross:
     name: Test (${{ matrix.target }})
@@ -185,14 +185,14 @@ jobs:
       # big-endian machine with the unchecked copies. It changes only the
       # decoder, so only the decoder's tests run again with it.
       - run: >-
-          cross test -p hivepack-zstd --locked --target ${{ matrix.target }} --features unsafe-fast
-          --test decompress --test stream --test dctx --test testdata --test unchecked --test bufferless
+          cross test -p hivepack --locked --target ${{ matrix.target }} --no-default-features --features zstd,zstd-unsafe-fast
+          --test zstd_decompress --test zstd_stream --test zstd_dctx --test zstd_testdata --test zstd_unchecked --test zstd_bufferless
       - run: >-
-          cross test -p hivepack-zstd --locked --target ${{ matrix.target }} --features unsafe-fast
-          --lib -- decompress:: oracle::
-      # hivepack-lz4's feature changes only its block decoder, which every
+          cross test -p hivepack --locked --target ${{ matrix.target }} --no-default-features --features zstd,zstd-unsafe-fast
+          --lib -- zstd::decompress:: zstd::oracle::
+      # hivepack::lz4's feature changes only its block decoder, which every
       # test of the crate reaches.
-      - run: cross test -p hivepack-lz4 --locked --target ${{ matrix.target }} --features unsafe-fast
+      - run: cross test -p hivepack --locked --target ${{ matrix.target }} --no-default-features --features lz4,lz4-unsafe-fast
 
   # The `unsafe-fast` feature's unsafe code under Miri, which fails on any
   # access out of bounds: the copies against the checked ones, and the
@@ -210,13 +210,13 @@ jobs:
           rustup toolchain install "$NIGHTLY" --profile minimal --component miri,rust-src
           echo "RUSTUP_TOOLCHAIN=$NIGHTLY" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
-      - run: cargo miri test -p hivepack-zstd --locked --features unsafe-fast --lib unchecked
-      - run: cargo miri test -p hivepack-zstd --locked --features unsafe-fast --test unchecked
+      - run: cargo miri test -p hivepack --locked --no-default-features --features zstd,zstd-unsafe-fast --lib unchecked
+      - run: cargo miri test -p hivepack --locked --no-default-features --features zstd,zstd-unsafe-fast --test zstd_unchecked
         env:
           # The test reads the frames from the repository.
           MIRIFLAGS: -Zmiri-disable-isolation
-      - run: cargo miri test -p hivepack-lz4 --locked --features unsafe-fast --lib unchecked
-      - run: cargo miri test -p hivepack-lz4 --locked --features unsafe-fast --test unchecked
+      - run: cargo miri test -p hivepack --locked --no-default-features --features lz4,lz4-unsafe-fast --lib unchecked
+      - run: cargo miri test -p hivepack --locked --no-default-features --features lz4,lz4-unsafe-fast --test lz4_unchecked
         env:
           # The test reads the recorded blocks from the repository.
           MIRIFLAGS: -Zmiri-disable-isolation

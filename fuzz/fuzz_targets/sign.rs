@@ -1,10 +1,10 @@
-//! hivepack-sign's signatures on any input: read in armor and in binary, what
+//! hivepack::sign's signatures on any input: read in armor and in binary, what
 //! reads must write back as it came, and be checked without a panic. A signature
 //! made here must pass, and fail for a changed file.
 
 #![no_main]
 
-use hivepack_sign::{FILE_NAMESPACE, PrivateKey, PublicKey, Signature, sign, verify};
+use hivepack::sign::{FILE_NAMESPACE, PrivateKey, PublicKey, Signature, sign, verify};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

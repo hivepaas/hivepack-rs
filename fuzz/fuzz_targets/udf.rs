@@ -1,4 +1,4 @@
-//! hivepack-udf on any image: the input describes it sparsely, so that a
+//! hivepack::udf on any image: the input describes it sparsely, so that a
 //! few kilobytes reach the anchors at sector 256 and past. Its first byte
 //! picks the sector size (512 to 4096) and whether hidden entries are
 //! listed; its next three, the number of sectors (up to 2^16); then come
@@ -20,7 +20,7 @@ mod udf_image;
 
 use std::io::Read;
 
-use hivepack_udf::{Node, Options, Udf, VType};
+use hivepack::udf::{Node, Options, Udf, VType};
 use libfuzzer_sys::fuzz_target;
 use udf_image::Sparse;
 

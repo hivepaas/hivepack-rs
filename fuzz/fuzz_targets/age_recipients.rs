@@ -1,12 +1,12 @@
-//! Reading recipients with hivepack-age on any input: as a recipients file, as an
+//! Reading recipients with hivepack::age on any input: as a recipients file, as an
 //! SSH public key, as `age -r` takes one, and its first 32 bytes as an Ed25519 key.
 //! A recipient read gives text that reads back. A panic is a bug.
 //!
-//! `crates/age/tests/encrypt.rs` compares what is read with age, by what it writes.
+//! `crates/hivepack/tests/age_encrypt.rs` compares what is read with age, by what it writes.
 
 #![no_main]
 
-use hivepack_age::{
+use hivepack::age::{
     HybridIdentity, HybridRecipient, SshEd25519Recipient, parse_recipient, parse_recipients_file,
 };
 use libfuzzer_sys::fuzz_target;
@@ -26,6 +26,6 @@ fuzz_target!(|data: &[u8]| {
         }
     }
     if let Some(key) = data.first_chunk::<32>() {
-        let _ = hivepack_crypto::ed25519_public_to_x25519(key);
+        let _ = hivepack::crypto::ed25519_public_to_x25519(key);
     }
 });

@@ -1,6 +1,6 @@
-//! hivepack-open on any input: after a first byte that picks a name (none,
+//! hivepack::open on any input: after a first byte that picks a name (none,
 //! or one ending in `.lzma`), the bytes are a file, opened through its
-//! layers with the X25519 identity of the files `crates/open/tests/age.rs`
+//! layers with the X25519 identity of the files `crates/hivepack/tests/open_age.rs`
 //! records, under small limits (four layers, 16 MiB zstd windows, 64 MiB
 //! for liblzma), and up to 4 MiB of what is under them read.
 //!
@@ -15,8 +15,8 @@
 
 use std::io::{Cursor, Read};
 
-use hivepack_age::{BoxedIdentity, X25519Identity};
-use hivepack_open::{Limits, Opener};
+use hivepack::age::{BoxedIdentity, X25519Identity};
+use hivepack::open::{Limits, Opener};
 use libfuzzer_sys::fuzz_target;
 
 const KEY: &str = "AGE-SECRET-KEY-1EGTZVFFV20835NWYV6270LXYVK2VKNX2MMDKWYKLMGR48UAWX40Q2P2LM0";

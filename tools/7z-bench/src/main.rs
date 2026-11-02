@@ -1,4 +1,4 @@
-//! Times hivepack-7z against the 7z decoder of the LZMA SDK 26.05, and against
+//! Times hivepack::sevenz against the 7z decoder of the LZMA SDK 26.05, and against
 //! 7-Zip's program for what the SDK's decoder does not read, on the same
 //! archives, in each thing a 7z reader does: opening, listing, and reading each
 //! method and filter; and against `7zz` writing them.
@@ -31,7 +31,7 @@
 //!
 //! The writing rows are against `7zz a -mmt=1`, timed whole, and the port reads
 //! the same files and writes a file through a buffer. The encoders are not the same
-//! (`hivepack-xz` is liblzma's, `7zz` has its own), so that each row also says what
+//! (`hivepack::xz` is liblzma's, `7zz` has its own), so that each row also says what
 //! size each made, and a speed means nothing without it. The port's archives must
 //! pass `7zz t`.
 
@@ -42,7 +42,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, ExitCode, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use hivepack_7z::{Archive, Method, NewEntry, Options, WriteOptions, Writer};
+use hivepack::sevenz::{Archive, Method, NewEntry, Options, WriteOptions, Writer};
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -549,7 +549,7 @@ fn port_write(
     files: &[(String, Option<PathBuf>)],
     out: &Path,
 ) -> Result<(Duration, u64)> {
-    let error = |e: hivepack_7z::Error| e.name().to_string();
+    let error = |e: hivepack::sevenz::Error| e.name().to_string();
     let options = WriteOptions {
         method: row.method,
         solid_block_size: row.solid.then_some(1 << 32),

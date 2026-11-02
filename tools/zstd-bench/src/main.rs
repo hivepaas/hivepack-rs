@@ -214,10 +214,10 @@ impl Codec for Libzstd {
 
 /// The port.
 struct Hivepack {
-    cctx: hivepack_zstd::CCtx,
+    cctx: hivepack::zstd::CCtx,
     /// `ZSTD_c_targetCBlockSize`, 0 for none.
     target_cblock_size: u32,
-    dctx: hivepack_zstd::DCtx,
+    dctx: hivepack::zstd::DCtx,
     /// A piece of streamed output, decompressed and compressed.
     piece: Vec<u8>,
     compressed_piece: Vec<u8>,
@@ -225,7 +225,7 @@ struct Hivepack {
 
 impl Codec for Hivepack {
     fn name(&self) -> String {
-        if hivepack_zstd::UNSAFE_FAST {
+        if hivepack::zstd::UNSAFE_FAST {
             "hivepack-zstd (unsafe-fast)".into()
         } else {
             "hivepack-zstd".into()
@@ -233,8 +233,8 @@ impl Codec for Hivepack {
     }
 
     fn compress(&mut self, level: i32, input: &[u8], output: &mut Vec<u8>) -> Result<()> {
-        use hivepack_zstd::CParameter;
-        output.resize(hivepack_zstd::compress_bound(input.len()).unwrap_or(0), 0);
+        use hivepack::zstd::CParameter;
+        output.resize(hivepack::zstd::compress_bound(input.len()).unwrap_or(0), 0);
         let size = if self.target_cblock_size != 0 {
             // As libzstd, through compress2.
             for parameter in [
@@ -255,9 +255,9 @@ impl Codec for Hivepack {
     }
 
     fn compress_stream(&mut self, level: i32, input: &[u8], output: &mut Vec<u8>) -> Result<()> {
-        use hivepack_zstd::{CParameter, EndDirective, ResetDirective};
+        use hivepack::zstd::{CParameter, EndDirective, ResetDirective};
         output.clear();
-        let error = |e: hivepack_zstd::Error| e.to_string();
+        let error = |e: hivepack::zstd::Error| e.to_string();
         self.cctx
             .reset(ResetDirective::SessionOnly)
             .map_err(error)?;
@@ -269,7 +269,7 @@ impl Codec for Hivepack {
         }
         let mut in_pos = 0;
         loop {
-            let in_end = input.len().min(in_pos + hivepack_zstd::cstream_in_size());
+            let in_end = input.len().min(in_pos + hivepack::zstd::cstream_in_size());
             let directive = if in_end == input.len() {
                 EndDirective::End
             } else {
@@ -300,8 +300,8 @@ impl Codec for Hivepack {
         input: &[u8],
         output: &mut Vec<u8>,
     ) -> Result<()> {
-        use hivepack_zstd::CParameter;
-        output.resize(hivepack_zstd::compress_bound(input.len()).unwrap_or(0), 0);
+        use hivepack::zstd::CParameter;
+        output.resize(hivepack::zstd::compress_bound(input.len()).unwrap_or(0), 0);
         for parameter in [
             CParameter::CompressionLevel(level),
             CParameter::NbWorkers(workers),
@@ -334,7 +334,7 @@ impl Codec for Hivepack {
         output.reserve(size);
         let mut in_pos = 0;
         loop {
-            let in_end = input.len().min(in_pos + hivepack_zstd::dstream_in_size());
+            let in_end = input.len().min(in_pos + hivepack::zstd::dstream_in_size());
             let mut written = 0;
             let hint = self
                 .dctx
@@ -605,11 +605,11 @@ fn run() -> Result<()> {
             compressed_piece: vec![0; CCtx::out_size()],
         }),
         Box::new(Hivepack {
-            cctx: hivepack_zstd::CCtx::new(),
+            cctx: hivepack::zstd::CCtx::new(),
             target_cblock_size: options.target_cblock_size,
-            dctx: hivepack_zstd::DCtx::new(),
-            piece: vec![0; hivepack_zstd::dstream_out_size()],
-            compressed_piece: vec![0; hivepack_zstd::cstream_out_size()],
+            dctx: hivepack::zstd::DCtx::new(),
+            piece: vec![0; hivepack::zstd::dstream_out_size()],
+            compressed_piece: vec![0; hivepack::zstd::cstream_out_size()],
         }),
     ];
     if !options.workers.is_empty() {

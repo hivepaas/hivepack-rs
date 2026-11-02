@@ -1,7 +1,7 @@
 [package]
 name = "zstd-bench"
 version = "0.0.0"
-description = "Times hivepack-zstd against libzstd on the same inputs"
+description = "Times hivepack::zstd against libzstd on the same inputs"
 publish = false
 license.workspace = true
 edition.workspace = true
@@ -11,8 +11,8 @@ rust-version.workspace = true
 workspace = true
 
 [features]
-unsafe-fast = ["hivepack-zstd/unsafe-fast"]
+unsafe-fast = ["hivepack/zstd-unsafe-fast"]
 
 [dependencies]
-hivepack-zstd.workspace = true
+hivepack = { workspace = true, features = ["zstd"] }
 zstd.workspace = true

@@ -1,16 +1,16 @@
-//! hivepack-cpio on any input: every entry of the archive and its data
+//! hivepack::cpio on any input: every entry of the archive and its data
 //! read, twice, from an input that comes in pieces of different sizes and
 //! read in pieces of different sizes, the first eight bytes' hash picking
 //! them; with and without the `pwb` option, and through the RPM filter
 //! when its bid says the input is a package, as libarchive stacks it. Both
 //! reads must give the same headers, data and end, and a panic is a bug
-//! (`crates/cpio/tests/oracle.rs` compares the answers with libarchive).
+//! (`crates/hivepack/tests/cpio_oracle.rs` compares the answers with libarchive).
 
 #![no_main]
 
 use std::io::Read;
 
-use hivepack_cpio::{Header, Reader, rpm};
+use hivepack::cpio::{Header, Reader, rpm};
 use libfuzzer_sys::fuzz_target;
 
 /// The input, in pieces of sizes `seed` picks.
@@ -44,7 +44,7 @@ fn payload(data: &[u8], seed: u64) -> (Vec<u8>, String) {
         match r.read(&mut buf) {
             Ok(0) => return (out, "end".into()),
             Ok(n) => out.extend_from_slice(&buf[..n]),
-            Err(e) => return (out, hivepack_cpio::Error::from(e).to_string()),
+            Err(e) => return (out, hivepack::cpio::Error::from(e).to_string()),
         }
     }
 }
@@ -80,7 +80,7 @@ fn read(
                     }
                     Ok(n) => body.extend_from_slice(&buf[..n]),
                     Err(e) => {
-                        end = hivepack_cpio::Error::from(e).to_string();
+                        end = hivepack::cpio::Error::from(e).to_string();
                         break;
                     }
                 }

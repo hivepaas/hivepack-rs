@@ -1,4 +1,4 @@
-//! Times hivepack-zip against libzip 1.12.1 on the same archives, in each
+//! Times hivepack::zip against libzip 1.12.1 on the same archives, in each
 //! thing an archive library does: opening, listing, finding names, reading,
 //! writing, encrypting and editing.
 //!
@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
-use hivepack_zip::{Archive, BufferSource, Flags, OpenFlags, cm, em};
+use hivepack::zip::{Archive, BufferSource, Flags, OpenFlags, cm, em};
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -463,7 +463,7 @@ fn text(path: &Path) -> Result<&str> {
     Ok(text)
 }
 
-fn zip_err(what: &str) -> impl Fn(hivepack_zip::Error) -> String + '_ {
+fn zip_err(what: &str) -> impl Fn(hivepack::zip::Error) -> String + '_ {
     move |e| format!("{what}: {e}")
 }
 

@@ -1,6 +1,6 @@
-# hivepack-crypto
+# hivepack::crypto
 
-`hivepack-crypto` has the cryptography of hivepack's formats, behind one small interface. It writes none of it. Each primitive comes from a crate many others depend on, and hivepack's other crates see only this interface: they forbid `unsafe` code and take cryptography from here.
+`hivepack::crypto` has the cryptography of hivepack's formats, behind one small interface. It writes none of it. Each primitive comes from a crate many others depend on, and hivepack's other crates see only this interface: they forbid `unsafe` code and take cryptography from here.
 
 Until November 2026 this crate was a port of BearSSL in safe Rust, with hand-written instructions behind a feature. That was about 4,700 lines of cryptography nobody else had reviewed, and programs that wanted speed ran the hand-written part. Crates that others audit and use are the better place for this, and the rule about dependencies with `unsafe` code ([safety.md](safety.md)) has an entry for them.
 
@@ -27,7 +27,7 @@ Until November 2026 this crate was a port of BearSSL in safe Rust, with hand-wri
 
 ## What the interface does
 
-- **Nothing of its own that is cryptography.** Only what fits the formats: CBC with a little code around `aes`'s block functions, as they do eight blocks together with the processor's instructions; a counter mode is WinZip's, in `hivepack-zip`.
+- **Nothing of its own that is cryptography.** Only what fits the formats: CBC with a little code around `aes`'s block functions, as they do eight blocks together with the processor's instructions; a counter mode is WinZip's, in `hivepack::zip`.
 - **`chacha20_poly1305_open` checks before it decrypts.** A tag that does not match leaves the data as it was.
 - **An Ed25519 public key** is a point of the curve or `None`, and its X25519 form is RFC 7748's map.
 - **Edwards decoding as age has it.** `curve25519-dalek`'s `decompress` reads a `y` of the modulus or more, and an `x` of zero with its sign set, as `filippo.io/edwards25519` does. `y` = 1 maps to 0. Each of these is compared with age.
@@ -36,7 +36,7 @@ Until November 2026 this crate was a port of BearSSL in safe Rust, with hand-wri
 
 ## Clearing secrets
 
-`aes`, `chacha20poly1305` and `curve25519-dalek` are built with their `zeroize` features, and overwrite their key material when it is dropped. Callers overwrite what they hold, as `hivepack-age`'s keys do. Hash states are not cleared.
+`aes`, `chacha20poly1305` and `curve25519-dalek` are built with their `zeroize` features, and overwrite their key material when it is dropped. Callers overwrite what they hold, as `hivepack::age`'s keys do. Hash states are not cleared.
 
 ## Random numbers
 
@@ -54,7 +54,7 @@ The interface is checked as the port was, so a change of crate or version that c
 
 ## Speed
 
-The crates choose the processor's instructions at run time, on x86-64 and arm64, with nothing to turn on. The formats' READMEs have the numbers: `hivepack-zip`, `hivepack-7z`, `hivepack-rar` and `hivepack-age`.
+The crates choose the processor's instructions at run time, on x86-64 and arm64, with nothing to turn on. The formats' READMEs have the numbers: `hivepack::zip`, `hivepack::sevenz`, `hivepack::rar` and `hivepack::age`.
 
 ## Following new releases
 

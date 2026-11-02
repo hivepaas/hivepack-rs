@@ -1,7 +1,7 @@
 [package]
 name = "xz-bench"
 version = "0.0.0"
-description = "Times hivepack-xz against liblzma on the same inputs"
+description = "Times hivepack::xz against liblzma on the same inputs"
 publish = false
 license.workspace = true
 edition.workspace = true
@@ -11,6 +11,6 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-hivepack-xz.workspace = true
+hivepack = { workspace = true, features = ["xz"] }
 liblzma = { workspace = true, features = ["parallel"] }
 liblzma-sys = { workspace = true, features = ["parallel"] }

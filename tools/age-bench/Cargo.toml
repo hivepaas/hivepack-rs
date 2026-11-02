@@ -1,7 +1,7 @@
 [package]
 name = "age-bench"
 version = "0.0.0"
-description = "Times hivepack-age against age, the reference implementation in Go, on the same files"
+description = "Times hivepack::age against age, the reference implementation in Go, on the same files"
 publish = false
 license.workspace = true
 edition.workspace = true
@@ -11,10 +11,10 @@ rust-version.workspace = true
 workspace = true
 
 [features]
-# Nothing now: hivepack-crypto always has the fast code. For bench.yml.
+# Nothing now: hivepack::crypto always has the fast code. For bench.yml.
 unsafe-fast = []
 
 [dependencies]
-hivepack-age.workspace = true
+hivepack = { workspace = true, features = ["age"] }
 # Where a program takes the random bytes for files it writes.
 getrandom = "0.4"

@@ -1,4 +1,4 @@
-//! hivepack-xz's encoders against liblzma's, call by call. A panic or a
+//! hivepack::xz's encoders against liblzma's, call by call. A panic or a
 //! difference is a bug.
 //!
 //! The first byte chooses the encoder: .xz of a preset, .xz of LZMA2 with
@@ -16,7 +16,7 @@
 
 #![no_main]
 
-use hivepack_xz::{
+use hivepack::xz::{
     Action, Check, Filter, InBuffer, LzmaOptions, MatchFinder, Mode, MtOptions, OutBuffer,
     PRESET_EXTREME, Status, Stream,
 };
@@ -24,7 +24,7 @@ use libfuzzer_sys::fuzz_target;
 use liblzma::stream as c;
 
 /// What a call returned, in liblzma's numbers.
-fn port_code(ret: hivepack_xz::Result<Status>) -> i32 {
+fn port_code(ret: hivepack::xz::Result<Status>) -> i32 {
     match ret {
         Ok(status) => status.number(),
         Err(e) => e.number(),

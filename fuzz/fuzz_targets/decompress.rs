@@ -23,7 +23,7 @@ fuzz_target!(|src: &[u8]| {
         .decompress(&mut c_out[..], src)
         .map(|n| &c_out[..n])
         .map_err(zstd_safe::get_error_name);
-    let got = hivepack_zstd::decompress(&mut p_out, src)
+    let got = hivepack::zstd::decompress(&mut p_out, src)
         .map(|n| &p_out[..n])
         .map_err(|error| error.code().message());
     assert!(
@@ -35,7 +35,7 @@ fuzz_target!(|src: &[u8]| {
     let mut b_out = vec![0u8; CAPACITY];
     let bufferless = bufferless(src, &mut b_out, None);
     if let Ok(got) = got {
-        let corrupt = hivepack_zstd::ErrorCode::CorruptionDetected.message();
+        let corrupt = hivepack::zstd::ErrorCode::CorruptionDetected.message();
         assert!(
             bufferless.as_deref() == Ok(got)
                 || bufferless.as_ref().is_err_and(|error| error == corrupt),
@@ -51,7 +51,7 @@ fuzz_target!(|src: &[u8]| {
 /// start, each call right after the last; or, with `round`, into `out`
 /// from its start again when less than `round` is left.
 fn bufferless(src: &[u8], out: &mut [u8], round: Option<usize>) -> Result<Vec<u8>, String> {
-    let mut dctx = hivepack_zstd::DCtx::new();
+    let mut dctx = hivepack::zstd::DCtx::new();
     let mut output = Vec::new();
     let (mut ip, mut pos, mut begin) = (0, 0, true);
     for _ in 0..1_000_000 {
@@ -80,11 +80,11 @@ fn bufferless(src: &[u8], out: &mut [u8], round: Option<usize>) -> Result<Vec<u8
 /// [`bufferless`] in a round buffer for the first frame's window and
 /// blocks, of a reasonable size.
 fn bufferless_round(src: &[u8]) -> Result<Vec<u8>, String> {
-    let Ok(hivepack_zstd::FrameHeaderState::Complete(header)) = hivepack_zstd::get_frame_header(src)
+    let Ok(hivepack::zstd::FrameHeaderState::Complete(header)) = hivepack::zstd::get_frame_header(src)
     else {
         return Err("no frame header".into());
     };
-    let size = hivepack_zstd::decoding_buffer_size_min(header.window_size, header.frame_content_size)
+    let size = hivepack::zstd::decoding_buffer_size_min(header.window_size, header.frame_content_size)
         .map_err(|error| error.code().message().to_string())?;
     if size > CAPACITY {
         return Err("too large".into());

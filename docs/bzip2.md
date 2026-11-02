@@ -1,22 +1,22 @@
 # Porting libbzip2
 
-`hivepack-bzip2` is a port of the official bzip2 library, [libbzip2](https://sourceware.org/bzip2/), to safe Rust. ZIP archives use it for their method 12, tar files for `.tar.bz2`, and any other format that holds bzip2 streams can too. The goal is the one [porting.md](porting.md) sets for zstd: the same output as libbzip2, at the same speed.
+`hivepack::bzip2` is a port of the official bzip2 library, [libbzip2](https://sourceware.org/bzip2/), to safe Rust. ZIP archives use it for their method 12, tar files for `.tar.bz2`, and any other format that holds bzip2 streams can too. The goal is the one [porting.md](porting.md) sets for zstd: the same output as libbzip2, at the same speed.
 
 ## The version
 
-The port follows bzip2 **1.0.8** (13 July 2019), still the current release as of October 2026: `bzip2-1.0.8.tar.gz` from sourceware.org, SHA-256 `ab5a03176ee106d3f0fa90e381da478ddae405918153cca248e682cd0c4a2269`, whose signature by Mark Wielaard (key `EC3CFE88F6CA0788774F5C1D1AA44BE649DE760A`) was checked. `hivepack_bzip2::UPSTREAM_VERSION` names it, and `hivepack_bzip2::version()` gives what `BZ2_bzlibVersion()` gives, `"1.0.8, 13-Jul-2019"`. The 1.1 branch in bzip2's repository has had no release, and the port follows releases.
+The port follows bzip2 **1.0.8** (13 July 2019), still the current release as of October 2026: `bzip2-1.0.8.tar.gz` from sourceware.org, SHA-256 `ab5a03176ee106d3f0fa90e381da478ddae405918153cca248e682cd0c4a2269`, whose signature by Mark Wielaard (key `EC3CFE88F6CA0788774F5C1D1AA44BE649DE760A`) was checked. `hivepack::bzip2::UPSTREAM_VERSION` names it, and `hivepack::bzip2::version()` gives what `BZ2_bzlibVersion()` gives, `"1.0.8, 13-Jul-2019"`. The 1.1 branch in bzip2's repository has had no release, and the port follows releases.
 
 ## What following the official code means
 
 The rules of [porting.md](porting.md):
 
-- **The same layout.** Each file of libbzip2 becomes a module of the same name: `blocksort.c` becomes `crates/bzip2/src/blocksort.rs`, `decompress.c` becomes `decompress.rs`. `bzlib_private.h`'s constants are in `private.rs`, and its two structures, `EState` and `DState`, beside the code that uses them, in `compress.rs` and `decompress.rs`.
+- **The same layout.** Each file of libbzip2 becomes a module of the same name: `blocksort.c` becomes `crates/hivepack/src/bzip2/blocksort.rs`, `decompress.c` becomes `decompress.rs`. `bzlib_private.h`'s constants are in `private.rs`, and its two structures, `EState` and `DState`, beside the code that uses them, in `compress.rs` and `decompress.rs`.
 - **The same names**, in snake case, with the C name in every doc comment. A stream and its state are one type, `Compress` or `Decompress`, whose methods drop the prefix: `BZ2_bzCompress` becomes `Compress::compress`, `BZ2_bzBuffToBuffDecompress` becomes `buff_to_buff_decompress`.
 - **The same algorithms, constants and tables.** `crctable.c` and `randtable.c` are copied as they are, and a test checks the CRC table against its polynomial. That is what makes the output identical.
 - **The same results.** A call returns libbzip2's code, as `Result<Status, Error>`, with the same numbers (`Status::number`, `Error::number`) and the names `BZ2_bzerror()` gives (`"DATA_ERROR_MAGIC"`).
 - **Differences are marked** with a comment starting `Differs from libbzip2`.
 
-The main difference is the stream itself. A `bz_stream` holds pointers to the caller's input and output; the port takes them for each call as an `InBuffer` and an `OutBuffer`, a slice and a position, as `hivepack-deflate` and `hivepack-zstd` do, and keeps the totals in the stream. `BZ2_decompress`, which libbzip2 writes as one `switch` whose `case` labels sit inside its loops so that it can stop wherever the input runs out and start there again, is a `match` on the same states, with the loop counters and other locals in the same save area, copied in and out as libbzip2 copies them.
+The main difference is the stream itself. A `bz_stream` holds pointers to the caller's input and output; the port takes them for each call as an `InBuffer` and an `OutBuffer`, a slice and a position, as `hivepack::deflate` and `hivepack::zstd` do, and keeps the totals in the stream. `BZ2_decompress`, which libbzip2 writes as one `switch` whose `case` labels sit inside its loops so that it can stop wherever the input runs out and start there again, is a `match` on the same states, with the loop counters and other locals in the same save area, copied in and out as libbzip2 copies them.
 
 The other differences:
 
@@ -89,4 +89,4 @@ When bzip2 releases a new version:
 
 ## Licenses
 
-The port is derived from libbzip2, which is under its own BSD-style license (SPDX `bzip2-1.0.6`), and asks, as zlib's does, that altered versions be marked as such. That is why `hivepack-bzip2` is under that license, and its [LICENSE](../crates/bzip2/LICENSE) keeps libbzip2's notice and says that this is an altered version.
+The port is derived from libbzip2, which is under its own BSD-style license (SPDX `bzip2-1.0.6`), and asks, as zlib's does, that altered versions be marked as such. That is why `hivepack::bzip2` is under that license, and its [LICENSE](../crates/hivepack/src/bzip2/LICENSE) keeps libbzip2's notice and says that this is an altered version.

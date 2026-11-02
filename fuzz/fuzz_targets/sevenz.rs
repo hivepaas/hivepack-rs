@@ -1,14 +1,14 @@
-//! hivepack-7z on any input: opened, listed, its files read one after
+//! hivepack::sevenz on any input: opened, listed, its files read one after
 //! another, its folders decoded and its files extracted, with small limits
 //! on what it may allocate and on how much is read, and with a password. A
 //! panic is a bug.
-//! `crates/7z/tests/oracle.rs` compares the results with the LZMA SDK's.
+//! `crates/hivepack/tests/sevenz_oracle.rs` compares the results with the LZMA SDK's.
 
 #![no_main]
 
 use std::io::{Cursor, Read};
 
-use hivepack_7z::{Archive, Options};
+use hivepack::sevenz::{Archive, Options};
 use libfuzzer_sys::fuzz_target;
 
 /// How much is read, at most, of what the input makes.

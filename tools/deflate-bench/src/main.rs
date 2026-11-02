@@ -1,4 +1,4 @@
-//! Times hivepack-deflate against zlib on the same inputs: decompressing
+//! Times hivepack::deflate against zlib on the same inputs: decompressing
 //! raw deflate streams that zlib wrote at each level, as in a ZIP archive,
 //! or, with `--compress`, compressing at each level. The compressed streams
 //! must be the same, byte for byte.
@@ -24,7 +24,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress};
-use hivepack_deflate::{Deflate, Flush, InBuffer, Inflate, OutBuffer, Status};
+use hivepack::deflate::{Deflate, Flush, InBuffer, Inflate, OutBuffer, Status};
 
 type Result<T> = std::result::Result<T, String>;
 

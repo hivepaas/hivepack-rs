@@ -3,7 +3,7 @@
 
 use std::process::ExitCode;
 
-use hivepack_zip::{Error, Flags, OpenFlags, SystemType};
+use hivepack::zip::{Error, Flags, OpenFlags, SystemType};
 use ziptool::{Getopt, zip_close, zip_open};
 
 const TRYOPEN_USAGE: &str = "usage: {} [-cent] file\n\n\t-c\tcheck consistency\n\t-e\texclusively open archive\n\t-n\tcreate new file\n\t-s\tprint error string\n\t-t\ttruncate file to size 0";

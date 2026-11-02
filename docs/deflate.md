@@ -1,22 +1,22 @@
 # Porting zlib
 
-`hivepack-deflate` is a port of the official Deflate library, [zlib](https://zlib.net), to safe Rust. ZIP needs it first (see [zip.md](zip.md)), and gzip and every other Deflate-based format will use it too. The goal is the one [porting.md](porting.md) sets for zstd: the same output as zlib, at the same speed.
+`hivepack::deflate` is a port of the official Deflate library, [zlib](https://zlib.net), to safe Rust. ZIP needs it first (see [zip.md](zip.md)), and gzip and every other Deflate-based format will use it too. The goal is the one [porting.md](porting.md) sets for zstd: the same output as zlib, at the same speed.
 
 ## The version
 
-The port follows zlib **1.3.2** (tag `v1.3.2`, commit `da607da739fa6047df13e66a2af6b8bec7c2a498`, February 2026), the latest release as of October 2026. `hivepack_deflate::UPSTREAM_VERSION` names it.
+The port follows zlib **1.3.2** (tag `v1.3.2`, commit `da607da739fa6047df13e66a2af6b8bec7c2a498`, February 2026), the latest release as of October 2026. `hivepack::deflate::UPSTREAM_VERSION` names it.
 
 ## What following the official code means
 
 The rules of [porting.md](porting.md):
 
-- **The same layout.** Each file of zlib becomes a module of the same name: `inflate.c` becomes `crates/deflate/src/inflate.rs`, `inffixed.h` becomes `inffixed.rs`.
+- **The same layout.** Each file of zlib becomes a module of the same name: `inflate.c` becomes `crates/hivepack/src/deflate/inflate.rs`, `inffixed.h` becomes `inffixed.rs`.
 - **The same names**, in snake case, with the C name in every doc comment. A stream and its state are one type, `Inflate` or `Deflate`, whose methods drop the prefix: `inflateSetDictionary` becomes `Inflate::set_dictionary`, `deflateParams` becomes `Deflate::params`.
 - **The same algorithms, constants and tables.** The fixed-code tables of `inffixed.h` are copied as they are. The CRC tables of `crc32.h` and the static trees of `trees.h` are computed while compiling, by the functions zlib uses to write those files, and tests compare them with the files. The compressor's configuration table is zlib's. That is what makes the output identical.
 - **The same results.** A call returns zlib's code, as `Result<Status, Error>`, and an error carries the message zlib leaves in `strm->msg`, such as `"invalid distance too far back"`.
 - **Differences are marked** with a comment starting `Differs from zlib:`.
 
-The main difference is the stream itself. zlib's `z_stream` holds pointers to the caller's input and output; the port takes them for each call as an `InBuffer` and an `OutBuffer`, a slice and a position, as `hivepack-zstd` does. Positions in the window, the code tables and the buffers are indices. A stream cannot be used before it is initialised or after it ends, so the checks zlib makes for that (`inflateStateCheck`, `deflateStateCheck`) have nothing to check.
+The main difference is the stream itself. zlib's `z_stream` holds pointers to the caller's input and output; the port takes them for each call as an `InBuffer` and an `OutBuffer`, a slice and a position, as `hivepack::zstd` does. Positions in the window, the code tables and the buffers are indices. A stream cannot be used before it is initialised or after it ends, so the checks zlib makes for that (`inflateStateCheck`, `deflateStateCheck`) have nothing to check.
 
 The compressor keeps zlib's memory layout where the output depends on it: the symbol buffer overlays the pending output in one buffer (`pending_buf`), and the window's bytes past the input are those zlib leaves there. The few other differences:
 
@@ -137,4 +137,4 @@ When zlib releases a new version:
 
 ## Licenses
 
-The port is derived from zlib, which is under the zlib license. That is why `hivepack-deflate` is under the zlib license, and its [LICENSE](../crates/deflate/LICENSE) keeps zlib's notice and says that this is an altered version, as the license asks. `tests/infcover.rs` is derived from zlib's `test/infcover.c`, under the same license.
+The port is derived from zlib, which is under the zlib license. That is why `hivepack::deflate` is under the zlib license, and its [LICENSE](../crates/hivepack/src/deflate/LICENSE) keeps zlib's notice and says that this is an altered version, as the license asks. `tests/infcover.rs` is derived from zlib's `test/infcover.c`, under the same license.

@@ -1,4 +1,4 @@
-//! Opens the input as a ZIP archive with hivepack-zip, makes the edits its
+//! Opens the input as a ZIP archive with hivepack::zip, makes the edits its
 //! first bytes choose (the count, then a kind and an index for each),
 //! adding and replacing data, changing methods and encrypting among them,
 //! and writes
@@ -7,7 +7,7 @@
 //! not deleted, in order, as edited: their names, comments, attributes,
 //! times, sizes and data, read with the passwords the edits set. A panic
 //! is a bug.
-//! `crates/zip/tests/oracle.rs` compares the edits and what is written
+//! `crates/hivepack/tests/zip_oracle.rs` compares the edits and what is written
 //! with libzip through the oracle.
 
 #![no_main]
@@ -15,7 +15,7 @@
 use std::io::{Cursor, Read};
 use std::sync::{Arc, Mutex};
 
-use hivepack_zip::{
+use hivepack::zip::{
     Archive, ArchiveFlags, BufferSource, Closed, EXTRA_FIELD_ALL, EXTRA_FIELD_NEW, ErrorCode,
     Flags, OpenFlags, ReadAt, Stat, cm, em, stat,
 };
@@ -96,7 +96,7 @@ fn archive_state<R: ReadAt>(za: &Archive<R>) -> (Vec<EntryState>, Vec<u8>) {
 
 /// That `written` has the entries of `expected`, in order, as they were
 /// edited. What libzip writes from an edited archive is not always what
-/// its API said before (see `check_written` in `crates/zip/tests/oracle.rs`,
+/// its API said before (see `check_written` in `crates/hivepack/tests/zip_oracle.rs`,
 /// which this follows).
 /// Whether an MS-DOS time and date name a moment as they are, which the
 /// conversions to and from a `time_t` leave as it was.

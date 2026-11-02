@@ -1,4 +1,4 @@
-//! Compresses the input with hivepack-deflate and with zlib, given in the
+//! Compresses the input with hivepack::deflate and with zlib, given in the
 //! same pieces with the same flushes, and checks that every call agrees:
 //! the same result, the same bytes read and written, and the same bytes. A
 //! panic or a difference is a bug.
@@ -9,7 +9,7 @@
 #![no_main]
 
 use flate2::{Compress, Compression, FlushCompress};
-use hivepack_deflate::{Deflate, ErrorCode, Flush, InBuffer, OutBuffer, Status};
+use hivepack::deflate::{Deflate, ErrorCode, Flush, InBuffer, OutBuffer, Status};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Debug, PartialEq)]

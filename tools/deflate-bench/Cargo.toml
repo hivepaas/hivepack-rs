@@ -1,7 +1,7 @@
 [package]
 name = "deflate-bench"
 version = "0.0.0"
-description = "Times hivepack-deflate against zlib on the same inputs"
+description = "Times hivepack::deflate against zlib on the same inputs"
 publish = false
 license.workspace = true
 edition.workspace = true
@@ -11,9 +11,9 @@ rust-version.workspace = true
 workspace = true
 
 [features]
-unsafe-fast = ["hivepack-deflate/unsafe-fast"]
+unsafe-fast = ["hivepack/deflate-unsafe-fast"]
 
 [dependencies]
-hivepack-deflate.workspace = true
+hivepack = { workspace = true, features = ["deflate"] }
 libz-sys.workspace = true
 flate2.workspace = true
