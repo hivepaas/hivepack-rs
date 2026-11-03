@@ -2,7 +2,7 @@
 
 Read and write archives and compressed files in Rust: one library for many formats, in the spirit of [libarchive](https://github.com/libarchive/libarchive).
 
-> **Status:** version 0.2.0, on crates.io as one crate, [`hivepack`](crates/hivepack). Before 1.0 a minor release may change an API: see [CHANGELOG.md](CHANGELOG.md). Security reports: [SECURITY.md](SECURITY.md).
+> **Status:** version 0.2.1, on crates.io as one crate, [`hivepack`](crates/hivepack). Before 1.0 a minor release may change an API: see [CHANGELOG.md](CHANGELOG.md). Security reports: [SECURITY.md](SECURITY.md).
 
 ```toml
 [dependencies]
