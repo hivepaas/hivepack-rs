@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1
+
+- `open`: a `.tlz` file is `.tar.lzma` (its short name, as file managers give it) when its bytes are no other format's: lzip's `.tlz` is still told by its magic.
+
 ## 0.2.0
 
 - `sevenz`: `Writer::set_method` changes the method from the next file on, which starts a folder of its own: what is compressed already can be stored with `Method::Copy` beside what is not.

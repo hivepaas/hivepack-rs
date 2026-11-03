@@ -94,6 +94,14 @@ fn lzma_is_told_by_its_name() {
     let (layers, _, data) = open_named(&gzip(&file), Some("backup.tar.lzma.gz")).unwrap();
     assert_eq!(layers, [Layer::Gzip, Layer::Lzma]);
     assert!(data == tar);
+    // `.tlz`, `.tar.lzma`'s short name, as file managers give it.
+    let (layers, container, data) = open_named(&file, Some("backup.TLZ")).unwrap();
+    assert_eq!((layers, container), (vec![Layer::Lzma], Container::Tar));
+    assert!(data == tar);
+    // A `.tlz` that is lzip's is lzip, by its magic.
+    let (layers, container, data) = open_named(&lzip(&tar), Some("backup.tlz")).unwrap();
+    assert_eq!((layers, container), (vec![Layer::Lzip], Container::Tar));
+    assert!(data == tar);
 }
 
 #[test]

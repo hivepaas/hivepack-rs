@@ -294,6 +294,14 @@ fn is_zip_volume_name(name: &str) -> bool {
         || ext.len() >= 3 && digits(ext) && stem.ends_with(".zip")
 }
 
+/// Whether `name` is a `.lzma` file's: `.lzma`, or `.tlz`, the short name of
+/// `.tar.lzma` that file managers give it. A `.tlz` that is lzip's, which some
+/// give that name too, has lzip's magic and is told by it before its name.
+fn is_lzma_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.ends_with(".lzma") || name.ends_with(".tlz")
+}
+
 /// What `head`, the first [`HEAD_LEN`] bytes of a stream (fewer if it is
 /// shorter), or [`ISO_HEAD_LEN`] to tell an ISO 9660 image, or
 /// [`UDF_HEAD_LEN`] to tell a UDF volume, is. `name`, the file's name if
@@ -371,7 +379,7 @@ pub fn detect(head: &[u8], name: Option<&str>) -> Detected {
     if is_iso(head) {
         return Detected::Container(Container::Iso);
     }
-    if name.is_some_and(|n| n.to_ascii_lowercase().ends_with(".lzma")) {
+    if name.is_some_and(is_lzma_name) {
         return Detected::Layer(Layer::Lzma);
     }
     if name.is_some_and(is_zip_volume_name) {
