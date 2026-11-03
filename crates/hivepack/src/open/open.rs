@@ -124,8 +124,8 @@ where
     }
 
     /// The file's name, which tells `.lzma`, the one layer without magic
-    /// bytes: `notes.txt.lzma`, or `backup.tar.lzma.age` under its age
-    /// layer.
+    /// bytes: `notes.txt.lzma`, `backup.tlz` (`.tar.lzma`), or
+    /// `backup.tar.lzma.age` under its age layer.
     pub fn name(mut self, name: &str) -> Opener<F> {
         self.name = Some(name.to_owned());
         self
