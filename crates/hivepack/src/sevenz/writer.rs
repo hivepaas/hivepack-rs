@@ -461,6 +461,9 @@ pub struct Writer<W> {
     /// Whether the last entry is a file, which takes data.
     in_file: bool,
     folder: Option<OpenFolder>,
+    /// The method changed since the open folder began: the next file starts
+    /// another.
+    method_changed: bool,
     folders: Vec<(FolderInfo, Vec<(u64, u32)>)>,
     pack_total: u64,
     failed: Option<Error>,
@@ -509,6 +512,7 @@ impl<W: Write + Seek> Writer<W> {
             entries: Vec::new(),
             in_file: false,
             folder: None,
+            method_changed: false,
             spare,
             folders: Vec::new(),
             pack_total: 0,
@@ -540,6 +544,32 @@ impl<W: Write + Seek> Writer<W> {
         Ok(())
     }
 
+    /// Compresses the files from the next with data on with `method`, in a
+    /// folder of their own: what is compressed already can be stored with
+    /// [`Method::Copy`] beside what is not. A file begun keeps the method it
+    /// began with. A method that cannot be, as in [`Writer::with_options`], is
+    /// [`Error::Param`], and the method stays as it was.
+    pub fn set_method(&mut self, method: Method) -> Result<()> {
+        if let Some(e) = self.failed {
+            return Err(e);
+        }
+        if method == self.options.method {
+            return Ok(());
+        }
+        let options = WriteOptions {
+            method,
+            ..self.options.clone()
+        };
+        let lzma = matches!(method, Method::Lzma { .. } | Method::Lzma2 { .. });
+        if options.filter != Filter::None && !lzma {
+            return Err(Error::Param);
+        }
+        make_compressor(&options, &mut None)?;
+        self.options.method = method;
+        self.method_changed = true;
+        Ok(())
+    }
+
     /// A file with what `reader` gives, and the bytes it was.
     pub fn add_file<R: Read>(&mut self, entry: NewEntry, reader: &mut R) -> io::Result<u64> {
         self.start_file(entry).map_err(io::Error::other)?;
@@ -564,10 +594,11 @@ impl<W: Write + Seek> Writer<W> {
     fn prepare_folder(&mut self) -> io::Result<()> {
         if let Some(folder) = &self.folder {
             let room = self.options.solid_block_size.unwrap_or(0);
-            if folder.unpacked >= room {
+            if folder.unpacked >= room || self.method_changed {
                 self.close_folder()?;
             }
         }
+        self.method_changed = false;
         if self.folder.is_none() {
             let compressor =
                 make_compressor(&self.options, &mut self.spare).map_err(io::Error::other)?;

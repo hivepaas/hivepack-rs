@@ -458,6 +458,72 @@ fn the_solid_block_size_makes_folders() {
     assert_eq!(folders(Some(250)), 2);
 }
 
+/// A method set takes the next file on into a folder of its own, a file begun
+/// keeping the one it began with, and a method that cannot be is refused.
+#[test]
+fn set_method_starts_a_folder_at_the_next_file() {
+    let mut rng = Rng(0x7a_5e7);
+    let text = b"xin ch\xc3\xa0o ".repeat(10_000);
+    let noise: Vec<u8> = (0..60_000).map(|_| rng.next() as u8).collect();
+    let mut w = Writer::new(Cursor::new(Vec::new())).unwrap();
+    let mut items = Vec::new();
+    let file = |w: &mut Writer<Cursor<Vec<u8>>>, items: &mut Vec<Item>, name: &str, data: &[u8]| {
+        w.start_file(NewEntry::new(name)).unwrap();
+        w.write_all(data).unwrap();
+        items.push(Item {
+            entry: NewEntry::new(name),
+            data: Some(data.to_vec()),
+        });
+    };
+    file(&mut w, &mut items, "a.txt", &text);
+    // Begun, a file keeps its method: e.txt stays whole in the first folder.
+    w.start_file(NewEntry::new("e.txt")).unwrap();
+    w.write_all(&text[..500]).unwrap();
+    w.set_method(Method::Copy).unwrap();
+    w.write_all(&text[500..]).unwrap();
+    items.push(Item {
+        entry: NewEntry::new("e.txt"),
+        data: Some(text.clone()),
+    });
+    file(&mut w, &mut items, "b.jpg", &noise);
+    file(&mut w, &mut items, "c.jpg", &noise[..20_000]);
+    // The same method again changes nothing; one that cannot be changes nothing.
+    w.set_method(Method::Copy).unwrap();
+    assert_eq!(
+        w.set_method(Method::Deflate { level: 0 }),
+        Err(Error::Param)
+    );
+    w.set_method(Method::Lzma2 { preset: 6 }).unwrap();
+    file(&mut w, &mut items, "d.txt", &text);
+    let archive = w.finish().unwrap().into_inner();
+
+    let options = WriteOptions::default();
+    check_reads(&archive, &options, &items, "set_method");
+    let a = Archive::open(Cursor::new(archive.clone())).unwrap();
+    let folders: Vec<Option<usize>> = a.entries().map(|e| e.folder).collect();
+    assert_eq!(folders, [Some(0), Some(0), Some(1), Some(1), Some(2)]);
+    // Stored, the second folder is as large packed as not; the others shrink.
+    assert_eq!(a.folder_packed_size(1), a.folder_size(1));
+    assert!(a.folder_packed_size(0) < a.folder_size(0) / 10);
+    assert!(a.folder_packed_size(2) < a.folder_size(2) / 10);
+
+    let dir = scratch("set-method");
+    let path = dir.join("set-method.7z");
+    std::fs::write(&path, &archive).unwrap();
+    check_tool(&path, &dir, &options, &items, "set_method");
+
+    // With a filter, only LZMA and LZMA2 can be set, as with_options says.
+    let mut w = Writer::with_options(
+        Cursor::new(Vec::new()),
+        WriteOptions {
+            filter: Filter::X86,
+            ..WriteOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(w.set_method(Method::Copy), Err(Error::Param));
+}
+
 /// What the header holds is not to be found without the password, when asked.
 #[test]
 fn encrypting_hides_what_it_should() {
