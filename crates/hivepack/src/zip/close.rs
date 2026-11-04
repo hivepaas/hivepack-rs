@@ -250,7 +250,7 @@ impl<R: ReadAt> Archive<R> {
 
     /// The loop body of `zip_close`: writes entry `i`, its local header and
     /// its data, and keeps where in its dirent of changes.
-    fn write_entry<W: Write + Seek>(
+    pub(crate) fn write_entry<W: Write + Seek>(
         &mut self,
         i: usize,
         out: &mut Output<W>,
@@ -348,6 +348,54 @@ impl<R: ReadAt> Archive<R> {
             write_data_descriptor(out, de, de.needs_zip64(Flags::NONE))?;
         }
         Ok(())
+    }
+
+    /// Writes the new entry `i`, its local header and the data `reader` gives,
+    /// read once from its start, of which `stat` and `attributes` tell what is
+    /// known beforehand: what [`Writer`](crate::zip::Writer) writes an entry with,
+    /// as [`Archive::write_entry`] writes one of new data. Not in libzip.
+    pub(crate) fn write_reader<W: Write + Seek>(
+        &mut self,
+        i: usize,
+        reader: &mut dyn std::io::Read,
+        stat: crate::zip::zip::Stat<'static>,
+        attributes: crate::zip::source_data::FileAttributes,
+        out: &mut Output<W>,
+    ) -> Result<()> {
+        let Some(mut de) = self.entry[i].changes.as_deref().cloned() else {
+            return Err(Error::new(ErrorCode::Internal, 0));
+        };
+        de.offset = out.tell_write()?;
+        let base: Base<'_, R> = Base::Reader {
+            reader,
+            stat,
+            attributes,
+            layer: crate::zip::source_stack::Layer::new(0),
+        };
+        let added = add_data(
+            base,
+            &mut de,
+            out,
+            false,
+            self.open_flags.intersects(OpenFlags::CHECKCONS),
+            self.default_password.as_deref(),
+            self.random.as_ref(),
+        );
+        if let Some(changes) = self.entry[i].changes.as_deref_mut() {
+            *changes = de;
+        }
+        added
+    }
+
+    /// Writes the central directory of the entries `filelist`, which are
+    /// written: what [`Writer`](crate::zip::Writer) ends with.
+    pub(crate) fn write_cdir_of<W: Write + Seek>(
+        &mut self,
+        filelist: &[usize],
+        out: &mut Output<W>,
+    ) -> Result<()> {
+        write_cdir(self, filelist, out)?;
+        out.commit_write()
     }
 
     /// Whether anything changed, and how many entries are not deleted:
