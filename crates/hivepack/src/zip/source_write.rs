@@ -108,6 +108,11 @@ impl<W: Write + Seek> Output<W> {
         Ok(())
     }
 
+    /// What it writes to.
+    pub(crate) fn into_inner(self) -> W {
+        self.w
+    }
+
     /// Writes what is buffered: `zip_source_commit_write`.
     pub(crate) fn commit_write(&mut self) -> Result<()> {
         self.w

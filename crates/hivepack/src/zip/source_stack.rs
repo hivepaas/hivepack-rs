@@ -13,9 +13,10 @@
 //! decompress, compute the CRC and compress.
 //! Each layer keeps the state libzip keeps in its `zip_source_t`.
 
+use std::io::Read;
 use std::sync::Arc;
 
-use crate::zip::error::{Error, Result};
+use crate::zip::error::{Error, ErrorCode, Result};
 use crate::zip::get_encryption_implementation::{Decrypt, Encrypt};
 use crate::zip::source::ReadAt;
 use crate::zip::source_compress::{Compress, Decompress};
@@ -448,6 +449,15 @@ pub(crate) enum Base<'a, R: ?Sized> {
         layer: Layer<u64>,
     },
     Entry(Box<Stack<'a, R>>),
+    /// Data read once from its start, as [`Writer`](crate::zip::Writer) adds it:
+    /// what is known of it is told beforehand.
+    Reader {
+        reader: &'a mut dyn Read,
+        stat: Stat<'static>,
+        attributes: FileAttributes,
+        /// the bytes read so far
+        layer: Layer<u64>,
+    },
 }
 
 impl<R: ReadAt + ?Sized> Base<'_, R> {
@@ -467,6 +477,14 @@ impl<R: ReadAt + ?Sized> Base<'_, R> {
                 Ok(())
             }
             Base::Entry(stack) => stack.open(),
+            Base::Reader { layer, .. } => {
+                // It cannot go back to its start.
+                if layer.ctx != 0 {
+                    return Err(Error::new(ErrorCode::Inval, 0));
+                }
+                layer.opened();
+                Ok(())
+            }
         }
     }
 
@@ -478,12 +496,24 @@ impl<R: ReadAt + ?Sized> Base<'_, R> {
                 Ok(n)
             }),
             Base::Entry(stack) => stack.read(data),
+            Base::Reader { reader, layer, .. } => layer.read(data, &mut |position, buf| loop {
+                match reader.read(buf) {
+                    Ok(n) => {
+                        *position += n as u64;
+                        return Ok(n);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) => {
+                        return Err(Error::new(ErrorCode::Read, e.raw_os_error().unwrap_or(0)));
+                    }
+                }
+            }),
         }
     }
 
     fn close(&mut self) -> Result<()> {
         match self {
-            Base::Data { .. } => Ok(()),
+            Base::Data { .. } | Base::Reader { .. } => Ok(()),
             Base::Entry(stack) => stack.close(),
         }
     }
@@ -493,6 +523,7 @@ impl<R: ReadAt + ?Sized> Base<'_, R> {
         match self {
             Base::Data { source, .. } => source.stat(),
             Base::Entry(stack) => stack.stat(),
+            Base::Reader { stat, .. } => Ok(*stat),
         }
     }
 
@@ -501,6 +532,7 @@ impl<R: ReadAt + ?Sized> Base<'_, R> {
         match self {
             Base::Data { source, .. } => source.file_attributes(),
             Base::Entry(stack) => stack.file_attributes(),
+            Base::Reader { attributes, .. } => Ok(*attributes),
         }
     }
 
@@ -509,6 +541,7 @@ impl<R: ReadAt + ?Sized> Base<'_, R> {
         match self {
             Base::Data { source, .. } => source.dos_time(),
             Base::Entry(stack) => Ok(stack.dos_time()),
+            Base::Reader { .. } => Ok(None),
         }
     }
 }

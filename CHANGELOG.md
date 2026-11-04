@@ -3,6 +3,7 @@
 ## Unreleased
 
 - `extract`: each extractor writes into a `Sink` in place of a folder too (`extract_zip_to`, `extract_tar_to`, `extract_7z_to` and the others), after the same checks and in the same order: to convert an archive entry by entry, without a folder in between. See [docs/extract.md](docs/extract.md#into-something-other-than-a-folder).
+- `zip`: `Writer` writes an archive an entry at a time, each entry's data read once from a `Read` as it is added, and the central directory at `finish`: to convert an archive entry by entry. What it writes is what `Archive::close_to` writes from the same entries.
 
 ## 0.2.1
 
