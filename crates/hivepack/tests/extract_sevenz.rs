@@ -107,8 +107,8 @@ fn archives_extract_to_their_files() {
     for name in ["plain.7z", "deflate.7z", "stored.7z", "bcj2.7z"] {
         let scratch = Scratch::new();
         let out = scratch.out();
-        let summary = extract(&archive(name), &out, &Options::default())
-            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let summary =
+            extract(&archive(name), &out, &portable()).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(
             (summary.files, summary.directories, summary.links),
             (6, 3, 0),
@@ -147,7 +147,7 @@ fn encrypted_archives_need_their_password() {
     // the extraction's.
     let data = archive("encrypted.7z");
     let scratch = Scratch::new();
-    let e = extract(&data, &scratch.out(), &Options::default()).unwrap_err();
+    let e = extract(&data, &scratch.out(), &portable()).unwrap_err();
     assert!(
         matches!(
             e.kind,
@@ -188,7 +188,7 @@ fn encrypted_archives_need_their_password() {
     };
     let mut opened = Archive::open_with(Cursor::new(data), &opening).unwrap();
     let scratch = Scratch::new();
-    extract_7z(&mut opened, &scratch.out(), &Options::default()).unwrap();
+    extract_7z(&mut opened, &scratch.out(), &portable()).unwrap();
     check_files(&scratch.out(), "encrypted-headers.7z");
 }
 
@@ -197,7 +197,7 @@ fn links_are_refused_written_as_files_or_kept_inside() {
     let data = archive("links.7z");
     // By default the first link stops it, before anything is written.
     let scratch = Scratch::new();
-    let e = extract(&data, &scratch.out(), &Options::default()).unwrap_err();
+    let e = extract(&data, &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Link), "{e}");
     assert_eq!(e.name.as_deref(), Some(&b"docs/link"[..]));
     assert!(!scratch.out().exists());
@@ -245,7 +245,7 @@ fn links_are_refused_written_as_files_or_kept_inside() {
 #[test]
 fn two_names_of_one_path_are_refused() {
     let scratch = Scratch::new();
-    let e = extract(&archive("cases.7z"), &scratch.out(), &Options::default()).unwrap_err();
+    let e = extract(&archive("cases.7z"), &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Duplicate { first: 0 }), "{e}");
     assert!(!scratch.out().exists());
 }
@@ -255,7 +255,7 @@ fn two_names_of_one_path_are_refused() {
 fn setuid_bits_are_not_kept() {
     use std::os::unix::fs::PermissionsExt;
     let scratch = Scratch::new();
-    extract(&archive("modes.7z"), &scratch.out(), &Options::default()).unwrap();
+    extract(&archive("modes.7z"), &scratch.out(), &portable()).unwrap();
     let mode = std::fs::metadata(scratch.out().join("setuid.sh"))
         .unwrap()
         .permissions()
@@ -288,7 +288,7 @@ fn names_that_climb_out_are_refused_before_writing() {
     // `readme.md` becomes `../dme.md`: as long in UTF-16.
     let data = renamed("readme.md", "../dme.md");
     let scratch = Scratch::new();
-    let e = extract(&data, &scratch.out(), &Options::default()).unwrap_err();
+    let e = extract(&data, &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Name(NameError::Dot)), "{e}");
     assert!(!scratch.out().exists());
     // Skipped, the rest is written, and nothing outside.
@@ -308,7 +308,7 @@ fn data_that_fails_its_crc_is_removed() {
     data[at] = b'M';
     let scratch = Scratch::new();
     let out = scratch.out();
-    let e = extract(&data, &out, &Options::default()).unwrap_err();
+    let e = extract(&data, &out, &portable()).unwrap_err();
     assert!(
         matches!(e.kind, ErrorKind::SevenZip(hivepack::sevenz::Error::Crc)),
         "{e}"
@@ -347,7 +347,7 @@ fn nothing_is_overwritten() {
     let out = scratch.out();
     std::fs::create_dir_all(&out).unwrap();
     std::fs::write(out.join("readme.md"), b"mine").unwrap();
-    let e = extract(&archive("plain.7z"), &out, &Options::default()).unwrap_err();
+    let e = extract(&archive("plain.7z"), &out, &portable()).unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Exists), "{e}");
     assert_eq!(std::fs::read(out.join("readme.md")).unwrap(), b"mine");
 }
@@ -445,4 +445,12 @@ fn cancelled_before_it_starts() {
     let e = extract(&archive("plain.7z"), &scratch.out(), &cancelled).unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Cancelled), "{e}");
     assert!(!scratch.out().exists());
+}
+
+/// The options of these tests: names checked by every system's rules, as Windows
+/// and a case-insensitive file system have them, wherever the tests run.
+fn portable() -> hivepack::extract::Options {
+    let mut options = hivepack::extract::Options::default();
+    options.name_rules = hivepack::extract::NameRules::Portable;
+    options
 }

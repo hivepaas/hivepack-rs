@@ -19,11 +19,13 @@ use crate::iso::{
 
 use crate::extract::destination::{Target, TargetFile};
 use crate::extract::error::{Error, ErrorKind};
+use crate::extract::plan::settle;
 use crate::extract::plan::{Item, Kind, OnRefused, Options, check};
 use crate::extract::progress::Run;
 use crate::extract::sink::{Sink, SinkState};
+use crate::extract::tar::named_of;
 use crate::extract::tar::{
-    Entry, LinkPlan, bytes_to_write, copy_of, cut_short, name_of, plan_links, read_rest, write_with,
+    Entry, LinkPlan, bytes_to_write, copy_of, cut_short, plan_links, read_rest, write_with,
 };
 use crate::extract::zip::{Summary, open_destination, set_dir_times};
 
@@ -103,7 +105,7 @@ fn read_headers<R: Read>(r: R, run: &Run<'_>, options: &Options) -> Result<First
         }
         let raw = h.path.clone().unwrap_or_default();
         // The root directory, ".", is not an entry.
-        let Some(name) = name_of(&raw, options) else {
+        let Some((text, name)) = named_of(&raw, options) else {
             entries.push(entry);
             continue;
         };
@@ -129,6 +131,7 @@ fn read_headers<R: Read>(r: R, run: &Run<'_>, options: &Options) -> Result<First
         items.push(Item {
             index,
             raw_name: raw,
+            text,
             name,
             kind,
             size,
@@ -245,8 +248,9 @@ fn extract_into<R: Read, F: FnMut() -> io::Result<R>, T: Target>(
     let run = Run::new(options);
 
     let first = open().map_err(|e| Error::global(ErrorKind::Io(e)))?;
-    let (entries, items, refused, cut) = read_headers(first, &run, options)?;
-    let (kept, mut skipped) = check(&items, options)?;
+    let (entries, mut items, refused, cut) = read_headers(first, &run, options)?;
+    let settled = settle(&mut items, options)?;
+    let (kept, mut skipped) = check(&items, &settled, options)?;
     skipped.splice(0..0, refused);
     skipped.sort_by_key(|e| e.index);
     let plans = plan_links(&entries, &items, &kept, options, &mut skipped)?;
@@ -266,6 +270,7 @@ fn extract_into<R: Read, F: FnMut() -> io::Result<R>, T: Target>(
     let destination = make()?;
     let mut summary = Summary {
         skipped,
+        renamed: settled.renamed,
         ..Summary::default()
     };
 

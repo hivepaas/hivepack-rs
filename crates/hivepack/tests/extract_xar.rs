@@ -142,7 +142,7 @@ fn packages_expand_as_pkgutil_expands_them() {
     let readme = b"example\n";
     let scratch = Scratch::new();
     let out = scratch.out();
-    extract(&testdata_xar("tiny.pkg"), &out, &Options::default()).unwrap();
+    extract(&testdata_xar("tiny.pkg"), &out, &portable()).unwrap();
     assert_eq!(
         listing(&out),
         [
@@ -162,7 +162,7 @@ fn packages_expand_as_pkgutil_expands_them() {
     );
     let scratch = Scratch::new();
     let out = scratch.out();
-    extract(&testdata_xar("product.pkg"), &out, &Options::default()).unwrap();
+    extract(&testdata_xar("product.pkg"), &out, &portable()).unwrap();
     assert_eq!(
         listing(&out),
         [
@@ -239,7 +239,7 @@ fn a_xip_file_s_content_and_other_payloads() {
     let xip = xar(&[("Content", &pbzx(&app)), ("Metadata", b"<plist/>\n")]);
     let scratch = Scratch::new();
     let out = scratch.out();
-    let summary = extract(&xip, &out, &Options::default()).unwrap();
+    let summary = extract(&xip, &out, &portable()).unwrap();
     assert_eq!(
         listing(&out),
         [
@@ -254,7 +254,7 @@ fn a_xip_file_s_content_and_other_payloads() {
     let package = xar(&[("Payload", &app), ("Scripts", b"#!/bin/sh\n")]);
     let scratch = Scratch::new();
     let out = scratch.out();
-    extract(&package, &out, &Options::default()).unwrap();
+    extract(&package, &out, &portable()).unwrap();
     assert_eq!(read(&out.join("Scripts")), b"#!/bin/sh\n");
     assert_eq!(
         read(&out.join("Payload/Example.app/Contents/Info.plist")),
@@ -270,7 +270,7 @@ fn payloads_are_checked_before_anything_is_written() {
     let evil = odc(&[("ok", b"fine"), ("../escape", b"evil")]);
     let archive = xar(&[("Bom", b"bom"), ("Payload", &pbzx(&evil))]);
     let scratch = Scratch::new();
-    let e = extract(&archive, &scratch.out(), &Options::default()).unwrap_err();
+    let e = extract(&archive, &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Name(NameError::Dot)), "{e}");
     assert_eq!(e.index, Some(1));
     assert_eq!(e.name.as_deref(), Some(&b"Payload/./../escape"[..]));
@@ -292,7 +292,7 @@ fn payloads_are_checked_before_anything_is_written() {
     let content = pbzx(&odc(&[("a", b"a")]));
     let archive = xar(&[("Content", &content[..content.len() - 8])]);
     let scratch = Scratch::new();
-    let e = extract(&archive, &scratch.out(), &Options::default()).unwrap_err();
+    let e = extract(&archive, &scratch.out(), &portable()).unwrap_err();
     assert_eq!(e.name.as_deref(), Some(&b"Content"[..]), "{e}");
     assert!(!scratch.out().exists());
 }
@@ -306,7 +306,7 @@ fn a_checksum_that_does_not_match_stops_before_writing() {
     let last = archive.len() - 1;
     archive[last] ^= 1;
     let scratch = Scratch::new();
-    let e = extract(&archive, &scratch.out(), &Options::default()).unwrap_err();
+    let e = extract(&archive, &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Xar(_)), "{e}");
     assert!(!scratch.out().exists());
 }
@@ -328,8 +328,16 @@ fn an_archive_that_changes_between_readings_stops() {
             }))
         },
         &scratch.out(),
-        &Options::default(),
+        &portable(),
     )
     .unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Changed), "{e}");
+}
+
+/// The options of these tests: names checked by every system's rules, as Windows
+/// and a case-insensitive file system have them, wherever the tests run.
+fn portable() -> hivepack::extract::Options {
+    let mut options = hivepack::extract::Options::default();
+    options.name_rules = hivepack::extract::NameRules::Portable;
+    options
 }

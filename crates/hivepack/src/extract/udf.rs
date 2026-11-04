@@ -15,12 +15,12 @@ use crate::udf::{Node, Timespec, Udf, VType};
 use crate::extract::destination::{Target, TargetFile};
 use crate::extract::error::{Error, ErrorKind};
 use crate::extract::name::NameError;
+use crate::extract::plan::settle;
 use crate::extract::plan::{Item, Kind, OnRefused, Options, check};
 use crate::extract::progress::Run;
 use crate::extract::sink::{Sink, SinkState};
-use crate::extract::tar::{
-    Entry, LinkPlan, bytes_to_write, copy_of, name_of, plan_links, write_with,
-};
+use crate::extract::tar::named_of;
+use crate::extract::tar::{Entry, LinkPlan, bytes_to_write, copy_of, plan_links, write_with};
 use crate::extract::zip::{Summary, open_destination, set_dir_times};
 
 /// A UDF time as a `SystemTime`.
@@ -163,11 +163,17 @@ fn walk<R: Read + Seek>(udf: &mut Udf<R>, run: &Run<'_>, options: &Options) -> R
             if !met_before {
                 met.insert(key, (index, raw.clone()));
             }
-            let name = name_of(&raw, options).unwrap_or(Err(NameError::Empty));
+            let (text, name) = named_of(&raw, options).unwrap_or_else(|| {
+                (
+                    String::from_utf8_lossy(&raw).into_owned(),
+                    Err(NameError::Empty),
+                )
+            });
             let size = if kind == Kind::File { stat.size } else { 0 };
             items.push(Item {
                 index,
                 raw_name: raw.clone(),
+                text,
                 name,
                 kind,
                 size,
@@ -243,8 +249,9 @@ fn extract_into<R: Read + Seek, T: Target>(
     let limits = &options.limits;
     let run = Run::new(options);
 
-    let (entries, items, refused) = walk(udf, &run, options)?;
-    let (kept, mut skipped) = check(&items, options)?;
+    let (entries, mut items, refused) = walk(udf, &run, options)?;
+    let settled = settle(&mut items, options)?;
+    let (kept, mut skipped) = check(&items, &settled, options)?;
     skipped.splice(0..0, refused);
     skipped.sort_by_key(|e| e.index);
     let plans = plan_links(&entries, &items, &kept, options, &mut skipped)?;
@@ -264,6 +271,7 @@ fn extract_into<R: Read + Seek, T: Target>(
     let destination = make()?;
     let mut summary = Summary {
         skipped,
+        renamed: settled.renamed,
         ..Summary::default()
     };
 

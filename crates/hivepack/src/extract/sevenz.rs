@@ -16,8 +16,9 @@ use crate::sevenz::{Archive, Entry, Files};
 
 use crate::extract::destination::Target;
 use crate::extract::error::{Error, ErrorKind};
-use crate::extract::name::{NameError, check_name, link_on_the_way, link_target, prepare};
-use crate::extract::plan::{Item, Kind, Links, Names, OnRefused, Options, check, fold};
+use crate::extract::name::{NameError, link_on_the_way, link_target};
+use crate::extract::plan::{Item, Kind, Links, OnRefused, Options, check, fold};
+use crate::extract::plan::{named, settle, skips_links};
 use crate::extract::progress::Run;
 use crate::extract::sink::{Sink, SinkState};
 use crate::extract::tar::write_with;
@@ -56,17 +57,12 @@ fn item(entry: &Entry, folders: &[(u64, u64)], options: &Options) -> Item {
     let index = entry.index as u64;
     let raw_name = entry.name.as_bytes().to_vec();
     // A name that is not UTF-16 decodes to U+FFFD: refused, not guessed.
-    let name = if String::from_utf16(&entry.name_utf16).is_err() {
-        Err(NameError::NotUtf8)
+    let (text, name) = if String::from_utf16(&entry.name_utf16).is_err() {
+        (entry.name.clone(), Err(NameError::NotUtf8))
     } else {
         // 7-Zip writes `/` between components on every system, and keeps
         // a `\` of a Unix name as it is.
-        let prepared = prepare(
-            &entry.name,
-            options.backslash_separator,
-            options.names == Names::Sanitize,
-        );
-        check_name(prepared.as_bytes())
+        named(&entry.name, options)
     };
     let unix_mode = entry
         .attributes
@@ -94,6 +90,7 @@ fn item(entry: &Entry, folders: &[(u64, u64)], options: &Options) -> Item {
     Item {
         index,
         raw_name,
+        text,
         name,
         kind,
         size,
@@ -206,7 +203,8 @@ fn links<'a, R: Read + Seek>(
         };
         let parent = &name.components[..name.components.len().saturating_sub(1)];
         let checked = read.and_then(|target| {
-            let resolved = link_target(&target, parent).map_err(ErrorKind::LinkTarget)?;
+            let resolved =
+                link_target(&target, parent, options.name_rules).map_err(ErrorKind::LinkTarget)?;
             // A link on the way, which the system would follow.
             let link_at = |walked: &[String]| paths.get(&fold(walked)).copied();
             if let Some(other) = link_on_the_way(&target, parent, link_at) {
@@ -217,7 +215,7 @@ fn links<'a, R: Read + Seek>(
             let target = String::from_utf8_lossy(&target).into_owned();
             Ok((target, to_dir))
         });
-        match (checked, options.on_refused) {
+        match (checked, skips_links(options)) {
             (Ok((target, to_dir)), _) => links.push(Link {
                 item,
                 target,
@@ -311,7 +309,8 @@ fn extract_into<R: Read + Seek, T: Target>(
         run.check().map_err(Error::global)?;
         items.push(item(&archive.entry(index), &folders, options));
     }
-    let (kept, mut skipped) = check(&items, options)?;
+    let settled = settle(&mut items, options)?;
+    let (kept, mut skipped) = check(&items, &settled, options)?;
     let links = match options.links {
         Links::Inside => links(archive, &kept, &run, options, &mut skipped)?,
         _ => Vec::new(),
@@ -334,6 +333,7 @@ fn extract_into<R: Read + Seek, T: Target>(
     let destination = make()?;
     let mut summary = Summary {
         skipped,
+        renamed: settled.renamed,
         ..Summary::default()
     };
     write_entries(

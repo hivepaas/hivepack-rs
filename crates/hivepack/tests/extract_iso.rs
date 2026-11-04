@@ -313,7 +313,7 @@ fn extracts_directories_files_and_rock_ridge_names() {
         ],
         true,
     );
-    let summary = extract(&iso, &scratch.out(), &Options::default()).unwrap();
+    let summary = extract(&iso, &scratch.out(), &portable()).unwrap();
     assert_eq!((summary.files, summary.directories), (3, 3));
     assert_eq!(
         listing(&scratch.out()),
@@ -362,7 +362,7 @@ fn without_rock_ridge_names_are_iso_9660_s_and_permissions_the_system_s() {
         }],
         false,
     );
-    extract(&iso, &scratch.out(), &Options::default()).unwrap();
+    extract(&iso, &scratch.out(), &portable()).unwrap();
     // The version ";1" is not part of the name.
     assert_eq!(listing(&scratch.out()), ["F0.TXT"]);
     #[cfg(unix)]
@@ -400,7 +400,7 @@ fn refused_names_write_nothing() {
             ],
             true,
         );
-        let e = extract(&iso, &scratch.out(), &Options::default()).unwrap_err();
+        let e = extract(&iso, &scratch.out(), &portable()).unwrap_err();
         assert!(matches!(e.kind, ErrorKind::Name(_)), "{path:?}: {e}");
         assert!(!scratch.out().exists(), "{path:?}");
         assert_eq!(listing(scratch.path()), Vec::<String>::new());
@@ -449,7 +449,7 @@ fn the_same_path_twice_is_refused() {
         ],
         true,
     );
-    let e = extract(&iso, &scratch.out(), &Options::default()).unwrap_err();
+    let e = extract(&iso, &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Duplicate { .. }), "{e}");
     assert!(!scratch.out().exists());
 }
@@ -473,7 +473,7 @@ fn symbolic_links_follow_the_options() {
     let iso = image(&entries, true);
     // Refused by default.
     let scratch = Scratch::new();
-    let e = extract(&iso, &scratch.out(), &Options::default()).unwrap_err();
+    let e = extract(&iso, &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Link), "{e}");
     // Written as files holding their target.
     let scratch = Scratch::new();
@@ -516,7 +516,7 @@ fn hard_links_name_the_file_before_them() {
         true,
     );
     let scratch = Scratch::new();
-    let summary = extract(&iso, &scratch.out(), &Options::default()).unwrap();
+    let summary = extract(&iso, &scratch.out(), &portable()).unwrap();
     assert_eq!(summary.files, 2);
     assert_eq!(read(&scratch.out().join("b")), b"shared data");
     // A copy, with Links::AsFile, counted as written.
@@ -541,7 +541,7 @@ fn devices_are_not_created() {
         true,
     );
     let scratch = Scratch::new();
-    let e = extract(&iso, &scratch.out(), &Options::default()).unwrap_err();
+    let e = extract(&iso, &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Special), "{e}");
     let scratch = Scratch::new();
     let summary = extract(
@@ -612,7 +612,7 @@ fn an_image_cut_short_stops_before_writing() {
     let end = iso.iter().rposition(|&b| b == 9).unwrap();
     let cut = &iso[..end - 1000];
     let scratch = Scratch::new();
-    let e = extract(cut, &scratch.out(), &Options::default()).unwrap_err();
+    let e = extract(cut, &scratch.out(), &portable()).unwrap_err();
     assert!(
         matches!(e.kind, ErrorKind::Iso(hivepack::iso::Error::TruncatedFile)),
         "{e}"
@@ -636,7 +636,7 @@ fn zisofs_files_are_written_to_their_size() {
         true,
     );
     let scratch = Scratch::new();
-    let summary = extract(&iso, &scratch.out(), &Options::default()).unwrap();
+    let summary = extract(&iso, &scratch.out(), &portable()).unwrap();
     assert_eq!(summary.bytes, 150_000);
     assert_eq!(read(&scratch.out().join("z")), data);
 }
@@ -657,7 +657,7 @@ fn entries_with_something_missing_are_refused() {
         true,
     );
     let scratch = Scratch::new();
-    let e = extract(&iso, &scratch.out(), &Options::default()).unwrap_err();
+    let e = extract(&iso, &scratch.out(), &portable()).unwrap_err();
     assert!(
         matches!(
             e.kind,
@@ -705,7 +705,7 @@ fn an_image_that_changes_between_readings_stops() {
             }))
         },
         &scratch.out(),
-        &Options::default(),
+        &portable(),
     )
     .unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Changed), "{e}");
@@ -769,4 +769,12 @@ fn libarchive_test_images_extract_or_stop_with_their_reason() {
             assert_eq!(outcome.starts_with("stopped"), damaged, "{name}: {outcome}");
         }
     }
+}
+
+/// The options of these tests: names checked by every system's rules, as Windows
+/// and a case-insensitive file system have them, wherever the tests run.
+fn portable() -> hivepack::extract::Options {
+    let mut options = hivepack::extract::Options::default();
+    options.name_rules = hivepack::extract::NameRules::Portable;
+    options
 }

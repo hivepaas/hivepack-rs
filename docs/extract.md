@@ -8,9 +8,18 @@ Extractors no longer break on memory, which safe Rust settles, but on logic, and
 
 ## Refuse, do not repair
 
-Other extractors clean names up: Python drops `..` and drive letters, UnZip drops `../`. Two of them clean the same name differently (`foo/../bar` becomes `foo/bar` in one and `bar` in another), and that difference is itself an attack (ZipDiff, USENIX Security 2025). `hivepack::extract` refuses instead, with the same rules on every system, so that an archive extracts the same everywhere or not at all.
+Other extractors clean names up: Python drops `..` and drive letters, UnZip drops `../`. Two of them clean the same name differently (`foo/../bar` becomes `foo/bar` in one and `bar` in another), and that difference is itself an attack (ZipDiff, USENIX Security 2025). `hivepack::extract` refuses instead.
 
-A name is refused (`check_name`, `NameError`) when it:
+What leads outside the destination, or names nothing, is refused on every system, and stops the extraction: a leading `/`, a component `.` or `..`, an empty component. So is what Windows takes for a separator or a drive when Windows' rules apply, before it is anything else: `a\..\x` and `a.txt:..` climb (`NameError::Dot`).
+
+The rest is what a system cannot name, and depends on `Options::name_rules`:
+
+- `NameRules::Native`, the default: this system's rules. Windows' characters, device names and ends of names are refused on Windows only, so that `a:b.txt`, `aux.txt` and `what?.txt` extract on Linux and macOS as they are; and two names that differ only in case, or in how their Unicode is composed, are one path only on Windows and macOS, whose file systems take them for one. A control character, or a component longer than 255 bytes, is refused everywhere.
+- `NameRules::Portable`: every system's rules, wherever it runs (`check_name`), so that an archive extracts the same everywhere or not at all. It is what the tables below and the tests are written for.
+
+A name refused only as one the system cannot take (`NameError::is_unnamable`) can be asked about: `Options::on_unnamable` is told all of them at once, before anything is written, with the names the system takes for others', and answers to stop, leave them out (`Summary::skipped`) or rename them (`Summary::renamed`). Renamed, what cannot be in a name becomes `_` (`a:b.txt` → `a_b.txt`), a device name gets a `_` before it (`_aux.txt`), a space or dot at the end becomes `_`, a part too long is cut down with its extension kept, a folder spelled another way takes the spelling already there (`docs/b.txt` → `Docs/b.txt`), and a name already taken is numbered (`readme (2)`). A name that leads outside is never asked about.
+
+By every system's rules (`NameRules::Portable`), a name is refused (`check_name`, `NameError`) when it:
 
 | Has | Because |
 |---|---|
@@ -94,6 +103,9 @@ Each rule that is not about writing outside the destination can be relaxed, by n
 | Option | Default | Otherwise |
 |---|---|---|
 | `links` | `Links::Refuse` | `AsFile`: a file holding the target, as extractors on Windows write links. `Inside`: links whose target is relative and stays inside the destination by its text (`..` allowed, as long as it does not climb out), and does not pass through another link of the archive, which the system would follow where the text does not; read and checked before anything is written, and created after every other entry, so nothing is written through them. On Windows, creating a link takes a privilege that most accounts lack |
+| `name_rules` | `NameRules::Native` | `Portable`: every system's rules, wherever it runs (see [Refuse, do not repair](#refuse-do-not-repair)) |
+| `on_unnamable` | none: as `on_refused` | A function told, once and before anything is written, every entry whose name this system cannot take, which answers to stop, leave them out or rename them |
+| `links_outside` | `OnRefused::Stop`, as `on_refused` | `Skip`: a link whose target leads outside or through another link is left out, whatever `on_refused` says |
 | `names` | `Names::Strict` | `Sanitize`: first drops what Python's `zipfile` drops, a leading `/`, a drive (`C:`, a letter and a colon, as Windows reads it) and `.`, `..` and empty components, then refuses what is still refused |
 | `backslash_separator` | `false` | `\` taken for a separator, as PowerShell 5.1's `Compress-Archive` writes it |
 | `select` | none: all entries | Extracts only the entries a function picks by path; the others are not checked, counted or written, and data a picked entry depends on in a solid block is still read |

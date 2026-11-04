@@ -144,7 +144,7 @@ fn extract(
 }
 
 fn options(change: impl FnOnce(&mut Options)) -> Options {
-    let mut options = Options::default();
+    let mut options = portable();
     change(&mut options);
     options
 }
@@ -160,7 +160,7 @@ fn extracts_files_directories_and_dot_slash_names() {
         E::Mode(b"run.sh", b"#!/bin/sh\n", 0o4777),
         E::Type(b"globals", b'g'),
     ]);
-    let summary = extract(&data, &s.out(), &Options::default()).unwrap();
+    let summary = extract(&data, &s.out(), &portable()).unwrap();
     assert_eq!(
         (summary.files, summary.directories, summary.bytes),
         (3, 1, 20)
@@ -201,7 +201,7 @@ fn refused_names_write_nothing() {
     for (name, reason) in cases {
         let s = Scratch::new();
         let data = tar(&[E::File(b"first.txt", b"x"), E::File(name, b"y")]);
-        let e = extract(&data, &s.out(), &Options::default()).unwrap_err();
+        let e = extract(&data, &s.out(), &portable()).unwrap_err();
         assert!(
             matches!(e.kind, ErrorKind::Name(r) if r == reason),
             "{name:?}: {e}"
@@ -216,7 +216,7 @@ fn refused_names_write_nothing() {
     let e = extract(
         &tar(&[E::File(b"caf\xe9.txt", b"x")]),
         &s.out(),
-        &Options::default(),
+        &portable(),
     )
     .unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Name(NameError::NotUtf8)), "{e}");
@@ -227,7 +227,7 @@ fn the_same_path_twice_is_refused() {
     for second in [&b"README.txt"[..], b"readme.TXT", b"./readme.txt"] {
         let s = Scratch::new();
         let data = tar(&[E::File(b"readme.txt", b"a"), E::File(second, b"b")]);
-        let e = extract(&data, &s.out(), &Options::default()).unwrap_err();
+        let e = extract(&data, &s.out(), &portable()).unwrap_err();
         assert!(
             matches!(e.kind, ErrorKind::Duplicate { first: 0 }),
             "{second:?}: {e}"
@@ -238,9 +238,7 @@ fn the_same_path_twice_is_refused() {
     let s = Scratch::new();
     let data = tar(&[E::File(b"x", b"a"), E::File(b"x/y", b"b")]);
     assert!(matches!(
-        extract(&data, &s.out(), &Options::default())
-            .unwrap_err()
-            .kind,
+        extract(&data, &s.out(), &portable()).unwrap_err().kind,
         ErrorKind::Duplicate { .. }
     ));
 }
@@ -254,7 +252,7 @@ fn symbolic_links_follow_the_options() {
     ]);
     // Refused by default.
     let s = Scratch::new();
-    let e = extract(&data, &s.out(), &Options::default()).unwrap_err();
+    let e = extract(&data, &s.out(), &portable()).unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Link), "{e}");
     assert!(!s.out().exists());
     // As a file holding the target.
@@ -308,7 +306,7 @@ fn hard_links_name_files_extracted_before_them() {
         E::HardLink(b"b.txt", b"./a.txt"),
     ]);
     let s = Scratch::new();
-    let summary = extract(&data, &s.out(), &Options::default()).unwrap();
+    let summary = extract(&data, &s.out(), &portable()).unwrap();
     assert_eq!(summary.files, 2);
     assert_eq!(std::fs::read(s.out().join("b.txt")).unwrap(), b"shared");
     #[cfg(unix)]
@@ -337,7 +335,7 @@ fn hard_links_name_files_extracted_before_them() {
     ];
     for data in cases {
         let s = Scratch::new();
-        let e = extract(&data, &s.out(), &Options::default()).unwrap_err();
+        let e = extract(&data, &s.out(), &portable()).unwrap_err();
         assert!(
             matches!(e.kind, ErrorKind::HardLinkTarget | ErrorKind::LinkTarget(_)),
             "{e}"
@@ -351,7 +349,7 @@ fn devices_and_fifos_are_not_created() {
     for t in *b"346" {
         let s = Scratch::new();
         let data = tar(&[E::File(b"a.txt", b"x"), E::Type(b"dev", t)]);
-        let e = extract(&data, &s.out(), &Options::default()).unwrap_err();
+        let e = extract(&data, &s.out(), &portable()).unwrap_err();
         assert!(matches!(e.kind, ErrorKind::Special), "{e}");
         assert!(!s.out().exists());
         // Left out with Skip.
@@ -414,7 +412,7 @@ fn sparse_files_keep_their_holes() {
     let scratch = Scratch::new();
     let out = scratch.out();
     let archive = sparse(REAL, &[0, REAL - 4096], &data);
-    let summary = extract(&archive, &out, &Options::default()).unwrap();
+    let summary = extract(&archive, &out, &portable()).unwrap();
     // A hole counts as what the file comes to.
     assert_eq!(summary.bytes, REAL);
     check_sparse(&out.join("big"), REAL, &[0, REAL - 4096], &data);
@@ -433,7 +431,7 @@ fn sparse_files_that_end_in_a_hole_have_their_length() {
     let scratch = Scratch::new();
     let out = scratch.out();
     let archive = sparse(REAL, &[4096], &data);
-    extract(&archive, &out, &Options::default()).unwrap();
+    extract(&archive, &out, &portable()).unwrap();
     check_sparse(&out.join("big"), REAL, &[4096], &data);
 }
 
@@ -497,7 +495,7 @@ fn an_archive_cut_short_leaves_no_file_cut_off() {
     // so it already fails there.
     data.truncate(512 + 512 + 512 + 2000);
     let s = Scratch::new();
-    let e = extract(&data, &s.out(), &Options::default()).unwrap_err();
+    let e = extract(&data, &s.out(), &portable()).unwrap_err();
     assert!(
         matches!(e.kind, ErrorKind::Tar(hivepack::tar::Error::UnexpectedEof)),
         "{e}"
@@ -510,7 +508,7 @@ fn an_archive_cut_short_leaves_no_file_cut_off() {
         E::Sized(b"b.txt", b"short", 100_000),
     ]);
     let s = Scratch::new();
-    let e = extract(&data, &s.out(), &Options::default()).unwrap_err();
+    let e = extract(&data, &s.out(), &portable()).unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Tar(_)), "{e}");
     assert!(!s.out().exists());
 }
@@ -541,7 +539,7 @@ fn the_stream_is_read_past_the_archive_to_its_end() {
     let e = extract_tar(
         || Ok(FailsAtTheEnd(Cursor::new(data.clone()))),
         &s.out(),
-        &Options::default(),
+        &portable(),
     )
     .unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Io(_)), "{e}");
@@ -560,7 +558,7 @@ fn the_stream_is_read_past_the_archive_to_its_end() {
             })
         },
         &s.out(),
-        &Options::default(),
+        &portable(),
     )
     .unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Io(_)), "{e}");
@@ -608,7 +606,7 @@ fn an_archive_that_changes_between_readings_stops() {
                 }))
             },
             &s.out(),
-            &Options::default(),
+            &portable(),
         );
         let e = result.unwrap_err();
         assert!(matches!(e.kind, ErrorKind::Changed), "{e}");
@@ -676,7 +674,7 @@ fn nothing_is_overwritten_unless_asked() {
     std::fs::create_dir_all(s.out()).unwrap();
     std::fs::write(s.out().join("a.txt"), b"old").unwrap();
     let data = tar(&[E::File(b"a.txt", b"new")]);
-    let e = extract(&data, &s.out(), &Options::default()).unwrap_err();
+    let e = extract(&data, &s.out(), &portable()).unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Exists), "{e}");
     assert_eq!(std::fs::read(s.out().join("a.txt")).unwrap(), b"old");
     extract(&data, &s.out(), &options(|o| o.overwrite = true)).unwrap();
@@ -1026,4 +1024,12 @@ fn cve_2025_4435_what_is_skipped_stays_out() {
     assert!(std::fs::symlink_metadata(s.out().join("hard")).is_err());
     assert!(!s.path().join("climbs.txt").exists());
     assert!(!s.path().join("outside").exists());
+}
+
+/// The options of these tests: names checked by every system's rules, as Windows
+/// and a case-insensitive file system have them, wherever the tests run.
+fn portable() -> hivepack::extract::Options {
+    let mut options = hivepack::extract::Options::default();
+    options.name_rules = hivepack::extract::NameRules::Portable;
+    options
 }

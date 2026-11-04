@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `extract`: names are checked by this system's rules by default (`Options::name_rules`, `NameRules::Native`): Windows' characters, device names and ends of names only on Windows, so that `a:b.txt` or `aux.txt` extract on Linux and macOS; and two names that differ only in case are one only on Windows and macOS. `NameRules::Portable` keeps every system's rules, as before. What leads outside the destination is refused everywhere, as before, and a name that climbs through Windows' separator or a stream (`a\..\x`, `a.txt:..`) is now refused as `NameError::Dot`. See [docs/extract.md](docs/extract.md#refuse-do-not-repair).
+- `extract`: `Options::on_unnamable` is asked once, before anything is written, about every entry whose name this system cannot take (`NameError::is_unnamable`, and names it takes for one), and can leave them out or rename them (`Summary::renamed`).
+- `extract`: `Options::links_outside` leaves out a link whose target leads outside or through another link, whatever `on_refused` says.
+- `extract`: `check_name_for` checks a name by `NameRules`.
+
 ## 0.3.0
 
 - `extract`: each extractor writes into a `Sink` in place of a folder too (`extract_zip_to`, `extract_tar_to`, `extract_7z_to` and the others), after the same checks and in the same order: to convert an archive entry by entry, without a folder in between. See [docs/extract.md](docs/extract.md#into-something-other-than-a-folder).

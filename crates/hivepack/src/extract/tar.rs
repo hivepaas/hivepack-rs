@@ -21,8 +21,9 @@ use crate::tar::{
 
 use crate::extract::destination::{Counted, Target, TargetFile};
 use crate::extract::error::{Error, ErrorKind};
-use crate::extract::name::{Name, NameError, check_name, link_on_the_way, link_target, prepare};
-use crate::extract::plan::{Item, Kind, Links, Names, OnDamaged, OnRefused, Options, check, fold};
+use crate::extract::name::{Name, NameError, link_on_the_way, link_target};
+use crate::extract::plan::{Item, Kind, Links, OnDamaged, OnRefused, Options, check, fold};
+use crate::extract::plan::{named, settle, skips_links};
 use crate::extract::progress::Run;
 use crate::extract::sink::{Sink, SinkState};
 use crate::extract::zip::{Summary, open_destination, set_dir_times};
@@ -68,8 +69,14 @@ pub(crate) struct Entry<S> {
 /// it, a leading `./` dropped (`tar -cf x.tar .` writes every name so):
 /// `None` for the archive's root, `./` itself.
 pub(crate) fn name_of(raw: &[u8], options: &Options) -> Option<Result<Name, NameError>> {
+    named_of(raw, options).map(|(_, name)| name)
+}
+
+/// [`name_of`], with the name as text (see [`Item::text`]).
+pub(crate) fn named_of(raw: &[u8], options: &Options) -> Option<(String, Result<Name, NameError>)> {
+    let lossy = || String::from_utf8_lossy(raw).into_owned();
     if raw.iter().any(u8::is_ascii_control) {
-        return Some(Err(NameError::Control));
+        return Some((lossy(), Err(NameError::Control)));
     }
     let by_decoder;
     let mut text = match std::str::from_utf8(raw) {
@@ -83,7 +90,7 @@ pub(crate) fn name_of(raw: &[u8], options: &Options) -> Option<Result<Name, Name
                 by_decoder = text;
                 by_decoder.as_str()
             }
-            None => return Some(Err(NameError::NotUtf8)),
+            None => return Some((lossy(), Err(NameError::NotUtf8))),
         },
     };
     while let Some(rest) = text.strip_prefix("./") {
@@ -92,12 +99,7 @@ pub(crate) fn name_of(raw: &[u8], options: &Options) -> Option<Result<Name, Name
     if text.is_empty() || text == "." {
         return None;
     }
-    let prepared = prepare(
-        text,
-        options.backslash_separator,
-        options.names == Names::Sanitize,
-    );
-    Some(check_name(prepared.as_bytes()))
+    Some(named(text, options))
 }
 
 /// A tar time as a `SystemTime`.
@@ -149,9 +151,9 @@ fn read_headers<R: Read>(r: R, run: &Run<'_>, options: &Options) -> Result<First
         let name = match h.typeflag {
             // The archive's own metadata, not entries to write.
             TYPE_X_GLOBAL_HEADER | TYPE_GNU_VOLUME => None,
-            _ => name_of(&h.name, options),
+            _ => named_of(&h.name, options),
         };
-        let Some(name) = name else {
+        let Some((text, name)) = name else {
             entries.push(Entry {
                 seen,
                 item: None,
@@ -181,6 +183,7 @@ fn read_headers<R: Read>(r: R, run: &Run<'_>, options: &Options) -> Result<First
         items.push(Item {
             index,
             raw_name: h.name.clone(),
+            text,
             name,
             kind,
             size,
@@ -304,7 +307,7 @@ pub(crate) fn plan_links<S>(
                 Links::AsFile => Ok(LinkPlan::SymlinkAsFile),
                 _ => {
                     let parent = &name.components[..name.components.len().saturating_sub(1)];
-                    link_target(&entry.target, parent)
+                    link_target(&entry.target, parent, options.name_rules)
                         .map_err(ErrorKind::LinkTarget)
                         .and_then(|resolved| {
                             // A link on the way, which the system would follow.
@@ -330,12 +333,16 @@ pub(crate) fn plan_links<S>(
             },
             _ => continue,
         };
-        match (checked, options.on_refused) {
-            (Ok(plan), _) => {
+        let skip = |kind: &ErrorKind| match kind {
+            ErrorKind::LinkTarget(_) | ErrorKind::LinkChain { .. } => skips_links(options),
+            _ => options.on_refused,
+        };
+        match checked {
+            Ok(plan) => {
                 plans.insert(item.index, plan);
             }
-            (Err(kind), OnRefused::Skip) => skipped.push(item.error(kind)),
-            (Err(kind), OnRefused::Stop) => return Err(item.error(kind)),
+            Err(kind) if skip(&kind) == OnRefused::Skip => skipped.push(item.error(kind)),
+            Err(kind) => return Err(item.error(kind)),
         }
     }
     Ok(plans)
@@ -398,8 +405,9 @@ fn extract_into<R: Read, F: FnMut() -> io::Result<R>, T: Target>(
     let run = Run::new(options);
 
     let first = open().map_err(|e| Error::global(ErrorKind::Io(e)))?;
-    let (entries, items, cut) = read_headers(first, &run, options)?;
-    let (kept, mut skipped) = check(&items, options)?;
+    let (entries, mut items, cut) = read_headers(first, &run, options)?;
+    let settled = settle(&mut items, options)?;
+    let (kept, mut skipped) = check(&items, &settled, options)?;
     let plans = plan_links(&entries, &items, &kept, options, &mut skipped)?;
     let kept_indexes: std::collections::HashSet<u64> = kept
         .iter()
@@ -417,6 +425,7 @@ fn extract_into<R: Read, F: FnMut() -> io::Result<R>, T: Target>(
     let destination = make()?;
     let mut summary = Summary {
         skipped,
+        renamed: settled.renamed,
         ..Summary::default()
     };
 

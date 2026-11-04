@@ -22,7 +22,7 @@ use patch::{Entry, with_entries, with_entries15, with_quick_open};
 use support::Scratch;
 
 fn options(set: impl FnOnce(&mut Options)) -> Options {
-    let mut options = Options::default();
+    let mut options = portable();
     set(&mut options);
     options
 }
@@ -51,7 +51,7 @@ fn files_and_directories_come_out() {
         Entry::file(b"two.txt", b"two"),
     ]);
     let scratch = Scratch::new();
-    let summary = extract(&data, &scratch.out(), &Options::default()).unwrap();
+    let summary = extract(&data, &scratch.out(), &portable()).unwrap();
     assert_eq!(
         (summary.files, summary.directories, summary.bytes),
         (2, 1, 6)
@@ -64,7 +64,7 @@ fn files_and_directories_come_out() {
 fn rar_4_comes_out_too() {
     let data = with_entries15(&[Entry::dir(b"a"), Entry::file(b"a/one.txt", b"one")]);
     let scratch = Scratch::new();
-    let summary = extract(&data, &scratch.out(), &Options::default()).unwrap();
+    let summary = extract(&data, &scratch.out(), &portable()).unwrap();
     assert_eq!((summary.files, summary.directories), (1, 1));
     assert_eq!(read(scratch.out().join("a/one.txt")), b"one");
 }
@@ -77,7 +77,7 @@ fn names_are_refused_before_anything_is_written() {
     ] {
         let data = with_entries(&[Entry::file(b"fine.txt", b"x"), Entry::file(bad, b"y")]);
         let scratch = Scratch::new();
-        let error = extract(&data, &scratch.out(), &Options::default()).unwrap_err();
+        let error = extract(&data, &scratch.out(), &portable()).unwrap_err();
         assert!(
             matches!(error.kind, ErrorKind::Name(e) if e == reason),
             "{error}"
@@ -112,7 +112,7 @@ fn one_path_twice_is_refused() {
         Entry::file(b"same.TXT", b"b"),
     ]);
     let scratch = Scratch::new();
-    let error = extract(&data, &scratch.out(), &Options::default()).unwrap_err();
+    let error = extract(&data, &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(error.kind, ErrorKind::Duplicate { .. }), "{error}");
     assert!(!scratch.out().exists());
 }
@@ -128,7 +128,7 @@ fn a_hash_that_fails_removes_the_file() {
         with_entries15(&[Entry::file(b"good.txt", b"ok"), bad]),
     ] {
         let scratch = Scratch::new();
-        let error = extract(&data, &scratch.out(), &Options::default()).unwrap_err();
+        let error = extract(&data, &scratch.out(), &portable()).unwrap_err();
         assert!(
             matches!(error.kind, ErrorKind::RarEntry(RarProblem::BrokenData)),
             "{error}"
@@ -147,7 +147,7 @@ fn an_archive_cut_short_writes_nothing() {
     // Into the second header: the first file alone would otherwise come out.
     for cut in [data.len() - 8 - 10, data.len() - 8 - 30] {
         let scratch = Scratch::new();
-        let error = extract(&data[..cut], &scratch.out(), &Options::default()).unwrap_err();
+        let error = extract(&data[..cut], &scratch.out(), &portable()).unwrap_err();
         assert!(!scratch.out().exists(), "{error}");
     }
 }
@@ -177,7 +177,7 @@ const FILE_COPY: u64 = 5;
 fn links_are_refused_by_default() {
     let data = with_entries(&[Entry::redirect(b"link", SYMLINK, b"target")]);
     let scratch = Scratch::new();
-    let error = extract(&data, &scratch.out(), &Options::default()).unwrap_err();
+    let error = extract(&data, &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(error.kind, ErrorKind::Link), "{error}");
     assert!(!scratch.out().exists());
 }
@@ -309,7 +309,7 @@ fn a_kind_of_link_not_known_is_refused() {
 fn a_quick_open_record_is_what_is_read() {
     let data = with_quick_open(&[0, 1 | 14 << 3, 5]);
     let scratch = Scratch::new();
-    let summary = extract(&data, &scratch.out(), &Options::default()).unwrap();
+    let summary = extract(&data, &scratch.out(), &portable()).unwrap();
     assert_eq!((summary.files, summary.bytes), (1, 5));
     assert_eq!(read(scratch.out().join("helloworld.txt")), b"hello");
 }
@@ -405,7 +405,7 @@ fn cve_2026_58052_streams_that_replace_the_mark() {
         Entry::file(b"a.exe::$DATA", b"evil"),
     ]);
     let scratch = Scratch::new();
-    let error = extract(&data, &scratch.out(), &Options::default()).unwrap_err();
+    let error = extract(&data, &scratch.out(), &portable()).unwrap_err();
     assert!(
         matches!(error.kind, ErrorKind::Name(NameError::Colon)),
         "{error}"
@@ -432,7 +432,7 @@ fn cve_2023_38831_a_file_and_a_folder_of_one_name() {
         Entry::file(b"report.pdf /report.pdf .cmd", b"evil"),
     ]);
     let scratch = Scratch::new();
-    let error = extract(&data, &scratch.out(), &Options::default()).unwrap_err();
+    let error = extract(&data, &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(error.kind, ErrorKind::Name(_)), "{error}");
     assert!(!scratch.out().exists());
 }
@@ -649,7 +649,7 @@ fn a_hash_that_fails_can_be_gone_on_from() {
             ]),
         ] {
             let f: OnDamagedFn = std::sync::Arc::new(move |_| how);
-            let mut options = Options::default();
+            let mut options = portable();
             options.on_damaged = Some(f);
             let scratch = Scratch::new();
             let summary = extract(&data, &scratch.out(), &options).unwrap();
@@ -668,4 +668,12 @@ fn a_hash_that_fails_can_be_gone_on_from() {
             ));
         }
     }
+}
+
+/// The options of these tests: names checked by every system's rules, as Windows
+/// and a case-insensitive file system have them, wherever the tests run.
+fn portable() -> hivepack::extract::Options {
+    let mut options = hivepack::extract::Options::default();
+    options.name_rules = hivepack::extract::NameRules::Portable;
+    options
 }

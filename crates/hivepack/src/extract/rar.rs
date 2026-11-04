@@ -13,8 +13,9 @@ use crate::rar::{
 
 use crate::extract::destination::Target;
 use crate::extract::error::{Error, ErrorKind, RarProblem};
-use crate::extract::name::{NameError, check_name, prepare};
-use crate::extract::plan::{Item, Kind, Links, Names, OnDamaged, Options, check, fold};
+use crate::extract::name::NameError;
+use crate::extract::plan::{Item, Kind, Links, OnDamaged, Options, check, fold};
+use crate::extract::plan::{named, settle};
 use crate::extract::progress::Run;
 use crate::extract::sink::{Sink, SinkState};
 use crate::extract::tar::{Entry, LinkPlan, bytes_to_write, copy_of, plan_links, write_from};
@@ -83,16 +84,12 @@ fn item_of<R: ReadAt>(arc: &Archive<R>, index: u64, options: &Options) -> Item {
     let head = &arc.file_head;
     let text = name::to_string(&head.file_name);
     let raw_name = name::to_string_lossy(&head.file_name).into_bytes();
-    let name = match &text {
-        None => Err(NameError::NotUtf8),
-        Some(text) => {
-            let prepared = prepare(
-                text,
-                options.backslash_separator,
-                options.names == Names::Sanitize,
-            );
-            check_name(prepared.as_bytes())
-        }
+    let (text, name) = match &text {
+        None => (
+            String::from_utf8_lossy(&raw_name).into_owned(),
+            Err(NameError::NotUtf8),
+        ),
+        Some(text) => named(text, options),
     };
     let kind = if head.dir {
         Kind::Dir
@@ -116,6 +113,7 @@ fn item_of<R: ReadAt>(arc: &Archive<R>, index: u64, options: &Options) -> Item {
     Item {
         index,
         raw_name,
+        text,
         name,
         kind,
         size,
@@ -466,9 +464,10 @@ where
         .unwrap_or_default();
 
     let mut first = open(&password).map_err(|e| Error::global(rar_error(e)))?;
-    let (entries, items) = read_headers(&mut first, &run, options)?;
+    let (entries, mut items) = read_headers(&mut first, &run, options)?;
     drop(first);
-    let (kept, mut skipped) = check(&items, options)?;
+    let settled = settle(&mut items, options)?;
+    let (kept, mut skipped) = check(&items, &settled, options)?;
     let plans = plan_links(&entries, &items, &kept, options, &mut skipped)?;
     let is_copy = |at: usize| entries[at].seen.redir_type == Redirection::FileCopy;
     let kept_indexes: HashSet<u64> = kept
@@ -489,6 +488,7 @@ where
     let destination = make()?;
     let mut summary = Summary {
         skipped,
+        renamed: settled.renamed,
         ..Summary::default()
     };
 
@@ -578,6 +578,7 @@ where
         let fallback = Item {
             index: u64::MAX,
             raw_name: Vec::new(),
+            text: String::new(),
             name: Err(NameError::Empty),
             kind: Kind::Special,
             size: 0,

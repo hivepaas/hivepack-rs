@@ -95,11 +95,11 @@ pub use cpio::{extract_cpio, extract_cpio_to};
 pub use error::RarProblem;
 pub use error::{Error, ErrorKind};
 pub use iso::{extract_iso, extract_iso_to};
-pub use name::{MAX_COMPONENT, Name, NameError, check_name};
+pub use name::{MAX_COMPONENT, Name, NameError, NameRules, check_name, check_name_for};
 pub use origin::Origin;
 pub use plan::{
-    Limits, Links, NameDecoder, Names, OnDamaged, OnDamagedFn, OnRefused, Options, Packages,
-    Permissions, Select,
+    Limits, Links, NameDecoder, Names, OnDamaged, OnDamagedFn, OnRefused, OnUnnamable,
+    OnUnnamableFn, Options, Packages, Permissions, Renamed, Select,
 };
 pub use progress::{Cancel, Progress, ProgressFn};
 #[cfg(feature = "rar")]
