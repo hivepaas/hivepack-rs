@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 - `extract`: names are checked by this system's rules by default (`Options::name_rules`, `NameRules::Native`): Windows' characters, device names and ends of names only on Windows, so that `a:b.txt` or `aux.txt` extract on Linux and macOS; and two names that differ only in case are one only where the destination's file system takes them for one, found by a file made there and taken away before anything is written (never in a `Sink`). `NameRules::Portable` keeps every system's rules, as before. What leads outside the destination is refused everywhere, as before, and a name that climbs through Windows' separator or a stream (`a\..\x`, `a.txt:..`) is now refused as `NameError::Dot`. See [docs/extract.md](docs/extract.md#refuse-do-not-repair).
 - `extract`: `Options::on_unnamable` is asked once, before anything is written, about every entry whose name this system cannot take (`NameError::is_unnamable`, and names it takes for one), and can leave them out or rename them (`Summary::renamed`).
