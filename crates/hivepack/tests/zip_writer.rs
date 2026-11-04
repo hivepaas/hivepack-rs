@@ -243,6 +243,11 @@ fn methods_and_encryption_are_the_writers_to_set() {
         .unwrap();
     writer.set_compression(i32::from(cm::DEFLATE), 9);
     writer.set_encryption(em::AES_256, b"pass word");
+    // Windows has no system source without one, and salts need not be secret here.
+    writer.set_random_source(Some(std::sync::Arc::new(|buffer: &mut [u8]| {
+        buffer.fill(7);
+        Ok(())
+    })));
     writer
         .add_file(&entry("sealed", None, None), &mut Once::new(&body))
         .unwrap();

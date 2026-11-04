@@ -13,6 +13,7 @@ use std::io::{Read, Seek, Write};
 
 use crate::zip::error::{Error, ErrorCode, Result};
 use crate::zip::open::Archive;
+use crate::zip::random::RandomSource;
 use crate::zip::source_data::{BufferSource, FileAttributes, file_attributes};
 use crate::zip::source_write::Output;
 use crate::zip::zip::{Flags, OpenFlags, Stat, cm, opsys, stat};
@@ -104,9 +105,18 @@ impl<W: Write + Seek> Writer<W> {
 
     /// Encrypts the files added from now on with `method` (see
     /// [`em`](crate::zip::em)) and `password`, or not, with
-    /// [`em::NONE`](crate::zip::em::NONE).
+    /// [`em::NONE`](crate::zip::em::NONE). Where the system is not Unix, a file
+    /// encrypted fails with [`ErrorCode::Internal`] unless
+    /// [`set_random_source`](Writer::set_random_source) has given where its salt
+    /// comes from.
     pub fn set_encryption(&mut self, method: u16, password: &[u8]) {
         self.encryption = (method != crate::zip::em::NONE).then(|| (method, password.to_vec()));
+    }
+
+    /// Where the random bytes encrypting takes come from: `source`, or with
+    /// `None` the system, as [`Archive::set_random_source`] says.
+    pub fn set_random_source(&mut self, source: Option<RandomSource>) {
+        self.archive.set_random_source(source);
     }
 
     /// Adds the file `entry`, its data read from `reader` to its end: the bytes
