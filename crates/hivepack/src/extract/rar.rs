@@ -11,15 +11,14 @@ use crate::rar::{
     WideString, name,
 };
 
-use crate::extract::destination::Destination;
+use crate::extract::destination::Target;
 use crate::extract::error::{Error, ErrorKind, RarProblem};
 use crate::extract::name::{NameError, check_name, prepare};
 use crate::extract::plan::{Item, Kind, Links, Names, Options, check, fold};
 use crate::extract::progress::Run;
-use crate::extract::tar::{
-    Entry, LinkPlan, bytes_to_write, copy_of, finish_file, plan_links, write_from,
-};
-use crate::extract::zip::{Summary, set_dir_times};
+use crate::extract::sink::{Sink, SinkState};
+use crate::extract::tar::{Entry, LinkPlan, bytes_to_write, copy_of, plan_links, write_from};
+use crate::extract::zip::{Summary, open_destination, set_dir_times};
 
 /// What the second reading must see again of an entry.
 #[derive(PartialEq, Eq)]
@@ -278,8 +277,8 @@ fn read_headers<R: ReadAt>(
 
 /// Where an entry's data goes as [`Extract`] gives it out: a file, or nowhere
 /// for what is only read through, as a solid stream's data before what is wanted.
-struct Sink<'a> {
-    file: Option<std::fs::File>,
+struct Out<'a, W> {
+    file: Option<W>,
     item: &'a Item,
     /// A size that is not known cannot be compared.
     known_size: bool,
@@ -291,7 +290,7 @@ struct Sink<'a> {
     failed: Option<ErrorKind>,
 }
 
-impl Sink<'_> {
+impl<W: Write> Out<'_, W> {
     fn check(&self, written: u64) -> Result<(), ErrorKind> {
         let limits = &self.options.limits;
         self.run.check()?;
@@ -367,21 +366,47 @@ impl Sink<'_> {
 /// follows may need it, and counts against the total limit. Files get their
 /// Unix permissions when the archive was made on Unix, and their modification
 /// time. Recovery records are not used, and comments are left in the archive.
-pub fn extract_rar<R, F>(
-    mut open: F,
-    destination: &Path,
+pub fn extract_rar<R, F>(open: F, destination: &Path, options: &Options) -> Result<Summary, Error>
+where
+    R: ReadAt,
+    F: FnMut(&str) -> Result<Archive<R>, crate::rar::Error>,
+{
+    if let Some(origin) = &options.origin {
+        origin
+            .check_supported()
+            .map_err(|e| Error::global(ErrorKind::Origin(e)))?;
+    }
+    extract_into(open, || open_destination(destination, options), options)
+}
+
+/// Extracts the RAR archive that `open` gives into `sink`, with the checks and in
+/// the order of [`extract_rar`], reading it twice as it does: see [`Sink`]. A file
+/// copy fails here, as what the sink was given cannot be read back.
+pub fn extract_rar_to<R, F>(
+    open: F,
+    sink: &mut dyn Sink,
     options: &Options,
 ) -> Result<Summary, Error>
 where
     R: ReadAt,
     F: FnMut(&str) -> Result<Archive<R>, crate::rar::Error>,
 {
+    let state = SinkState::new(sink);
+    extract_into(open, || Ok(state.target(options)), options)
+}
+
+/// [`extract_rar`] into the target `make` makes, once the archive is checked.
+fn extract_into<R, F, T>(
+    mut open: F,
+    make: impl FnOnce() -> Result<T, Error>,
+    options: &Options,
+) -> Result<Summary, Error>
+where
+    R: ReadAt,
+    F: FnMut(&str) -> Result<Archive<R>, crate::rar::Error>,
+    T: Target,
+{
     let run = Run::new(options);
-    if let Some(origin) = &options.origin {
-        origin
-            .check_supported()
-            .map_err(|e| Error::global(ErrorKind::Origin(e)))?;
-    }
     let password = options
         .password
         .as_ref()
@@ -409,8 +434,7 @@ where
         ),
     );
 
-    let destination = Destination::open(destination, options.origin.as_ref())
-        .map_err(|e| Error::global(ErrorKind::Io(e)))?;
+    let destination = make()?;
     let mut summary = Summary {
         skipped,
         ..Summary::default()
@@ -446,63 +470,55 @@ where
             .and_then(|item| item.name.as_ref().ok().map(|name| (item, name)));
 
         // What has no data here comes first: only files are written as read.
-        let mut created = None;
+        let mut file = None;
+        // Where the file being written is, or the link written as a file.
+        let mut place: Option<&[String]> = None;
         let mut link_place = None;
         if let Some((item, name)) = wanted {
             let error = |kind| item.error(kind);
             if item.kind == Kind::Dir {
-                destination.directory(&name.components).map_err(error)?;
+                destination
+                    .directory(item, &name.components)
+                    .map_err(error)?;
                 summary.directories += 1;
                 run.entry_done();
+            } else if name.components.is_empty() {
+                return Err(error(ErrorKind::Name(NameError::Empty)));
             } else {
-                let (last, parents) = name
-                    .components
-                    .split_last()
-                    .ok_or_else(|| error(ErrorKind::Name(NameError::Empty)))?;
-                let dir = destination.directory(parents).map_err(error)?;
                 let copy = current.is_some_and(is_copy);
                 if let Some(LinkPlan::Hard(target)) = plan {
-                    if options.links != Links::AsFile && !copy {
-                        let (target_last, target_parents) = target
-                            .split_last()
-                            .ok_or_else(|| error(ErrorKind::HardLinkTarget))?;
-                        let target_dir = destination.directory(target_parents).map_err(error)?;
-                        Destination::hard_link(&target_dir, target_last, &dir, last)
+                    if !destination.copies_hard_links(options) && !copy {
+                        destination
+                            .hard_link(item, &name.components, target)
                             .map_err(error)?;
                         summary.files += 1;
                         run.entry_done();
                     } else {
-                        let file = Destination::create_file(&dir, last, options.overwrite)
-                            .map_err(error)?;
                         let remaining = options.limits.max_total_size.saturating_sub(summary.bytes);
                         let written =
-                            copy_of(&destination, target, item, file, remaining, &run, options)
-                                .inspect_err(|_| {
-                                    let _ = dir.remove_file(last);
-                                })
-                                .map_err(error)?;
+                            copy_of(&destination, target, item, remaining, &run, options)?;
                         summary.files += 1;
                         summary.bytes += written;
                         run.entry_done();
                     }
                 } else if matches!(plan, Some(LinkPlan::SymlinkAsFile)) {
-                    link_place = Some((dir, last.clone()));
+                    link_place = Some(&name.components);
                 } else {
-                    let file =
-                        Destination::create_file(&dir, last, options.overwrite).map_err(error)?;
-                    created = Some((file.into_std(), dir, last.clone()));
+                    let size = (!arc.file_head.unknown_unp_size).then_some(item.size);
+                    file = Some(
+                        destination
+                            .create_file(item, &name.components, size, options)
+                            .map_err(error)?,
+                    );
+                    place = Some(&name.components);
                 }
             }
         }
 
-        let (file, place) = match created {
-            Some((file, dir, last)) => (Some(file), Some((dir, last))),
-            None => (None, None),
-        };
         let as_file = file.is_some();
-        let remove = |place: &Option<(cap_std::fs::Dir, String)>| {
-            if let Some((dir, last)) = place {
-                let _ = dir.remove_file(last);
+        let remove = |place: &Option<&[String]>| {
+            if let Some(components) = place {
+                destination.remove_file(components);
             }
         };
         let fallback = Item {
@@ -518,7 +534,7 @@ where
         };
         let about = item.unwrap_or(&fallback);
         let total_left = options.limits.max_total_size;
-        let mut sink = Sink {
+        let mut sink = Out {
             file,
             item: about,
             known_size: !arc.file_head.unknown_unp_size,
@@ -545,7 +561,7 @@ where
                 return Err(at_error(sink.failed.take().unwrap_or_else(|| rar_error(e))));
             }
         };
-        let Sink { file, written, .. } = sink;
+        let Out { file, written, .. } = sink;
         if let Some(found) = problem(&extract) {
             remove(&place);
             return Err(at_error(ErrorKind::RarEntry(found)));
@@ -572,7 +588,8 @@ where
                 remove(&place);
                 return Err(at_error(ErrorKind::SizeMismatch));
             }
-            finish_file(&file, about, options)
+            destination
+                .finish_file(file, about, options)
                 .inspect_err(|_| remove(&place))
                 .map_err(at_error)?;
             summary.files += 1;
@@ -580,22 +597,19 @@ where
             run.entry_done();
         } else if link_file {
             // A link written as a file holding its target, with Links::AsFile.
-            if let (Some(at), Some((dir, last))) = (current, &link_place) {
+            if let (Some(at), Some(_)) = (current, &link_place) {
                 let target = &entries[at].target;
-                let file =
-                    Destination::create_file(dir, last, options.overwrite).map_err(at_error)?;
                 let remaining = options.limits.max_total_size.saturating_sub(summary.bytes);
                 let written = write_from(
                     &mut &target[..],
                     about,
                     target.len() as u64,
-                    file,
+                    &destination,
                     remaining,
                     false,
                     &run,
                     options,
-                )
-                .map_err(at_error)?;
+                )?;
                 summary.files += 1;
                 summary.bytes += written;
                 run.entry_done();
@@ -623,13 +637,10 @@ where
         else {
             continue;
         };
-        let (last, parents) = name
-            .components
-            .split_last()
-            .ok_or_else(|| error(ErrorKind::Name(NameError::Empty)))?;
         run.check().map_err(error)?;
-        let dir = destination.directory(parents).map_err(error)?;
-        Destination::symlink(&dir, last, target, *to_dir).map_err(error)?;
+        destination
+            .symlink(item, &name.components, target, *to_dir)
+            .map_err(error)?;
         summary.links += 1;
         run.entry_done();
     }

@@ -11,7 +11,7 @@
 //! `docs/safety.md`): the standard library's directory handles
 //! (`std::fs::Dir`) are not stable yet.
 
-use std::io;
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -20,7 +20,10 @@ use cap_std::ambient_authority;
 use cap_std::fs::{Dir, File, OpenOptions};
 
 use crate::extract::error::ErrorKind;
+use crate::extract::name::NameError;
 use crate::extract::origin::Origin;
+use crate::extract::plan::{Item, Links, Options};
+use crate::extract::zip::{set_modified, set_permissions};
 
 /// The destination, open, and the mark of origin of what is written in it.
 pub(crate) struct Destination<'a> {
@@ -161,5 +164,204 @@ impl<'a> Destination<'a> {
             Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => Ok(()),
             result => result.map_err(ErrorKind::Io),
         }
+    }
+}
+
+/// Where an extraction writes: a folder on disk ([`Destination`]), or a caller's
+/// [`Sink`](crate::extract::Sink). Each entry is given with its path's components,
+/// checked; what a folder needs of directories on the way it opens itself.
+pub(crate) trait Target: Sized {
+    /// A file being written.
+    type File<'t>: TargetFile
+    where
+        Self: 't;
+
+    /// The directory `item`, at `components`.
+    fn directory(&self, item: &Item, components: &[String]) -> Result<(), ErrorKind>;
+
+    /// The directory `item`, at `components`, as a target of its own: a package's
+    /// payload is extracted into one.
+    fn within(&self, item: &Item, components: &[String]) -> Result<Self, ErrorKind>;
+
+    /// The file `item`, at `components`, of `size` bytes if they are known, to write
+    /// its data into.
+    fn create_file(
+        &self,
+        item: &Item,
+        components: &[String],
+        size: Option<u64>,
+        options: &Options,
+    ) -> Result<Self::File<'_>, ErrorKind>;
+
+    /// The file, its data written: its mark of origin, time and permissions.
+    fn finish_file(
+        &self,
+        file: Self::File<'_>,
+        item: &Item,
+        options: &Options,
+    ) -> Result<(), ErrorKind>;
+
+    /// The file at `components`, whose data failed, not left.
+    fn remove_file(&self, components: &[String]);
+
+    /// The symbolic link `item`, at `components`, to `target`, relative, with `/`
+    /// for separator; `to_dir` says whether it leads to a directory.
+    fn symlink(
+        &self,
+        item: &Item,
+        components: &[String],
+        target: &str,
+        to_dir: bool,
+    ) -> Result<(), ErrorKind>;
+
+    /// The hard link `item`, at `components`, to the file at `target`, written
+    /// before it.
+    fn hard_link(
+        &self,
+        item: &Item,
+        components: &[String],
+        target: &[String],
+    ) -> Result<(), ErrorKind>;
+
+    /// The file at `components`, written before, to read again, and its length: for
+    /// a copy of it.
+    fn open_file(&self, components: &[String]) -> Result<(Box<dyn Read + '_>, u64), ErrorKind>;
+
+    /// The time of the directory at `components`, once nothing more is written in
+    /// it.
+    fn set_time(&self, components: &[String], mtime: SystemTime) -> Result<(), ErrorKind>;
+
+    /// Whether a hard link is written as a copy of its file, as
+    /// [`Links::AsFile`] says for a folder.
+    fn copies_hard_links(&self, options: &Options) -> bool;
+}
+
+/// A file a [`Target`] writes.
+pub(crate) trait TargetFile: Write {
+    /// Whether zeros can be gone past, leaving a hole, rather than written.
+    fn has_holes(&self) -> bool;
+
+    /// Goes `n` bytes past where it is, which read as zeros.
+    fn skip(&mut self, n: u64) -> io::Result<()>;
+
+    /// Ends it at `len` bytes, the zeros gone past to its end among them.
+    fn set_len(&mut self, len: u64) -> io::Result<()>;
+}
+
+/// The parent's components and the last, or the error of an empty name.
+fn split(components: &[String]) -> Result<(&String, &[String]), ErrorKind> {
+    components
+        .split_last()
+        .ok_or(ErrorKind::Name(NameError::Empty))
+}
+
+impl Target for Destination<'_> {
+    type File<'t>
+        = std::fs::File
+    where
+        Self: 't;
+
+    fn directory(&self, _: &Item, components: &[String]) -> Result<(), ErrorKind> {
+        Destination::directory(self, components).map(drop)
+    }
+
+    fn within(&self, _: &Item, components: &[String]) -> Result<Self, ErrorKind> {
+        Destination::within(self, components)
+    }
+
+    fn create_file(
+        &self,
+        _: &Item,
+        components: &[String],
+        _: Option<u64>,
+        options: &Options,
+    ) -> Result<std::fs::File, ErrorKind> {
+        let (last, parents) = split(components)?;
+        let dir = Destination::directory(self, parents)?;
+        Ok(Destination::create_file(&dir, last, options.overwrite)?.into_std())
+    }
+
+    fn finish_file(
+        &self,
+        file: std::fs::File,
+        item: &Item,
+        options: &Options,
+    ) -> Result<(), ErrorKind> {
+        // The mark first: writing a stream can change the file's time.
+        if let Some(origin) = self.origin {
+            origin.write_file(&file).map_err(ErrorKind::Origin)?;
+        }
+        if let Some(mtime) = item.mtime {
+            set_modified(&file, mtime)?;
+        }
+        set_permissions(&file, item.mode, options.permissions)?;
+        let mut file = file;
+        file.flush().map_err(ErrorKind::Io)
+    }
+
+    fn remove_file(&self, components: &[String]) {
+        if let Ok((last, parents)) = split(components)
+            && let Ok(dir) = Destination::directory(self, parents)
+        {
+            let _ = dir.remove_file(last);
+        }
+    }
+
+    fn symlink(
+        &self,
+        _: &Item,
+        components: &[String],
+        target: &str,
+        to_dir: bool,
+    ) -> Result<(), ErrorKind> {
+        let (last, parents) = split(components)?;
+        let dir = Destination::directory(self, parents)?;
+        Destination::symlink(&dir, last, target, to_dir)
+    }
+
+    fn hard_link(
+        &self,
+        _: &Item,
+        components: &[String],
+        target: &[String],
+    ) -> Result<(), ErrorKind> {
+        let (last, parents) = split(components)?;
+        let dir = Destination::directory(self, parents)?;
+        let (target_last, target_parents) = target.split_last().ok_or(ErrorKind::HardLinkTarget)?;
+        let target_dir = Destination::directory(self, target_parents)?;
+        Destination::hard_link(&target_dir, target_last, &dir, last)
+    }
+
+    fn open_file(&self, components: &[String]) -> Result<(Box<dyn Read + '_>, u64), ErrorKind> {
+        let (last, parents) = components.split_last().ok_or(ErrorKind::HardLinkTarget)?;
+        let dir = Destination::directory(self, parents)?;
+        let source = Destination::open_file(&dir, last)?;
+        let size = source.metadata().map_err(ErrorKind::Io)?.len();
+        Ok((Box::new(source.into_std()), size))
+    }
+
+    fn set_time(&self, components: &[String], mtime: SystemTime) -> Result<(), ErrorKind> {
+        let (last, parents) = split(components)?;
+        let dir = Destination::directory(self, parents)?;
+        Destination::set_time(&dir, last, mtime)
+    }
+
+    fn copies_hard_links(&self, options: &Options) -> bool {
+        options.links == Links::AsFile
+    }
+}
+
+impl TargetFile for std::fs::File {
+    fn has_holes(&self) -> bool {
+        true
+    }
+
+    fn skip(&mut self, n: u64) -> io::Result<()> {
+        let ahead = i64::try_from(n).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        self.seek(SeekFrom::Current(ahead)).map(drop)
+    }
+
+    fn set_len(&mut self, len: u64) -> io::Result<()> {
+        std::fs::File::set_len(self, len)
     }
 }

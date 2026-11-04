@@ -62,6 +62,12 @@
 //! With the feature `rar`, off by default as it takes UnRAR's license,
 //! `extract_rar` extracts RAR archives the same way, reading them twice.
 //!
+//! Each also extracts into a [`Sink`] in place of a folder
+//! ([`extract_zip_to`] and the other `_to` functions): an archive being
+//! written, an index, a checksum of each file. The sink is given what the
+//! folder would be, after the same checks and in the same order, a piece of
+//! data at a time.
+//!
 //! The design is in the repository's `docs/extract.md`.
 
 #![forbid(unsafe_code)]
@@ -77,17 +83,18 @@ mod progress;
 #[cfg(feature = "rar")]
 mod rar;
 mod sevenz;
+mod sink;
 mod tar;
 mod udf;
 mod unicode;
 mod xar;
 mod zip;
 
-pub use cpio::extract_cpio;
+pub use cpio::{extract_cpio, extract_cpio_to};
 #[cfg(feature = "rar")]
 pub use error::RarProblem;
 pub use error::{Error, ErrorKind};
-pub use iso::extract_iso;
+pub use iso::{extract_iso, extract_iso_to};
 pub use name::{MAX_COMPONENT, Name, NameError, check_name};
 pub use origin::Origin;
 pub use plan::{
@@ -95,11 +102,12 @@ pub use plan::{
 };
 pub use progress::{Cancel, Progress, ProgressFn};
 #[cfg(feature = "rar")]
-pub use rar::extract_rar;
-pub use sevenz::extract_7z;
-pub use tar::extract_tar;
-pub use udf::extract_udf;
+pub use rar::{extract_rar, extract_rar_to};
+pub use sevenz::{extract_7z, extract_7z_to};
+pub use sink::{Entry, Sink};
+pub use tar::{extract_tar, extract_tar_to};
+pub use udf::{extract_udf, extract_udf_to};
 /// The version of Unicode names are compared with: major, minor, update.
 pub use unicode::VERSION as UNICODE_VERSION;
-pub use xar::extract_xar;
-pub use zip::{Summary, extract_zip};
+pub use xar::{extract_xar, extract_xar_to};
+pub use zip::{Summary, extract_zip, extract_zip_to};

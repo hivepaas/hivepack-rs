@@ -108,6 +108,16 @@ Each rule that is not about writing outside the destination can be relaxed, by n
 | `cancel` | none | a `Cancel` token that stops it |
 | `progress` | none | a function told how far it is |
 
+## Into something other than a folder
+
+Each extractor has a twin that writes into a `Sink` in place of a folder: `extract_zip_to`, `extract_tar_to`, `extract_7z_to`, `extract_rar_to`, `extract_cpio_to`, `extract_xar_to`, `extract_iso_to` and `extract_udf_to`. A sink is what converts an archive to another format, entry by entry, without a folder in between: one that writes an archive, an index, a checksum of each file. Both go through the same code, so the sink is given what the folder would get, after the same checks, in the same order, and nothing it is not:
+
+- **What is given.** Directories, files and the links `Options::links` keeps, each with its path, checked as names are (so a sink never sees `..`, an absolute path, or two entries of one path), its time, and its permission bits as `Options::permissions` has them. A directory on the way to an entry is given only if the archive has an entry for it.
+- **Files** come as `start_file`, their data in pieces as it is decoded, then `finish_file`; nothing more of an entry is held than the piece being given. The limits count what is given, as they count what is written. A file whose data fails its check is ended with `discard_file`, and the extraction stops with its error.
+- **Links**: symbolic links come after every other entry, as they are created; a hard link after the file it names, as one, whatever `Options::links` says, since what was given cannot be read back to copy. For the same reason a RAR file copy fails here (`ErrorKind::Io`, `Unsupported`).
+- **What a folder only has**: holes, files already there, and marks of origin. A sink is given zeros, `Options::overwrite` and `Options::origin` do nothing, and carrying a mark of origin to what the sink makes is the caller's.
+- **Errors**: an error a sink returns stops the extraction, as `ErrorKind::Io`, the destination's error.
+
 ## tar
 
 A tar archive has no central directory: each header comes before its data, one after the other, often inside a compressor (`.tar.gz`, `.tar.zst`) or age (`.tar.zst.age`). To check every entry before anything is written, as for ZIP, `extract_tar` reads it twice, through a function that opens it again (and so decompresses or decrypts it again): first the headers, the data skipped, for every check of the plan; then the entries are written, each header compared with the first reading's, its type, name, link target and size, and an archive that is not the one checked stops (`ErrorKind::Changed`) at the first that differs, or where the readings end differently. Data cut short stops the first reading, before anything is written; a file whose data fails in the second is removed.

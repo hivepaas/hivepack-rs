@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `extract`: each extractor writes into a `Sink` in place of a folder too (`extract_zip_to`, `extract_tar_to`, `extract_7z_to` and the others), after the same checks and in the same order: to convert an archive entry by entry, without a folder in between. See [docs/extract.md](docs/extract.md#into-something-other-than-a-folder).
+
 ## 0.2.1
 
 - `open`: a `.tlz` file is `.tar.lzma` (its short name, as file managers give it) when its bytes are no other format's: lzip's `.tlz` is still told by its magic.

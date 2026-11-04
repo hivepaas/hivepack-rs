@@ -17,15 +17,15 @@ use crate::iso::{
     AE_IFBLK, AE_IFCHR, AE_IFDIR, AE_IFIFO, AE_IFLNK, AE_IFMT, AE_IFSOCK, Format, Header, Reader,
 };
 
-use crate::extract::destination::Destination;
+use crate::extract::destination::{Target, TargetFile};
 use crate::extract::error::{Error, ErrorKind};
-use crate::extract::name::NameError;
-use crate::extract::plan::{Item, Kind, Links, OnRefused, Options, check};
+use crate::extract::plan::{Item, Kind, OnRefused, Options, check};
 use crate::extract::progress::Run;
+use crate::extract::sink::{Sink, SinkState};
 use crate::extract::tar::{
-    Entry, LinkPlan, bytes_to_write, copy_of, finish_file, name_of, plan_links, read_rest,
+    Entry, LinkPlan, bytes_to_write, copy_of, name_of, plan_links, read_rest, write_with,
 };
-use crate::extract::zip::{Summary, set_dir_times};
+use crate::extract::zip::{Summary, open_destination, set_dir_times};
 
 /// An entry's error, by its index and its path, if it has one.
 fn entry_error(index: u64, h: &Header, kind: ErrorKind) -> Error {
@@ -197,17 +197,37 @@ fn iso_error(e: io::Error) -> ErrorKind {
 /// written to its size, as libarchive's extraction writes it: zisofs leaves
 /// out the blocks of zeros at a file's end, which come out as zeros.
 pub fn extract_iso<R: Read, F: FnMut() -> io::Result<R>>(
-    mut open: F,
+    open: F,
     destination: &Path,
     options: &Options,
 ) -> Result<Summary, Error> {
-    let limits = &options.limits;
-    let run = Run::new(options);
     if let Some(origin) = &options.origin {
         origin
             .check_supported()
             .map_err(|e| Error::global(ErrorKind::Origin(e)))?;
     }
+    extract_into(open, || open_destination(destination, options), options)
+}
+
+/// Extracts the ISO 9660 image that `open` gives into `sink`, with the checks and
+/// in the order of [`extract_iso`], reading it twice as it does: see [`Sink`].
+pub fn extract_iso_to<R: Read, F: FnMut() -> io::Result<R>>(
+    open: F,
+    sink: &mut dyn Sink,
+    options: &Options,
+) -> Result<Summary, Error> {
+    let state = SinkState::new(sink);
+    extract_into(open, || Ok(state.target(options)), options)
+}
+
+/// [`extract_iso`] into the target `make` makes, once the image is checked.
+fn extract_into<R: Read, F: FnMut() -> io::Result<R>, T: Target>(
+    mut open: F,
+    make: impl FnOnce() -> Result<T, Error>,
+    options: &Options,
+) -> Result<Summary, Error> {
+    let limits = &options.limits;
+    let run = Run::new(options);
 
     let first = open().map_err(|e| Error::global(ErrorKind::Io(e)))?;
     let (entries, items, refused) = read_headers(first, &run, options)?;
@@ -228,8 +248,7 @@ pub fn extract_iso<R: Read, F: FnMut() -> io::Result<R>>(
         bytes_to_write(&entries, &items, &kept_indexes, &plans, options),
     );
 
-    let destination = Destination::open(destination, options.origin.as_ref())
-        .map_err(|e| Error::global(ErrorKind::Io(e)))?;
+    let destination = make()?;
     let mut summary = Summary {
         skipped,
         ..Summary::default()
@@ -261,58 +280,50 @@ pub fn extract_iso<R: Read, F: FnMut() -> io::Result<R>>(
         let error = |kind| item.error(kind);
         let components = &name.components;
         if item.kind == Kind::Dir {
-            destination.directory(components).map_err(error)?;
+            destination.directory(item, components).map_err(error)?;
             summary.directories += 1;
             run.entry_done();
             continue;
         }
-        let (last, parents) = components
-            .split_last()
-            .ok_or_else(|| error(ErrorKind::Name(NameError::Empty)))?;
-        let dir = destination.directory(parents).map_err(error)?;
         match plans.get(&item.index) {
-            Some(LinkPlan::Hard(target)) if options.links != Links::AsFile => {
-                let (target_last, target_parents) = target
-                    .split_last()
-                    .ok_or_else(|| error(ErrorKind::HardLinkTarget))?;
-                let target_dir = destination.directory(target_parents).map_err(error)?;
-                Destination::hard_link(&target_dir, target_last, &dir, last).map_err(error)?;
+            Some(LinkPlan::Hard(target)) if !destination.copies_hard_links(options) => {
+                destination
+                    .hard_link(item, components, target)
+                    .map_err(error)?;
                 summary.files += 1;
                 run.entry_done();
                 continue;
             }
             _ => {}
         }
-        let file = Destination::create_file(&dir, last, options.overwrite).map_err(error)?;
         let remaining = limits.max_total_size.saturating_sub(summary.bytes);
         let written = match plans.get(&item.index) {
             Some(LinkPlan::SymlinkAsFile) => write_data(
                 &mut &entry.target[..],
                 item,
                 entry.target.len() as u64,
-                file,
+                &destination,
                 remaining,
                 &run,
                 options,
             ),
             Some(LinkPlan::Hard(target)) => {
                 // A copy of the file it names, with Links::AsFile.
-                copy_of(&destination, target, item, file, remaining, &run, options)
+                copy_of(&destination, target, item, remaining, &run, options)
             }
-            _ => write_data(&mut iso, item, item.size, file, remaining, &run, options),
-        };
-        match written {
-            Ok(written) => {
-                summary.files += 1;
-                summary.bytes += written;
-                run.entry_done();
-            }
-            Err(kind) => {
-                // A file whose data failed is not left.
-                let _ = dir.remove_file(last);
-                return Err(error(kind));
-            }
-        }
+            _ => write_data(
+                &mut iso,
+                item,
+                item.size,
+                &destination,
+                remaining,
+                &run,
+                options,
+            ),
+        }?;
+        summary.files += 1;
+        summary.bytes += written;
+        run.entry_done();
     }
     // The second reading must end where the first did.
     match iso.next() {
@@ -331,13 +342,10 @@ pub fn extract_iso<R: Read, F: FnMut() -> io::Result<R>>(
         else {
             continue;
         };
-        let (last, parents) = name
-            .components
-            .split_last()
-            .ok_or_else(|| error(ErrorKind::Name(NameError::Empty)))?;
         run.check().map_err(error)?;
-        let dir = destination.directory(parents).map_err(error)?;
-        Destination::symlink(&dir, last, target, *to_dir).map_err(error)?;
+        destination
+            .symlink(item, &name.components, target, *to_dir)
+            .map_err(error)?;
         summary.links += 1;
         run.entry_done();
     }
@@ -352,25 +360,33 @@ pub fn extract_iso<R: Read, F: FnMut() -> io::Result<R>>(
 /// file whose data ends before is made `size` long with zeros: zisofs
 /// leaves out the blocks of zeros at a file's end, which libarchive does
 /// not give, where the data of any other file is all there, or fails.
-fn write_data(
+fn write_data<T: Target>(
     r: &mut impl Read,
     item: &Item,
     size: u64,
-    file: cap_std::fs::File,
+    destination: &T,
     remaining: u64,
     run: &Run<'_>,
     options: &Options,
-) -> Result<u64, ErrorKind> {
-    use std::io::Write;
-
+) -> Result<u64, Error> {
     let limits = &options.limits;
     if size > limits.max_entry_size {
-        return Err(ErrorKind::EntryTooLarge);
+        return Err(item.error(ErrorKind::EntryTooLarge));
     }
     if size > remaining {
-        return Err(ErrorKind::TotalTooLarge);
+        return Err(item.error(ErrorKind::TotalTooLarge));
     }
-    let mut file = file.into_std();
+    write_with(item, Some(size), destination, options, |file| {
+        write_into(r, size, file, run)
+    })
+}
+
+fn write_into(
+    r: &mut impl Read,
+    size: u64,
+    file: &mut impl TargetFile,
+    run: &Run<'_>,
+) -> Result<u64, ErrorKind> {
     let mut written: u64 = 0;
     let mut buffer = vec![0u8; 64 * 1024];
     while written < size {
@@ -391,6 +407,5 @@ fn write_data(
         file.write_all(&buffer[..n]).map_err(ErrorKind::Io)?;
         run.wrote(n as u64);
     }
-    finish_file(&file, item, options)?;
     Ok(written)
 }

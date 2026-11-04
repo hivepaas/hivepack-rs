@@ -270,6 +270,11 @@ path = "tests/extract_sevenz.rs"
 required-features = ["deflate", "extract", "sevenz", "xz", "zip"]
 
 [[test]]
+name = "extract_sink"
+path = "tests/extract_sink.rs"
+required-features = ["cpio", "extract", "sevenz", "tar", "udf", "xar", "xz", "zip"]
+
+[[test]]
 name = "extract_tar"
 path = "tests/extract_tar.rs"
 required-features = ["extract", "tar"]
