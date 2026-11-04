@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
 - `extract`: each extractor writes into a `Sink` in place of a folder too (`extract_zip_to`, `extract_tar_to`, `extract_7z_to` and the others), after the same checks and in the same order: to convert an archive entry by entry, without a folder in between. See [docs/extract.md](docs/extract.md#into-something-other-than-a-folder).
 - `extract`: `Options::on_damaged` is asked about each entry whose data is damaged (a check that fails, data that does not decompress or ends early), and can leave it out or keep what was read of it, and go on; `Summary::damaged` lists them. Everything else, names, links and the limits among it, still stops. A tar, cpio or ISO 9660 stream cut short is extracted up to there. See [docs/extract.md](docs/extract.md#damaged-data).
