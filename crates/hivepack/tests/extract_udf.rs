@@ -200,7 +200,7 @@ fn refusals_name_their_reason() {
     }
     // By default, the first refusal stops it before anything is written.
     let scratch = Scratch::new();
-    let e = extract(&image, &scratch.out(), &Options::default()).unwrap_err();
+    let e = extract(&image, &scratch.out(), &portable()).unwrap_err();
     assert!(
         matches!(
             e.kind,
@@ -353,4 +353,12 @@ fn a_directory_named_twice_is_refused() {
     );
     assert!(scratch.out().join("dir/medium").is_file());
     assert!(!scratch.out().join("dir/sub").exists());
+}
+
+/// The options of these tests: names checked by every system's rules, as Windows
+/// and a case-insensitive file system have them, wherever the tests run.
+fn portable() -> hivepack::extract::Options {
+    let mut options = hivepack::extract::Options::default();
+    options.name_rules = hivepack::extract::NameRules::Portable;
+    options
 }

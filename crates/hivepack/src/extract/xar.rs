@@ -31,9 +31,11 @@ use crate::extract::destination::Target;
 use crate::extract::error::{Error, ErrorKind};
 use crate::extract::name::NameError;
 use crate::extract::plan::{Item, Kind, OnRefused, Options, Packages, check};
+use crate::extract::plan::{Renamed, settle};
 use crate::extract::progress::Run;
 use crate::extract::sink::{Sink, SinkState};
-use crate::extract::tar::{Entry, LinkPlan, bytes_to_write, name_of, plan_links, read_rest};
+use crate::extract::tar::named_of;
+use crate::extract::tar::{Entry, LinkPlan, bytes_to_write, plan_links, read_rest};
 use crate::extract::zip::{Summary, open_destination, set_dir_times};
 
 /// The names of the payloads [`Packages::Expand`] extracts: a component
@@ -165,9 +167,12 @@ fn read_headers<R: Read + Send>(
             continue;
         }
         let raw = h.path.clone().unwrap_or_default();
-        let name = match name_of(&raw, options) {
-            Some(name) => name,
-            None => Err(NameError::Empty),
+        let (text, name) = match named_of(&raw, options) {
+            Some(named) => named,
+            None => (
+                String::from_utf8_lossy(&raw).into_owned(),
+                Err(NameError::Empty),
+            ),
         };
         let mut kind = if h.hardlink.is_some() {
             Kind::HardLink
@@ -212,6 +217,7 @@ fn read_headers<R: Read + Send>(
         first.items.push(Item {
             index,
             raw_name: raw,
+            text,
             name,
             kind,
             size,
@@ -272,6 +278,7 @@ pub fn extract_xar<R: Read + Send, F: FnMut() -> io::Result<R>>(
             .check_supported()
             .map_err(|e| Error::global(ErrorKind::Origin(e)))?;
     }
+    let options = &options.for_folder(destination);
     extract_into(open, || open_destination(destination, options), options)
 }
 
@@ -284,6 +291,7 @@ pub fn extract_xar_to<R: Read + Send, F: FnMut() -> io::Result<R>>(
     options: &Options,
 ) -> Result<Summary, Error> {
     let state = SinkState::new(sink);
+    let options = &options.for_sink();
     extract_into(open, || Ok(state.target(options)), options)
 }
 
@@ -299,11 +307,13 @@ fn extract_into<R: Read + Send, F: FnMut() -> io::Result<R>, T: Target>(
     let first = open().map_err(|e| Error::global(ErrorKind::Io(e)))?;
     let FirstReading {
         entries,
-        items,
+        mut items,
         mut payloads,
         refused,
     } = read_headers(first, &run, options)?;
-    let (kept, mut skipped) = check(&items, options)?;
+    let settled = settle(&mut items, options)?;
+    let (kept, mut skipped) = check(&items, &settled, options)?;
+    let mut renamed = settled.renamed;
     skipped.splice(0..0, refused);
     let plans = plan_links(&entries, &items, &kept, options, &mut skipped)?;
     let kept_indexes: HashSet<u64> = kept
@@ -337,6 +347,14 @@ fn extract_into<R: Read + Send, F: FnMut() -> io::Result<R>, T: Target>(
                 .into_iter()
                 .map(|e| in_payload(index as u64, &prefix, e)),
         );
+        renamed.extend(
+            std::mem::take(&mut payload.plan.renamed)
+                .into_iter()
+                .map(|r| Renamed {
+                    error: in_payload(index as u64, &prefix, r.error),
+                    to: r.to,
+                }),
+        );
     }
     if count > limits.max_entries {
         return Err(Error::global(ErrorKind::TooManyEntries));
@@ -351,6 +369,7 @@ fn extract_into<R: Read + Send, F: FnMut() -> io::Result<R>, T: Target>(
     let destination = make()?;
     let mut summary = Summary {
         skipped,
+        renamed,
         ..Summary::default()
     };
     let writer = Writer {

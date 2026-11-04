@@ -163,6 +163,8 @@ pub fn patch_size(data: &mut [u8], index: usize, size: u32) {
 
 pub fn options(change: impl FnOnce(&mut Options)) -> Options {
     let mut options = Options::default();
+    // Every system's names, as these tests were written for, wherever they run.
+    options.name_rules = hivepack::extract::NameRules::Portable;
     change(&mut options);
     options
 }

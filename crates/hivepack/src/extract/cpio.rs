@@ -27,10 +27,12 @@ use crate::extract::destination::Target;
 use crate::extract::error::{Error, ErrorKind};
 use crate::extract::name::NameError;
 use crate::extract::plan::{Item, Kind, OnRefused, Options, check};
+use crate::extract::plan::{Renamed, settle};
 use crate::extract::progress::Run;
 use crate::extract::sink::{Sink, SinkState};
+use crate::extract::tar::named_of;
 use crate::extract::tar::{
-    Entry, LinkPlan, bytes_to_write, copy_of, cut_short, name_of, plan_links, read_rest, write_with,
+    Entry, LinkPlan, bytes_to_write, copy_of, cut_short, plan_links, read_rest, write_with,
 };
 use crate::extract::zip::{Summary, open_destination, set_dir_times};
 
@@ -126,7 +128,7 @@ fn read_headers<R: Read>(r: R, run: &Run<'_>, options: &Options) -> Result<First
         let target = h.hardlink.as_ref().and_then(|t| by_path.get(t)).copied();
         by_path.insert(h.path.clone(), index);
         // The root directory, ".", is not an entry.
-        let Some(name) = name_of(&h.path, options) else {
+        let Some((text, name)) = named_of(&h.path, options) else {
             first.entries.push(entry);
             continue;
         };
@@ -163,6 +165,7 @@ fn read_headers<R: Read>(r: R, run: &Run<'_>, options: &Options) -> Result<First
         first.items.push(Item {
             index,
             raw_name: h.path.clone(),
+            text,
             name,
             kind,
             size,
@@ -221,6 +224,7 @@ pub fn extract_cpio<R: Read, F: FnMut() -> io::Result<R>>(
             .check_supported()
             .map_err(|e| Error::global(ErrorKind::Origin(e)))?;
     }
+    let options = &options.for_folder(destination);
     extract_into(open, || open_destination(destination, options), options)
 }
 
@@ -232,6 +236,7 @@ pub fn extract_cpio_to<R: Read, F: FnMut() -> io::Result<R>>(
     options: &Options,
 ) -> Result<Summary, Error> {
     let state = SinkState::new(sink);
+    let options = &options.for_sink();
     extract_into(open, || Ok(state.target(options)), options)
 }
 
@@ -249,6 +254,7 @@ fn extract_into<R: Read, F: FnMut() -> io::Result<R>, T: Target>(
     let destination = make()?;
     let mut summary = Summary {
         skipped: std::mem::take(&mut plan.skipped),
+        renamed: std::mem::take(&mut plan.renamed),
         ..Summary::default()
     };
     let second = open().map_err(|e| Error::global(ErrorKind::Io(e)))?;
@@ -269,6 +275,8 @@ pub(crate) struct Plan {
     kept_indexes: HashSet<u64>,
     /// The errors of the entries left out, with [`OnRefused::Skip`].
     pub(crate) skipped: Vec<Error>,
+    /// The entries renamed, as [`Options::on_unnamable`] said.
+    pub(crate) renamed: Vec<Renamed>,
     /// Whether the stream is cut short after the entries.
     cut: bool,
 }
@@ -295,13 +303,14 @@ impl Plan {
 pub(crate) fn plan<R: Read>(r: R, run: &Run<'_>, options: &Options) -> Result<Plan, Error> {
     let FirstReading {
         entries,
-        items,
+        mut items,
         refused,
         groups,
         first_of,
         cut,
     } = read_headers(r, run, options)?;
-    let (kept, mut skipped) = check(&items, options)?;
+    let settled = settle(&mut items, options)?;
+    let (kept, mut skipped) = check(&items, &settled, options)?;
     skipped.splice(0..0, refused);
     skipped.sort_by_key(|e| e.index);
     let plans = plan_links(&entries, &items, &kept, options, &mut skipped)?;
@@ -331,6 +340,7 @@ pub(crate) fn plan<R: Read>(r: R, run: &Run<'_>, options: &Options) -> Result<Pl
         kept,
         kept_indexes,
         skipped,
+        renamed: settled.renamed,
         cut,
     })
 }

@@ -35,7 +35,7 @@ fn extracts_files_and_directories() {
         Entry::Stored("dir/sub/naïve.bin".as_bytes(), &[0, 1, 2, 3]),
         Entry::File(b"empty", b""),
     ]);
-    let summary = extract(&data, &scratch.out(), &Options::default()).unwrap();
+    let summary = extract(&data, &scratch.out(), &portable()).unwrap();
     assert_eq!(
         (summary.files, summary.directories, summary.bytes),
         (4, 1, 14)
@@ -83,7 +83,7 @@ fn unix_permissions_are_masked() {
         Entry::Mode(b"read-only", b"x", 0o100_444),
         Entry::Mode(b"script", b"x", 0o100_775),
     ]);
-    extract(&data, &scratch.out(), &Options::default()).unwrap();
+    extract(&data, &scratch.out(), &portable()).unwrap();
     for (name, mode) in [
         ("setuid", 0o755),
         ("private", 0o600),
@@ -101,7 +101,9 @@ fn refused_names_write_nothing() {
         (b"../evil", NameError::Dot),
         (b"a/../../evil", NameError::Dot),
         (b"/tmp/evil", NameError::Absolute),
-        (b"a\\..\\evil", NameError::Backslash),
+        // Windows' separator: it climbs, before it is a backslash.
+        (b"a\\..\\evil", NameError::Dot),
+        (b"a\\evil", NameError::Backslash),
         (b"C:evil", NameError::Colon),
         (b"a.txt:hidden", NameError::Colon),
         (b"CON", NameError::Device),
@@ -114,7 +116,7 @@ fn refused_names_write_nothing() {
         let scratch = Scratch::new();
         let data = zip(&[Entry::File(b"good.txt", b"ok"), Entry::File(name, b"evil")]);
         let shown = String::from_utf8_lossy(name);
-        let Err(error) = extract(&data, &scratch.out(), &Options::default()) else {
+        let Err(error) = extract(&data, &scratch.out(), &portable()) else {
             panic!("{shown:?} extracted: {:?}", listing(&scratch.out()));
         };
         assert!(
@@ -143,7 +145,7 @@ fn the_same_path_twice_is_refused() {
     ];
     for entries in cases {
         let scratch = Scratch::new();
-        let error = extract(&zip(entries), &scratch.out(), &Options::default()).unwrap_err();
+        let error = extract(&zip(entries), &scratch.out(), &portable()).unwrap_err();
         assert!(
             matches!(error.kind, ErrorKind::Duplicate { first: 0 }),
             "{error}"
@@ -153,7 +155,7 @@ fn the_same_path_twice_is_refused() {
     // A directory entry after the files in it is fine.
     let scratch = Scratch::new();
     let data = zip(&[Entry::File(b"d/x", b"1"), Entry::Dir(b"d/")]);
-    extract(&data, &scratch.out(), &Options::default()).unwrap();
+    extract(&data, &scratch.out(), &portable()).unwrap();
     assert_eq!(listing(&scratch.out()), ["d/", "d/x"]);
 }
 
@@ -177,7 +179,7 @@ fn one_name_written_two_ways_is_the_same_path() {
             Entry::File(a.as_bytes(), b"1"),
             Entry::File(b.as_bytes(), b"2"),
         ]);
-        let error = extract(&data, &scratch.out(), &Options::default()).unwrap_err();
+        let error = extract(&data, &scratch.out(), &portable()).unwrap_err();
         assert!(
             matches!(error.kind, ErrorKind::Duplicate { first: 0 }),
             "{a:?} {b:?}: {error}"
@@ -191,7 +193,7 @@ fn one_name_written_two_ways_is_the_same_path() {
 fn links_are_not_created() {
     let scratch = Scratch::new();
     let data = zip(&[Entry::Mode(b"x", b"/etc/passwd", 0o120_777)]);
-    let error = extract(&data, &scratch.out(), &Options::default()).unwrap_err();
+    let error = extract(&data, &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(error.kind, ErrorKind::Link), "{error}");
     assert!(listing(&scratch.out()).is_empty());
 }
@@ -203,7 +205,7 @@ fn special_files_are_written_as_files() {
     for mode in [0o010_644, 0o020_644, 0o060_644, 0o140_644] {
         let scratch = Scratch::new();
         let data = zip(&[Entry::Mode(b"-", b"from a pipe", mode)]);
-        extract(&data, &scratch.out(), &Options::default()).unwrap();
+        extract(&data, &scratch.out(), &portable()).unwrap();
         let path = scratch.out().join("-");
         assert!(
             std::fs::symlink_metadata(&path).unwrap().is_file(),
@@ -227,11 +229,11 @@ fn links_in_the_destination_are_not_followed() {
     std::os::unix::fs::symlink(outside.join("victim"), scratch.out().join("victim")).unwrap();
 
     let data = zip(&[Entry::File(b"link/evil", b"evil")]);
-    let error = extract(&data, &scratch.out(), &Options::default()).unwrap_err();
+    let error = extract(&data, &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(error.kind, ErrorKind::NotADirectory), "{error}");
 
     let data = zip(&[Entry::File(b"victim", b"evil")]);
-    let error = extract(&data, &scratch.out(), &Options::default()).unwrap_err();
+    let error = extract(&data, &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(error.kind, ErrorKind::Exists), "{error}");
 
     assert_eq!(listing(&outside), ["victim"]);
@@ -244,7 +246,7 @@ fn nothing_is_overwritten() {
     std::fs::create_dir_all(scratch.out().join("dir")).unwrap();
     std::fs::write(scratch.out().join("dir/a.txt"), b"mine").unwrap();
     let data = zip(&[Entry::File(b"dir/a.txt", b"theirs")]);
-    let error = extract(&data, &scratch.out(), &Options::default()).unwrap_err();
+    let error = extract(&data, &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(error.kind, ErrorKind::Exists), "{error}");
     assert_eq!(
         std::fs::read(scratch.out().join("dir/a.txt")).unwrap(),
@@ -252,12 +254,12 @@ fn nothing_is_overwritten() {
     );
     // A file where a directory is to be.
     let data = zip(&[Entry::File(b"dir/a.txt/b", b"theirs")]);
-    let error = extract(&data, &scratch.out(), &Options::default()).unwrap_err();
+    let error = extract(&data, &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(error.kind, ErrorKind::NotADirectory), "{error}");
     // A directory where a file is to be, which Windows reports as access
     // denied.
     let data = zip(&[Entry::File(b"dir", b"theirs")]);
-    let error = extract(&data, &scratch.out(), &Options::default()).unwrap_err();
+    let error = extract(&data, &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(error.kind, ErrorKind::Exists), "{error}");
 }
 
@@ -298,7 +300,7 @@ fn limits_stop_archive_bombs() {
     // The file cut off is removed; the one before stays.
     assert_eq!(listing(&scratch.out()), ["ok"]);
     let scratch = Scratch::new();
-    extract(&data, &scratch.out(), &Options::default()).unwrap();
+    extract(&data, &scratch.out(), &portable()).unwrap();
 }
 
 /// Two central directory entries for the same data, as Fifield's
@@ -326,7 +328,7 @@ fn entries_that_share_data_are_refused() {
     // Not with ZIP_CHECKCONS, which refuses the local header named "a" for
     // the entry "b" already.
     let archive = Archive::open(bomb.as_slice(), OpenFlags(0)).unwrap();
-    let error = extract_zip(&archive, &scratch.out(), &Options::default()).unwrap_err();
+    let error = extract_zip(&archive, &scratch.out(), &portable()).unwrap_err();
     assert!(
         matches!(error.kind, ErrorKind::Overlap { other: 0 }),
         "{error}"
@@ -345,7 +347,7 @@ fn data_that_fails_is_removed() {
     let at = data.windows(10).position(|w| w == b"0123456789").unwrap();
     data[at + 4] ^= 1;
     let scratch = Scratch::new();
-    let error = extract(&data, &scratch.out(), &Options::default()).unwrap_err();
+    let error = extract(&data, &scratch.out(), &portable()).unwrap_err();
     assert!(
         matches!(&error.kind, ErrorKind::Archive(e) if e.code() == hivepack::zip::ErrorCode::Crc),
         "{error}"
@@ -356,7 +358,7 @@ fn data_that_fails_is_removed() {
     let mut data = zip(&[Entry::File(b"big", &[5; 100_000])]);
     patch_size(&mut data, 0, 1000);
     let scratch = Scratch::new();
-    let error = extract(&data, &scratch.out(), &Options::default()).unwrap_err();
+    let error = extract(&data, &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(error.kind, ErrorKind::SizeMismatch), "{error}");
     assert!(listing(&scratch.out()).is_empty());
 }
@@ -387,7 +389,7 @@ fn encrypted_entries_need_their_password() {
     let data = out.into_inner();
 
     let scratch = Scratch::new();
-    let error = extract(&data, &scratch.out(), &Options::default()).unwrap_err();
+    let error = extract(&data, &scratch.out(), &portable()).unwrap_err();
     assert!(
         matches!(&error.kind, ErrorKind::Archive(e) if e.code() == hivepack::zip::ErrorCode::NoPasswd),
         "{error}"
@@ -395,7 +397,7 @@ fn encrypted_entries_need_their_password() {
     assert!(listing(&scratch.out()).is_empty());
 
     let scratch = Scratch::new();
-    let mut options = Options::default();
+    let mut options = portable();
     options.password = Some(b"password".to_vec());
     extract(&data, &scratch.out(), &options).unwrap();
     assert_eq!(std::fs::read(scratch.out().join("aes")).unwrap(), b"secret");
@@ -623,7 +625,7 @@ fn directories_get_their_time() {
         Entry::File(b"dir/inner/file", b"x"),
         Entry::DirAt(b"dir/inner/"),
     ]);
-    extract(&data, &scratch.out(), &Options::default()).unwrap();
+    extract(&data, &scratch.out(), &portable()).unwrap();
     for dir in ["dir", "dir/inner"] {
         let modified = std::fs::metadata(scratch.out().join(dir))
             .unwrap()
@@ -919,7 +921,7 @@ fn libzip_archives_extract_or_stop_cleanly() {
         opened += 1;
         let scratch = Scratch::new();
         std::fs::write(scratch.path().join("sentinel"), b"untouched").unwrap();
-        let mut options = Options::default();
+        let mut options = portable();
         options.password = Some(b"foofoofoo".to_vec());
         let outcome = match extract_zip(&archive, &scratch.out(), &options) {
             Ok(summary) => {
@@ -1056,7 +1058,7 @@ fn zipdiff_archives_extract_or_stop_cleanly() {
         };
         let scratch = Scratch::new();
         std::fs::write(scratch.path().join("sentinel"), b"untouched").unwrap();
-        let outcome = match extract_zip(&archive, &scratch.out(), &Options::default()) {
+        let outcome = match extract_zip(&archive, &scratch.out(), &portable()) {
             Ok(summary) => {
                 let files = listing(&scratch.out())
                     .iter()
@@ -1139,4 +1141,12 @@ fn zipdiff_archives_extract_or_stop_cleanly() {
         "c5 unchecked not opened: 65",
     ];
     assert_eq!(found, expected);
+}
+
+/// The options of these tests: names checked by every system's rules, as Windows
+/// and a case-insensitive file system have them, wherever the tests run.
+fn portable() -> hivepack::extract::Options {
+    let mut options = hivepack::extract::Options::default();
+    options.name_rules = hivepack::extract::NameRules::Portable;
+    options
 }

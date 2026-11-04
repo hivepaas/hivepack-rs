@@ -186,7 +186,7 @@ fn extracts_directories_and_files() {
         ]),
     ] {
         let scratch = Scratch::new();
-        let summary = extract(&archive, &scratch.out(), &Options::default()).unwrap();
+        let summary = extract(&archive, &scratch.out(), &portable()).unwrap();
         assert_eq!((summary.files, summary.directories), (3, 1));
         assert_eq!(
             listing(&scratch.out()),
@@ -284,7 +284,7 @@ fn hard_links_hold_the_data_of_the_last_with_data() {
     for (what, archive) in &cases {
         let scratch = Scratch::new();
         let out = scratch.out();
-        let summary = extract(archive, &out, &Options::default()).unwrap();
+        let summary = extract(archive, &out, &portable()).unwrap();
         assert_eq!(summary.files, 4, "{what}");
         assert_eq!(
             listing(&out),
@@ -314,7 +314,7 @@ fn hard_links_hold_the_data_of_the_last_with_data() {
     // Names of a file with no data at all.
     let archive = newc(&[link("a", b"", 9, 2), link("b", b"", 9, 2)]);
     let scratch = Scratch::new();
-    let summary = extract(&archive, &scratch.out(), &Options::default()).unwrap();
+    let summary = extract(&archive, &scratch.out(), &portable()).unwrap();
     assert_eq!((summary.files, summary.bytes), (2, 0));
     assert_eq!(read(&scratch.out().join("b")), b"");
 }
@@ -358,7 +358,7 @@ fn refused_names_write_nothing() {
             entry(name, What::File(b"evil")),
         ]);
         let scratch = Scratch::new();
-        let e = extract(&archive, &scratch.out(), &Options::default()).unwrap_err();
+        let e = extract(&archive, &scratch.out(), &portable()).unwrap_err();
         assert!(
             matches!(e.kind, ErrorKind::Name(n) if n == error),
             "{name}: {e}"
@@ -378,12 +378,12 @@ fn refused_names_write_nothing() {
     // name, as libarchive gives it (the fuzz target found it).
     let archive = newc(&[link("a", b"1", 7, 2), link("a", b"2", 7, 2)]);
     let scratch = Scratch::new();
-    let e = extract(&archive, &scratch.out(), &Options::default()).unwrap_err();
+    let e = extract(&archive, &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Duplicate { first: 0 }), "{e}");
     assert!(!scratch.out().exists());
     let archive = newc(&[entry("a", What::File(b"1")), entry("A", What::File(b"2"))]);
     let scratch = Scratch::new();
-    let e = extract(&archive, &scratch.out(), &Options::default()).unwrap_err();
+    let e = extract(&archive, &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Duplicate { first: 0 }), "{e}");
     assert!(!scratch.out().exists());
 }
@@ -396,7 +396,7 @@ fn links_and_devices_follow_the_options() {
         entry("outside", What::Symlink(b"../../etc/passwd")),
     ]);
     let scratch = Scratch::new();
-    let e = extract(&archive, &scratch.out(), &Options::default()).unwrap_err();
+    let e = extract(&archive, &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Link), "{e}");
     assert!(!scratch.out().exists());
     // As files, holding their targets.
@@ -440,7 +440,7 @@ fn links_and_devices_follow_the_options() {
         entry("init", What::File(b"x")),
     ]);
     let scratch = Scratch::new();
-    let e = extract(&archive, &scratch.out(), &Options::default()).unwrap_err();
+    let e = extract(&archive, &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Special), "{e}");
     let summary = extract(
         &archive,
@@ -462,7 +462,7 @@ fn an_archive_cut_short_or_without_its_trailer_stops_before_writing() {
     let trailer = archive.len() - 124;
     for cut in [archive.len() - 1000, trailer, 50] {
         let scratch = Scratch::new();
-        let e = extract(&archive[..cut], &scratch.out(), &Options::default()).unwrap_err();
+        let e = extract(&archive[..cut], &scratch.out(), &portable()).unwrap_err();
         assert!(matches!(e.kind, ErrorKind::Cpio(_)), "{cut}: {e}");
         assert!(!scratch.out().exists(), "{cut}");
     }
@@ -486,12 +486,12 @@ fn entries_after_garbage_are_refused() {
     let e = extract(
         &with_garbage(b"some garbage!!!!"),
         &scratch.out(),
-        &Options::default(),
+        &portable(),
     )
     .unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Cpio(_)), "{e}");
     let archive = with_garbage(b"some garbage!!!!!!");
-    let e = extract(&archive, &scratch.out(), &Options::default()).unwrap_err();
+    let e = extract(&archive, &scratch.out(), &portable()).unwrap_err();
     assert!(
         matches!(
             &e.kind,
@@ -526,7 +526,7 @@ fn an_archive_that_changes_between_readings_stops() {
             }))
         },
         &scratch.out(),
-        &Options::default(),
+        &portable(),
     )
     .unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Changed), "{e}");
@@ -571,4 +571,12 @@ fn libarchive_test_archives_extract_or_stop_with_their_reason() {
         let cut = name.starts_with("cpio_afio_header");
         assert_eq!(outcome.starts_with("stopped"), cut, "{name}: {outcome}");
     }
+}
+
+/// The options of these tests: names checked by every system's rules, as Windows
+/// and a case-insensitive file system have them, wherever the tests run.
+fn portable() -> hivepack::extract::Options {
+    let mut options = hivepack::extract::Options::default();
+    options.name_rules = hivepack::extract::NameRules::Portable;
+    options
 }

@@ -9,10 +9,9 @@ use crate::zip::{Archive, Flags, ReadAt, opsys, stat};
 
 use crate::extract::destination::{Destination, Target};
 use crate::extract::error::{Error, ErrorKind};
-use crate::extract::name::{NameError, check_name, link_on_the_way, link_target, prepare};
-use crate::extract::plan::{
-    Item, Kind, Links, Names, OnRefused, Options, Permissions, check, fold,
-};
+use crate::extract::name::{NameError, link_on_the_way, link_target};
+use crate::extract::plan::{Item, Kind, Links, OnRefused, Options, Permissions, check, fold};
+use crate::extract::plan::{Renamed, named, settle, skips_links};
 use crate::extract::progress::Run;
 use crate::extract::sink::{Sink, SinkState};
 use crate::extract::tar::write_with;
@@ -28,6 +27,9 @@ pub struct Summary {
     pub bytes: u64,
     /// The entries left out with [`OnRefused::Skip`], and why.
     pub skipped: Vec<Error>,
+    /// The entries extracted under another name, as
+    /// [`Options::on_unnamable`](crate::extract::Options::on_unnamable) said.
+    pub renamed: Vec<Renamed>,
     /// The entries whose data was damaged, gone on from with
     /// [`Options::on_damaged`](crate::extract::Options::on_damaged), in the
     /// order met.
@@ -77,19 +79,13 @@ fn item<R: ReadAt>(archive: &Archive<R>, i: u64, options: &Options) -> Result<It
         }
         _ => as_read.map(str::to_owned),
     };
-    let name = if raw_name.iter().any(u8::is_ascii_control) {
-        Err(NameError::Control)
+    let lossy = || String::from_utf8_lossy(&raw_name).into_owned();
+    let (text, name) = if raw_name.iter().any(u8::is_ascii_control) {
+        (text.unwrap_or_else(lossy), Err(NameError::Control))
     } else {
         match text {
-            Some(text) => {
-                let prepared = prepare(
-                    &text,
-                    options.backslash_separator,
-                    options.names == Names::Sanitize,
-                );
-                check_name(prepared.as_bytes())
-            }
-            None => Err(NameError::NotUtf8),
+            Some(text) => named(&text, options),
+            None => (lossy(), Err(NameError::NotUtf8)),
         }
     };
     let error = |e| Error::new(i, &raw_name, ErrorKind::Archive(e));
@@ -126,6 +122,7 @@ fn item<R: ReadAt>(archive: &Archive<R>, i: u64, options: &Options) -> Result<It
     Ok(Item {
         index: i,
         raw_name,
+        text,
         name,
         kind,
         size: if st.valid & stat::SIZE != 0 {
@@ -226,7 +223,8 @@ fn links<'a, R: ReadAt>(
         };
         let parent = &name.components[..name.components.len().saturating_sub(1)];
         let checked = read_target(archive, item, run, options).and_then(|target| {
-            let resolved = link_target(&target, parent).map_err(ErrorKind::LinkTarget)?;
+            let resolved =
+                link_target(&target, parent, options.name_rules).map_err(ErrorKind::LinkTarget)?;
             // A link on the way, which the system would follow.
             let link_at = |walked: &[String]| paths.get(&fold(walked)).copied();
             if let Some(other) = link_on_the_way(&target, parent, link_at) {
@@ -237,7 +235,7 @@ fn links<'a, R: ReadAt>(
             let target = String::from_utf8_lossy(&target).into_owned();
             Ok((target, to_dir))
         });
-        match (checked, options.on_refused) {
+        match (checked, skips_links(options)) {
             (Ok((target, to_dir)), _) => links.push(Link {
                 item,
                 target,
@@ -257,7 +255,7 @@ fn links<'a, R: ReadAt>(
 /// there, with `options`.
 ///
 /// Every entry is checked before anything is written: its name (see
-/// [`check_name`]), that no two entries name the same path (ignoring
+/// [`check_name`](crate::extract::check_name)), that no two entries name the same path (ignoring
 /// case), links (refused unless [`Options::links`] says otherwise, their
 /// targets read and checked first), that no two share
 /// compressed data, and what the archive says of the sizes against the
@@ -289,6 +287,7 @@ pub fn extract_zip<R: ReadAt>(
             .check_supported()
             .map_err(|e| Error::global(ErrorKind::Origin(e)))?;
     }
+    let options = &options.for_folder(destination);
     extract_into(archive, || open_destination(destination, options), options)
 }
 
@@ -300,6 +299,7 @@ pub fn extract_zip_to<R: ReadAt>(
     options: &Options,
 ) -> Result<Summary, Error> {
     let state = SinkState::new(sink);
+    let options = &options.for_sink();
     extract_into(archive, || Ok(state.target(options)), options)
 }
 
@@ -325,13 +325,14 @@ fn extract_into<R: ReadAt, T: Target>(
     if n > limits.max_entries {
         return Err(Error::global(ErrorKind::TooManyEntries));
     }
-    let items = (0..n)
+    let mut items = (0..n)
         .map(|i| {
             run.check().map_err(Error::global)?;
             item(archive, i, options)
         })
         .collect::<Result<Vec<Item>, Error>>()?;
-    let (kept, mut skipped) = check(&items, options)?;
+    let settled = settle(&mut items, options)?;
+    let (kept, mut skipped) = check(&items, &settled, options)?;
     let links = match options.links {
         Links::Inside => links(archive, &kept, &run, options, &mut skipped)?,
         _ => Vec::new(),
@@ -349,6 +350,7 @@ fn extract_into<R: ReadAt, T: Target>(
     let destination = make()?;
     let mut summary = Summary {
         skipped,
+        renamed: settled.renamed,
         ..Summary::default()
     };
     for &item in &kept {

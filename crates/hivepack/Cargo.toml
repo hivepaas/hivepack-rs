@@ -260,6 +260,11 @@ path = "tests/extract_names.rs"
 required-features = ["extract", "tar", "xz", "zip"]
 
 [[test]]
+name = "extract_native_names"
+path = "tests/extract_native_names.rs"
+required-features = ["extract", "tar", "xz", "zip"]
+
+[[test]]
 name = "extract_rar"
 path = "tests/extract_rar.rs"
 required-features = ["extract", "rar", "xz", "zip"]

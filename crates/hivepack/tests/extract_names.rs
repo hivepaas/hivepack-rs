@@ -64,10 +64,10 @@ fn with(decoder: NameDecoder) -> Options {
 
 #[test]
 fn by_default_tar_refuses_them_and_zip_reads_cp437() {
-    let e = from_tar(&tar(&[OLD]), &Options::default()).unwrap_err();
+    let e = from_tar(&tar(&[OLD]), &portable()).unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Name(NameError::NotUtf8)), "{e}");
     let zipped = zip(&[Entry::File(OLD, b"hi")]);
-    assert_eq!(from_zip(&zipped, &Options::default()).unwrap(), ["Bßo.txt"]);
+    assert_eq!(from_zip(&zipped, &portable()).unwrap(), ["Bßo.txt"]);
 }
 
 #[test]
@@ -134,4 +134,12 @@ fn two_names_that_come_to_one_are_refused_rather_than_written_over() {
     let two: [&[u8]; 2] = [b"a\xe1.txt", b"a\xe2.txt"];
     let e = from_tar(&tar(&two), &with(NameDecoder::lossy())).unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Duplicate { .. }), "{e}");
+}
+
+/// The options of these tests: names checked by every system's rules, as Windows
+/// and a case-insensitive file system have them, wherever the tests run.
+fn portable() -> hivepack::extract::Options {
+    let mut options = hivepack::extract::Options::default();
+    options.name_rules = hivepack::extract::NameRules::Portable;
+    options
 }

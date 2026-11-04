@@ -134,7 +134,7 @@ fn a_bad_name_it_leaves_out_stops_nothing() {
     ]);
     let archive = Archive::open(&data[..], OpenFlags::CHECKCONS).unwrap();
     let scratch = Scratch::new();
-    assert!(extract_zip(&archive, &scratch.out(), &Options::default()).is_err());
+    assert!(extract_zip(&archive, &scratch.out(), &portable()).is_err());
     let picked = options(|o| o.select = Some(under("good.txt")));
     extract_zip(&archive, &scratch.out(), &picked).unwrap();
     assert_eq!(listing(&scratch.out()), ["good.txt"]);
@@ -143,4 +143,12 @@ fn a_bad_name_it_leaves_out_stops_nothing() {
     let all = options(|o| o.select = Some(Arc::new(|_: &[String]| true)));
     extract_zip(&archive, &scratch.out(), &all).unwrap();
     assert_eq!(listing(&scratch.out()), ["good.txt"]);
+}
+
+/// The options of these tests: names checked by every system's rules, as Windows
+/// and a case-insensitive file system have them, wherever the tests run.
+fn portable() -> hivepack::extract::Options {
+    let mut options = hivepack::extract::Options::default();
+    options.name_rules = hivepack::extract::NameRules::Portable;
+    options
 }

@@ -52,7 +52,7 @@ fn cve_2025_29787_a_file_through_a_link_of_the_archive() {
         link(b"link", b"../outside"),
         Entry::File(b"link/pwned", b"x"),
     ]);
-    let error = extract(&data, &scratch.out(), &Options::default()).unwrap_err();
+    let error = extract(&data, &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(error.kind, ErrorKind::Link), "{error}");
     let inside = options(|o| o.links = Links::Inside);
     let error = extract(&data, &scratch.out(), &inside).unwrap_err();
@@ -115,7 +115,7 @@ fn rustsec_2026_0368_links_to_outside() {
         link(b"climbing", b"../../../etc/passwd"),
     ]);
     let scratch = Scratch::new();
-    let error = extract(&data, &scratch.out(), &Options::default()).unwrap_err();
+    let error = extract(&data, &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(error.kind, ErrorKind::Link), "{error}");
     let inside = options(|o| {
         o.links = Links::Inside;
@@ -202,7 +202,7 @@ fn cve_2026_76845_links_already_in_the_destination() {
     std::os::unix::fs::symlink(&victim, scratch.out().join("file")).unwrap();
 
     let data = zip(&[Entry::File(b"dir/payload", b"x")]);
-    let error = extract(&data, &scratch.out(), &Options::default()).unwrap_err();
+    let error = extract(&data, &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(error.kind, ErrorKind::NotADirectory), "{error}");
     let data = zip(&[Entry::File(b"file", b"x")]);
     for overwrite in [false, true] {
@@ -226,7 +226,7 @@ fn cve_2026_39244_a_declared_size_is_not_allocated() {
     assert!(data.len() < 200, "{}", data.len());
     let scratch = Scratch::new();
     let started = std::time::Instant::now();
-    let error = extract(&data, &scratch.out(), &Options::default()).unwrap_err();
+    let error = extract(&data, &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(error.kind, ErrorKind::SizeMismatch), "{error}");
     assert!(started.elapsed().as_secs() < 5);
     assert!(listing(&scratch.out()).is_empty());
@@ -240,7 +240,7 @@ fn cve_2026_39244_a_declared_size_is_not_allocated() {
     let mut stored = zip(&[Entry::Stored(b"big", b"x")]);
     patch_size(&mut stored, 0, 4_000_000_000);
     let scratch = Scratch::new();
-    let error = extract_unchecked(&stored, &scratch.out(), &Options::default()).unwrap_err();
+    let error = extract_unchecked(&stored, &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(error.kind, ErrorKind::Archive(_)), "{error}");
     assert!(listing(&scratch.out()).is_empty());
 }
@@ -254,7 +254,7 @@ fn cve_2026_92000_an_entry_that_declares_nothing() {
     let mut data = zip(&[Entry::File(b"empty", &zeros)]);
     patch_size(&mut data, 0, 0);
     let scratch = Scratch::new();
-    let error = extract(&data, &scratch.out(), &Options::default()).unwrap_err();
+    let error = extract(&data, &scratch.out(), &portable()).unwrap_err();
     assert!(matches!(error.kind, ErrorKind::SizeMismatch), "{error}");
     assert!(listing(&scratch.out()).is_empty());
 }
@@ -279,7 +279,7 @@ fn cve_2024_0450_entries_that_share_one_stream() {
     bomb.extend_from_slice(&end);
     let scratch = Scratch::new();
     let archive = Archive::open(bomb.as_slice(), OpenFlags(0)).unwrap();
-    let error = extract_zip(&archive, &scratch.out(), &Options::default()).unwrap_err();
+    let error = extract_zip(&archive, &scratch.out(), &portable()).unwrap_err();
     assert!(
         matches!(error.kind, ErrorKind::Overlap { other: 0 }),
         "{error}"
@@ -298,7 +298,7 @@ fn cve_2023_38831_a_file_and_a_folder_of_one_name() {
         Entry::File(b"report.pdf ", b"%PDF"),
         Entry::File(b"report.pdf /report.pdf .cmd", b"calc"),
     ]);
-    let error = extract(&data, &scratch.out(), &Options::default()).unwrap_err();
+    let error = extract(&data, &scratch.out(), &portable()).unwrap_err();
     assert!(
         matches!(error.kind, ErrorKind::Name(NameError::TrailingSpaceOrDot)),
         "{error}"
@@ -308,7 +308,7 @@ fn cve_2023_38831_a_file_and_a_folder_of_one_name() {
         Entry::File(b"report.pdf", b"%PDF"),
         Entry::File(b"report.pdf/report.pdf.cmd", b"calc"),
     ]);
-    let error = extract(&data, &scratch.out(), &Options::default()).unwrap_err();
+    let error = extract(&data, &scratch.out(), &portable()).unwrap_err();
     assert!(
         matches!(error.kind, ErrorKind::Duplicate { first: 0 }),
         "{error}"
@@ -329,7 +329,7 @@ fn cve_2013_4787_one_name_twice() {
     assert!(Archive::open(data.as_slice(), OpenFlags::CHECKCONS).is_err());
     let scratch = Scratch::new();
     let archive = Archive::open(data.as_slice(), OpenFlags(0)).unwrap();
-    let error = extract_zip(&archive, &scratch.out(), &Options::default()).unwrap_err();
+    let error = extract_zip(&archive, &scratch.out(), &portable()).unwrap_err();
     assert!(
         matches!(error.kind, ErrorKind::Duplicate { first: 0 }),
         "{error}"
@@ -359,22 +359,23 @@ fn cve_2021_37712_a_link_and_a_directory_one_by_normalization() {
 }
 
 /// WinRAR's CVE-2025-8088, exploited: NTFS alternate data streams whose
-/// names climb with `..\`, to the Startup folder. A colon or a backslash
-/// is refused on every system, and so is the name once backslashes are
-/// separators or names are cleaned up.
+/// names climb with `..\`, to the Startup folder. By every system's rules a
+/// colon and a backslash separate, as on Windows, so the name climbs: refused
+/// as `..`, never asked about as a name this system cannot take, and so it is
+/// once backslashes are separators or names are cleaned up.
 #[test]
 fn cve_2025_8088_streams_that_climb() {
     let name: &[u8] = b"CV.pdf:..\\..\\..\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\evil.lnk";
     let data = zip(&[Entry::File(b"CV.pdf", b"%PDF"), Entry::File(name, b"lnk")]);
     for (options, reason) in [
-        (Options::default(), NameError::Backslash),
-        (options(|o| o.backslash_separator = true), NameError::Colon),
+        (portable(), NameError::Dot),
+        (options(|o| o.backslash_separator = true), NameError::Dot),
         (
             options(|o| {
                 o.backslash_separator = true;
                 o.names = Names::Sanitize;
             }),
-            NameError::Colon,
+            NameError::Dot,
         ),
     ] {
         let scratch = Scratch::new();
@@ -403,7 +404,7 @@ fn cve_2026_58052_streams_that_replace_the_mark() {
         Entry::File(b"setup.exe::$DATA", b"spoofed"),
     ]);
     let scratch = Scratch::new();
-    let error = extract(&data, &scratch.out(), &Options::default()).unwrap_err();
+    let error = extract(&data, &scratch.out(), &portable()).unwrap_err();
     assert!(
         matches!(error.kind, ErrorKind::Name(NameError::Colon)),
         "{error}"
@@ -537,4 +538,12 @@ fn cve_2025_4138_a_target_inside_by_its_text_only() {
         "{error}"
     );
     assert!(!scratch.out().exists());
+}
+
+/// The options of these tests: names checked by every system's rules, as Windows
+/// and a case-insensitive file system have them, wherever the tests run.
+fn portable() -> hivepack::extract::Options {
+    let mut options = hivepack::extract::Options::default();
+    options.name_rules = hivepack::extract::NameRules::Portable;
+    options
 }

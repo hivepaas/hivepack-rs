@@ -60,7 +60,7 @@ fn zip_extract(
 #[test]
 fn without_an_answer_it_stops() {
     let scratch = Scratch::new();
-    let e = zip_extract(&zip_with_bad_crc(), &scratch.out(), &Options::default()).unwrap_err();
+    let e = zip_extract(&zip_with_bad_crc(), &scratch.out(), &portable()).unwrap_err();
     assert!(e.kind.is_damage(), "{e}");
     assert!(!scratch.out().join("bad").exists());
     assert!(!scratch.out().join("after").exists());
@@ -222,7 +222,7 @@ fn a_stream_cut_short_keeps_what_came() {
     // The stream ends there, in the middle of the second file's data.
     let open = || Ok(Cursor::new(data.clone()));
     let scratch = Scratch::new();
-    let e = extract_tar(open, &scratch.out(), &Options::default()).unwrap_err();
+    let e = extract_tar(open, &scratch.out(), &portable()).unwrap_err();
     assert!(e.kind.is_damage(), "{e}");
     assert!(
         !scratch.out().exists(),
@@ -295,7 +295,7 @@ fn a_broken_solid_block_loses_its_files_not_the_next_blocks() {
     }
     let open = || hivepack::sevenz::Archive::open(Cursor::new(data.clone())).unwrap();
     let scratch = Scratch::new();
-    assert!(extract_7z(&mut open(), &scratch.out(), &Options::default()).is_err());
+    assert!(extract_7z(&mut open(), &scratch.out(), &portable()).is_err());
 
     let (f, asked) = answering(OnDamaged::Skip);
     let scratch = Scratch::new();
@@ -348,7 +348,7 @@ fn a_cpio_archive_cut_short_keeps_what_came() {
     // Said to be 5000 bytes, of which 700 come before the end.
     newc(&mut data, b"cut", 0o100_644, &[b'c'; 700], 5000);
     let open = || Ok(Cursor::new(data.clone()));
-    assert!(extract_cpio(open, &Scratch::new().out(), &Options::default()).is_err());
+    assert!(extract_cpio(open, &Scratch::new().out(), &portable()).is_err());
     let (f, asked) = answering(OnDamaged::Keep);
     let scratch = Scratch::new();
     let summary = extract_cpio(open, &scratch.out(), &with(f)).unwrap();
@@ -401,4 +401,12 @@ fn an_image_cut_short_gives_what_came_before() {
             );
         }
     }
+}
+
+/// The options of these tests: names checked by every system's rules, as Windows
+/// and a case-insensitive file system have them, wherever the tests run.
+fn portable() -> hivepack::extract::Options {
+    let mut options = hivepack::extract::Options::default();
+    options.name_rules = hivepack::extract::NameRules::Portable;
+    options
 }

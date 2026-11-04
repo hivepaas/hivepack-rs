@@ -3,13 +3,13 @@
 //! archive says, the same path named twice, links, and data that
 //! overlaps.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use crate::extract::error::{Error, ErrorKind};
-use crate::extract::name::{Name, NameError};
+use crate::extract::name::{Name, NameError, NameRules, renamed};
 use crate::extract::origin::Origin;
 use crate::extract::progress::{Cancel, ProgressFn};
 
@@ -116,6 +116,28 @@ pub enum OnDamaged {
 /// thread, which waits for its answer.
 pub type OnDamagedFn = Arc<dyn Fn(&Error) -> OnDamaged + Send + Sync>;
 
+/// What to do with the entries whose names this system cannot take, asked once,
+/// of all of them, before anything is written ([`Options::on_unnamable`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OnUnnamable {
+    /// Stop, before anything is written (the default).
+    #[default]
+    Stop,
+    /// Leave them out, and extract the rest; they are in
+    /// [`Summary::skipped`](crate::extract::Summary::skipped).
+    Skip,
+    /// Give each a name this system takes, and extract it under that; they are
+    /// in [`Summary::renamed`](crate::extract::Summary::renamed). One that cannot
+    /// be renamed is left out.
+    Rename,
+}
+
+/// Told the entries whose names this system cannot take, each with why, and what
+/// to do with them: called once, on the extracting thread, which waits for its
+/// answer.
+pub type OnUnnamableFn = Arc<dyn Fn(&[Error]) -> OnUnnamable + Send + Sync>;
+
 /// What permissions files get on Unix.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -204,7 +226,23 @@ pub struct Options {
     /// The password encrypted entries are read with.
     pub password: Option<Vec<u8>>,
     pub links: Links,
+    /// What to do with a symbolic link whose target leads outside the
+    /// destination, or through another link ([`ErrorKind::LinkTarget`],
+    /// [`ErrorKind::LinkChain`]), with [`Links::Inside`]: as
+    /// [`Options::on_refused`] says (the default), or left out whatever it says.
+    /// Nothing is ever written through a link, as links are made last.
+    pub links_outside: OnRefused,
     pub names: Names,
+    /// Which systems' names an entry's has to be: this one's (the default), or
+    /// every one's ([`NameRules`]).
+    pub name_rules: NameRules,
+    /// Asked once, before anything is written, what to do with the entries whose
+    /// names this system cannot take ([`NameError::is_unnamable`], and two names
+    /// it takes for one, as `README` and `readme` on Windows and macOS): stop,
+    /// leave them out, or rename them ([`OnUnnamable`]). Without it, they are
+    /// refused as [`Options::on_refused`] says. A name that leads outside the
+    /// destination (`..`, `/etc`) is never asked about: it is refused.
+    pub on_unnamable: Option<OnUnnamableFn>,
     /// Makes text of names that are not UTF-8. By default a ZIP archive's are
     /// read as CP437, and those of other formats refused.
     pub decode_names: Option<NameDecoder>,
@@ -251,6 +289,10 @@ pub struct Options {
     /// be used is not picked. All of them by default. Data the picked ones
     /// depend on, in a solid block or stream, is still read.
     pub select: Option<Select>,
+    /// Whether the destination takes two names that differ only in case, or in
+    /// how their Unicode is composed, for one, as found there; the system's
+    /// default if it could not be.
+    pub(crate) folds: Option<bool>,
 }
 
 /// Shows the options, not the password or the progress function.
@@ -260,7 +302,10 @@ impl std::fmt::Debug for Options {
             .field("limits", &self.limits)
             .field("password", &self.password.as_ref().map(|_| ".."))
             .field("links", &self.links)
+            .field("links_outside", &self.links_outside)
             .field("names", &self.names)
+            .field("name_rules", &self.name_rules)
+            .field("on_unnamable", &self.on_unnamable.as_ref().map(|_| ".."))
             .field("decode_names", &self.decode_names)
             .field("backslash_separator", &self.backslash_separator)
             .field("on_refused", &self.on_refused)
@@ -272,6 +317,7 @@ impl std::fmt::Debug for Options {
             .field("progress", &self.progress.as_ref().map(|_| ".."))
             .field("origin", &self.origin)
             .field("select", &self.select.as_ref().map(|_| ".."))
+            .field("folds", &self.folds)
             .finish()
     }
 }
@@ -293,6 +339,9 @@ pub(crate) enum Kind {
 pub(crate) struct Item {
     pub index: u64,
     pub raw_name: Vec<u8>,
+    /// The name as text, before it is checked: decoded and prepared, or read as
+    /// UTF-8 with U+FFFD where it cannot be. What it is renamed from.
+    pub text: String,
     pub name: Result<Name, NameError>,
     pub kind: Kind,
     /// what the archive says it decompresses to
@@ -319,6 +368,96 @@ pub(crate) fn fold(components: &[String]) -> String {
     crate::extract::unicode::key(&components.join("/"))
 }
 
+/// A path as two names that are one where it is extracted are the same: folded
+/// as [`fold`] folds it where they are ([`folds`]), and as it is elsewhere.
+pub(crate) fn key(components: &[String], folds: bool) -> String {
+    if folds {
+        fold(components)
+    } else {
+        components.join("/")
+    }
+}
+
+/// Whether two names that differ only in case, or in how their Unicode is
+/// composed, are one where `options` extract: always by every system's rules;
+/// by this one's, as the destination was found to take them, or else as
+/// Windows and macOS do by default.
+pub(crate) fn folds(options: &Options) -> bool {
+    match options.name_rules {
+        NameRules::Portable => true,
+        _ => options
+            .folds
+            .unwrap_or(cfg!(any(windows, target_os = "macos"))),
+    }
+}
+
+impl Options {
+    /// These options, for an extraction into the folder at `destination`: what
+    /// its file system takes for one name found, if this system's rules apply.
+    pub(crate) fn for_folder(&self, destination: &std::path::Path) -> Options {
+        let mut options = self.clone();
+        if options.name_rules == NameRules::Native {
+            options.folds = folds_at(destination);
+        }
+        options
+    }
+
+    /// These options, for an extraction into a [`Sink`](crate::extract::Sink):
+    /// no file system takes two names for one there.
+    pub(crate) fn for_sink(&self) -> Options {
+        let mut options = self.clone();
+        if options.name_rules == NameRules::Native {
+            options.folds = Some(false);
+        }
+        options
+    }
+}
+
+/// Whether the file system at `destination`, or at the nearest folder above it
+/// that is there, takes two names that differ only in case, or in how their
+/// Unicode is composed, for one: a file made there, looked for by those names,
+/// and taken away. None if it cannot be told.
+pub(crate) fn folds_at(destination: &std::path::Path) -> Option<bool> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let mut at = destination;
+    while !at.as_os_str().is_empty() && !at.is_dir() {
+        at = at.parent()?;
+    }
+    if at.as_os_str().is_empty() {
+        at = std::path::Path::new(".");
+    }
+    let base = format!(
+        ".hivepack-probe-{}-{}-",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    // É as one character, and é as one, and É as E and an accent.
+    let made = at.join(format!("{base}\u{c9}"));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&made)
+        .ok()?;
+    let found = |name: String| at.join(name).symlink_metadata().is_ok();
+    let folds = found(format!("{base}\u{e9}")) || found(format!("{base}E\u{301}"));
+    let _ = std::fs::remove_file(&made);
+    Some(folds)
+}
+
+/// `text`, an entry's name, prepared as `options` say ([`Names`], a `\\` for a
+/// separator) and checked by their rules: the text prepared, and the name or why
+/// it is refused.
+pub(crate) fn named(text: &str, options: &Options) -> (String, Result<Name, NameError>) {
+    let prepared = crate::extract::name::prepare(
+        text,
+        options.backslash_separator,
+        options.names == Names::Sanitize,
+    );
+    let checked = crate::extract::name::check_name_for(prepared.as_bytes(), options.name_rules);
+    (prepared, checked)
+}
+
 /// What a path already is, among the entries checked.
 struct Seen {
     spelling: Vec<String>,
@@ -339,31 +478,58 @@ fn refused(item: &Item, options: &Options) -> Option<ErrorKind> {
     }
 }
 
+/// What [`settle`] made of the entries whose names this system cannot take:
+/// those left out, and why, and those renamed.
+#[derive(Default)]
+pub(crate) struct Settled {
+    pub skipped: Vec<Error>,
+    pub renamed: Vec<Renamed>,
+    /// The indexes of those left out.
+    left: HashSet<u64>,
+}
+
+/// An entry extracted under another name than its own, as
+/// [`OnUnnamable::Rename`] gives it.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct Renamed {
+    /// The entry, and why its own name was not taken.
+    pub error: Error,
+    /// The name it was given, a component at a time.
+    pub to: Vec<String>,
+}
+
 /// Checks the entries before anything is written: their number, what
 /// they say of their sizes, their names, that no two name the same path
-/// (ignoring case, and a directory one way and a file another), links,
-/// and that no two share compressed data. The entries to
-/// extract, with those refused but skipped (with [`OnRefused::Skip`])
-/// left out, and the errors that left them out.
+/// (ignoring case where the system does, and a directory one way and a file
+/// another), links, and that no two share compressed data. Those whose names
+/// this system cannot take are first asked about ([`Options::on_unnamable`]),
+/// and left out or renamed. The entries to extract, with those refused but
+/// skipped (with [`OnRefused::Skip`]) left out, the errors that left them out,
+/// and those renamed.
 pub(crate) fn check<'a>(
     items: &'a [Item],
+    settled: &Settled,
     options: &Options,
 ) -> Result<(Vec<&'a Item>, Vec<Error>), Error> {
     let limits = &options.limits;
     if items.len() as u64 > limits.max_entries {
         return Err(Error::global(ErrorKind::TooManyEntries));
     }
+    let mut skipped: Vec<Error> = settled
+        .skipped
+        .iter()
+        .map(|e| Error {
+            index: e.index,
+            name: e.name.clone(),
+            kind: clone_kind(&e.kind),
+        })
+        .collect();
     let mut kept = Vec::new();
-    let mut skipped = Vec::new();
     let mut total: u64 = 0;
     let mut seen: HashMap<String, Seen> = HashMap::new();
     for item in items {
-        if let Some(select) = &options.select
-            && !item
-                .name
-                .as_ref()
-                .is_ok_and(|name| select(&name.components))
-        {
+        if settled.left.contains(&item.index) || !picked(item, options) {
             continue;
         }
         let refusal = match refused(item, options) {
@@ -377,9 +543,8 @@ pub(crate) fn check<'a>(
                     return Err(item.error(ErrorKind::TotalTooLarge));
                 }
                 match &item.name {
-                    Ok(name) => {
-                        duplicate(&mut seen, item, name).map(|first| ErrorKind::Duplicate { first })
-                    }
+                    Ok(name) => duplicate(&mut seen, item, name, folds(options))
+                        .map(|first| ErrorKind::Duplicate { first }),
                     Err(e) => Some(ErrorKind::Name(*e)),
                 }
             }
@@ -408,19 +573,183 @@ pub(crate) fn check<'a>(
     Ok((kept, skipped))
 }
 
+/// What to do with a link refused for its target ([`Options::links_outside`]).
+pub(crate) fn skips_links(options: &Options) -> OnRefused {
+    match (options.on_refused, options.links_outside) {
+        (OnRefused::Skip, _) | (_, OnRefused::Skip) => OnRefused::Skip,
+        _ => OnRefused::Stop,
+    }
+}
+
+/// Whether `item` is one [`Options::select`] picks.
+fn picked(item: &Item, options: &Options) -> bool {
+    match &options.select {
+        Some(select) => item
+            .name
+            .as_ref()
+            .is_ok_and(|name| select(&name.components)),
+        None => true,
+    }
+}
+
+/// The entries whose names this system cannot take, asked about with
+/// [`Options::on_unnamable`], before [`check`]: those left out, and those
+/// renamed, their names changed in `items`. Nothing without it.
+pub(crate) fn settle(items: &mut [Item], options: &Options) -> Result<Settled, Error> {
+    let Some(asked) = &options.on_unnamable else {
+        return Ok(Settled::default());
+    };
+    let rules = options.name_rules;
+    let folds = folds(options);
+    // Each, and why: a name refused, or one the system takes for another's.
+    let mut unnamable: Vec<(usize, ErrorKind)> = Vec::new();
+    let mut seen: HashMap<String, Seen> = HashMap::new();
+    for (at, item) in items.iter().enumerate() {
+        if !picked(item, options) {
+            continue;
+        }
+        match (&item.name, item.kind) {
+            (Err(e), _) if e.is_unnamable() => unnamable.push((at, ErrorKind::Name(*e))),
+            (Ok(name), kind) if kind != Kind::Special => {
+                if let Some(first) = duplicate(&mut seen, item, name, folds)
+                    && let Some(other) = items.iter().find(|i| i.index == first)
+                    && other
+                        .name
+                        .as_ref()
+                        .is_ok_and(|o| o.components != name.components)
+                {
+                    unnamable.push((at, ErrorKind::Duplicate { first }));
+                }
+            }
+            _ => {}
+        }
+    }
+    if unnamable.is_empty() {
+        return Ok(Settled::default());
+    }
+    let errors: Vec<Error> = unnamable
+        .iter()
+        .map(|(at, kind)| items[*at].error(clone_kind(kind)))
+        .collect();
+    let chosen = asked(&errors);
+    let mut skipped = Vec::new();
+    let mut left = HashSet::new();
+    let mut given = Vec::new();
+    match chosen {
+        OnUnnamable::Stop => {
+            return Err(errors
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| Error::global(ErrorKind::Name(NameError::Empty))));
+        }
+        OnUnnamable::Skip => {
+            for ((at, _), error) in unnamable.iter().zip(errors) {
+                left.insert(items[*at].index);
+                skipped.push(error);
+            }
+        }
+        OnUnnamable::Rename => {
+            let moving: HashSet<usize> = unnamable.iter().map(|(at, _)| *at).collect();
+            // What the names that stay take up, each folder on their way too.
+            let mut taken: HashMap<String, Vec<String>> = HashMap::new();
+            for (at, item) in items.iter().enumerate() {
+                if let (false, Ok(name)) = (moving.contains(&at), &item.name) {
+                    for end in 1..=name.components.len() {
+                        let path = &name.components[..end];
+                        taken
+                            .entry(key(path, folds))
+                            .or_insert_with(|| path.to_vec());
+                    }
+                }
+            }
+            for ((at, kind), error) in unnamable.iter().zip(errors) {
+                let item = &items[*at];
+                let wanted = match kind {
+                    ErrorKind::Name(_) => renamed(&item.text, rules),
+                    _ => item.name.clone().ok(),
+                };
+                match wanted.map(|name| free(name, &taken, folds)) {
+                    Some(name) => {
+                        for end in 1..=name.components.len() {
+                            let path = &name.components[..end];
+                            taken
+                                .entry(key(path, folds))
+                                .or_insert_with(|| path.to_vec());
+                        }
+                        given.push(Renamed {
+                            error,
+                            to: name.components.clone(),
+                        });
+                        items[*at].name = Ok(name);
+                    }
+                    None => {
+                        left.insert(items[*at].index);
+                        skipped.push(error);
+                    }
+                }
+            }
+        }
+    }
+    Ok(Settled {
+        skipped,
+        renamed: given,
+        left,
+    })
+}
+
+/// `name`, its folders spelled as those already `taken` that the system takes
+/// them for, and its last part numbered (`a (2).txt`) if that is taken too.
+fn free(mut name: Name, taken: &HashMap<String, Vec<String>>, folds: bool) -> Name {
+    let n = name.components.len();
+    for end in 1..n {
+        if let Some(spelling) = taken.get(&key(&name.components[..end], folds)) {
+            name.components[end - 1] = spelling[end - 1].clone();
+        }
+    }
+    if !taken.contains_key(&key(&name.components, folds)) || n == 0 {
+        return name;
+    }
+    let last = name.components[n - 1].clone();
+    let (stem, extension) = match last.rfind('.').filter(|&dot| dot > 0) {
+        Some(dot) => last.split_at(dot),
+        None => (last.as_str(), ""),
+    };
+    for number in 2.. {
+        name.components[n - 1] = format!("{stem} ({number}){extension}");
+        if !taken.contains_key(&key(&name.components, folds)) {
+            break;
+        }
+    }
+    name
+}
+
+/// A copy of `kind`, one of those [`settle`] makes.
+fn clone_kind(kind: &ErrorKind) -> ErrorKind {
+    match kind {
+        ErrorKind::Name(e) => ErrorKind::Name(*e),
+        ErrorKind::Duplicate { first } => ErrorKind::Duplicate { first: *first },
+        _ => ErrorKind::Name(NameError::Empty),
+    }
+}
+
 /// Records the path of `item`, and the directories on its way, in `seen`:
 /// the entry it is the same path as, if one is. A link is a file here.
-fn duplicate(seen: &mut HashMap<String, Seen>, item: &Item, name: &Name) -> Option<u64> {
+fn duplicate(
+    seen: &mut HashMap<String, Seen>,
+    item: &Item,
+    name: &Name,
+    folds: bool,
+) -> Option<u64> {
     let components = &name.components;
     // The directories on the way.
     for end in 1..components.len() {
         let prefix = &components[..end];
-        match seen.get(&fold(prefix)) {
+        match seen.get(&key(prefix, folds)) {
             Some(other) if other.spelling != prefix || !other.is_dir => return Some(other.first),
             Some(_) => {}
             None => {
                 seen.insert(
-                    fold(prefix),
+                    key(prefix, folds),
                     Seen {
                         spelling: prefix.to_vec(),
                         is_dir: true,
@@ -432,7 +761,7 @@ fn duplicate(seen: &mut HashMap<String, Seen>, item: &Item, name: &Name) -> Opti
         }
     }
     let is_dir = item.kind == Kind::Dir;
-    match seen.get_mut(&fold(components)) {
+    match seen.get_mut(&key(components, folds)) {
         // A directory named after files in it.
         Some(other) if is_dir && other.is_dir && !other.named && other.spelling == *components => {
             other.named = true;
@@ -441,7 +770,7 @@ fn duplicate(seen: &mut HashMap<String, Seen>, item: &Item, name: &Name) -> Opti
         Some(other) => Some(other.first),
         None => {
             seen.insert(
-                fold(components),
+                key(components, folds),
                 Seen {
                     spelling: components.clone(),
                     is_dir,
@@ -451,5 +780,24 @@ fn duplicate(seen: &mut HashMap<String, Seen>, item: &Item, name: &Name) -> Opti
             );
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_destination_is_found_to_take_names_for_one_or_not() {
+        let dir = std::env::temp_dir().join(format!("hivepack-folds-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // The systems' own file systems, as CI's runners have them.
+        let default = cfg!(any(windows, target_os = "macos"));
+        assert_eq!(folds_at(&dir), Some(default));
+        // A folder not there yet is on the file system of the one above it.
+        assert_eq!(folds_at(&dir.join("not/there/yet")), Some(default));
+        // Nothing is left of the probe.
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

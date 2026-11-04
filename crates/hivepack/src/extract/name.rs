@@ -1,6 +1,8 @@
-//! The names an entry may have: what is refused, rather than cleaned up,
-//! and the same on every system, so that what an archive extracts to does
-//! not depend on where it is extracted.
+//! The names an entry may have: what is refused, rather than cleaned up.
+//! What would lead outside the destination (`..`, a leading `/`) is refused
+//! everywhere; what a system cannot name (`a:b` on Windows) is refused as
+//! [`NameRules`] says, by this system's rules or by every system's, and can be
+//! renamed ([`Options::on_unnamable`](crate::extract::Options::on_unnamable)).
 //!
 //! Cleaning names up (dropping `..`, a leading `/` or a drive) is what
 //! other extractors do, and two of them clean the same name differently:
@@ -37,6 +39,44 @@ pub enum NameError {
     TrailingSpaceOrDot,
     /// A component longer than 255 bytes.
     TooLong,
+}
+
+impl NameError {
+    /// Whether the name is one the system cannot take, or might not show for what
+    /// it is, rather than one that leads outside the destination or names
+    /// nothing: it can be left out, or renamed, and the rest extracted. Not
+    /// [`NameError::Empty`], [`NameError::Absolute`] or [`NameError::Dot`].
+    pub fn is_unnamable(self) -> bool {
+        !matches!(
+            self,
+            NameError::Empty | NameError::Absolute | NameError::Dot
+        )
+    }
+}
+
+/// Which systems' rules a name keeps to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NameRules {
+    /// This system's (the default): Windows' characters, device names and ends
+    /// of names on Windows only, so that `a:b` and `aux.txt` extract on Linux and
+    /// macOS; and two names that differ only in case, or in how their Unicode is
+    /// composed, are the same path only where the destination's file system takes
+    /// them for one, as it is found to before anything is written: on Windows and
+    /// macOS by default, a USB stick in exFAT on Linux too, and never in a
+    /// [`Sink`](crate::extract::Sink), whose archive can hold both.
+    #[default]
+    Native,
+    /// Every system's, wherever it runs, as [`check_name`] has them: what extracts
+    /// here extracts anywhere, the same.
+    Portable,
+}
+
+impl NameRules {
+    /// Whether Windows' rules apply.
+    pub(crate) fn windows(self) -> bool {
+        cfg!(windows) || self == NameRules::Portable
+    }
 }
 
 impl fmt::Display for NameError {
@@ -96,51 +136,140 @@ fn is_device(component: &str) -> bool {
 const RESERVED: [char; 6] = ['<', '>', '"', '|', '?', '*'];
 
 /// Checks `raw`, an entry's name as the archive gives it, `/` its only
-/// separator: [`Name`], or why it is refused.
+/// separator, by every system's rules ([`NameRules::Portable`]): [`Name`], or
+/// why it is refused.
 pub fn check_name(raw: &[u8]) -> Result<Name, NameError> {
+    check_name_for(raw, NameRules::Portable)
+}
+
+/// Checks `raw` as [`check_name`] does, by the rules `rules` says. What leads
+/// outside the destination, or names nothing, is said before what a system
+/// cannot name: a name refused as [`NameError::is_unnamable`] has neither.
+pub fn check_name_for(raw: &[u8], rules: NameRules) -> Result<Name, NameError> {
     if raw.is_empty() {
         return Err(NameError::Empty);
     }
     let name = std::str::from_utf8(raw).map_err(|_| NameError::NotUtf8)?;
-    if name.chars().any(|c| c.is_ascii_control()) {
-        return Err(NameError::Control);
-    }
-    if name.contains('\\') {
-        return Err(NameError::Backslash);
-    }
     if name.starts_with('/') {
         return Err(NameError::Absolute);
     }
-    if name.contains(':') {
-        return Err(NameError::Colon);
-    }
-    if name.contains(RESERVED) {
-        return Err(NameError::Reserved);
-    }
+    let windows = rules.windows();
     let (path, is_dir) = match name.strip_suffix('/') {
         Some(path) => (path, true),
         None => (name, false),
     };
-    let mut components = Vec::new();
-    for component in path.split('/') {
-        if component.is_empty() {
-            return Err(NameError::Empty);
+    let parts: Vec<&str> = path.split('/').collect();
+    // On Windows a `\` separates too, and a drive leads outside: `..\x`, `C:x`.
+    let pieces = |part: &&str| -> Vec<String> {
+        if windows {
+            part.split(['\\', ':']).map(str::to_owned).collect()
+        } else {
+            vec![(*part).to_owned()]
         }
-        if component == "." || component == ".." {
+    };
+    for piece in parts.iter().flat_map(pieces) {
+        if piece == "." || piece == ".." {
             return Err(NameError::Dot);
         }
+    }
+    if parts.iter().any(|part| part.is_empty()) {
+        return Err(NameError::Empty);
+    }
+    if name.chars().any(|c| c.is_ascii_control()) {
+        return Err(NameError::Control);
+    }
+    if windows && name.contains('\\') {
+        return Err(NameError::Backslash);
+    }
+    if windows && name.contains(':') {
+        return Err(NameError::Colon);
+    }
+    if windows && name.contains(RESERVED) {
+        return Err(NameError::Reserved);
+    }
+    let mut components = Vec::new();
+    for component in parts {
         if component.len() > MAX_COMPONENT {
             return Err(NameError::TooLong);
         }
-        if component.ends_with(' ') || component.ends_with('.') {
+        if windows && (component.ends_with(' ') || component.ends_with('.')) {
             return Err(NameError::TrailingSpaceOrDot);
         }
-        if is_device(component) {
+        if windows && is_device(component) {
             return Err(NameError::Device);
         }
         components.push(component.to_string());
     }
     Ok(Name { components, is_dir })
+}
+
+/// A name for `text`, which `rules` refuse as [`NameError::is_unnamable`], that
+/// they take: what cannot be in a name made `_` (a control character, and by
+/// Windows' rules `\ : < > " | ? *` and a space or dot at a name's end), a device
+/// name given a `_` before it, and a part too long cut down, its extension kept.
+/// It is checked again: none if it still does not pass.
+pub(crate) fn renamed(text: &str, rules: NameRules) -> Option<Name> {
+    let windows = rules.windows();
+    let (path, is_dir) = match text.strip_suffix('/') {
+        Some(path) => (path, true),
+        None => (text, false),
+    };
+    // What leads outside, or names nothing, is never made into a name.
+    if path
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return None;
+    }
+    let fixed: Vec<String> = path
+        .split('/')
+        .map(|part| {
+            let mut fixed: String = part
+                .chars()
+                .map(|c| {
+                    let banned = c.is_control()
+                        || (windows && (c == '\\' || c == ':' || RESERVED.contains(&c)));
+                    if banned { '_' } else { c }
+                })
+                .collect();
+            if windows {
+                let kept = fixed.trim_end_matches([' ', '.']).len();
+                if kept < fixed.len() {
+                    let cut = fixed.len() - kept;
+                    fixed.truncate(kept);
+                    fixed.push_str(&"_".repeat(cut));
+                }
+                if is_device(&fixed) {
+                    fixed.insert(0, '_');
+                }
+            }
+            shortened(&fixed)
+        })
+        .collect();
+    let mut joined = fixed.join("/");
+    if is_dir {
+        joined.push('/');
+    }
+    check_name_for(joined.as_bytes(), rules).ok()
+}
+
+/// `part`, cut down to [`MAX_COMPONENT`] bytes if it is longer: its extension (a
+/// short one) kept, its stem cut where a character ends.
+fn shortened(part: &str) -> String {
+    if part.len() <= MAX_COMPONENT {
+        return part.to_owned();
+    }
+    let extension = part
+        .rfind('.')
+        .map(|dot| &part[dot..])
+        .filter(|ext| ext.len() <= 32)
+        .unwrap_or("");
+    let stem = &part[..part.len() - extension.len()];
+    let mut end = MAX_COMPONENT - extension.len();
+    while !stem.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{extension}", &stem[..end])
 }
 
 /// `name` as the options take it, before [`check_name`]: with
@@ -180,7 +309,11 @@ pub(crate) fn prepare(name: &str, backslash: bool, sanitize: bool) -> String {
 /// [`check_name`] besides `.` and `..`, and must not climb out of the
 /// destination. The path is resolved by its text, which is how the system
 /// resolves it as long as no component on the way is itself a link.
-pub(crate) fn link_target(target: &[u8], parent: &[String]) -> Result<Vec<String>, NameError> {
+pub(crate) fn link_target(
+    target: &[u8],
+    parent: &[String],
+    rules: NameRules,
+) -> Result<Vec<String>, NameError> {
     if target.is_empty() {
         return Err(NameError::Empty);
     }
@@ -188,16 +321,17 @@ pub(crate) fn link_target(target: &[u8], parent: &[String]) -> Result<Vec<String
     if text.chars().any(|c| c.is_ascii_control()) {
         return Err(NameError::Control);
     }
+    // Windows' separator and drive, wherever the link is followed from.
     if text.contains('\\') {
         return Err(NameError::Backslash);
     }
     if text.starts_with('/') {
         return Err(NameError::Absolute);
     }
-    if text.contains(':') {
+    if rules.windows() && text.contains(':') {
         return Err(NameError::Colon);
     }
-    if text.contains(RESERVED) {
+    if rules.windows() && text.contains(RESERVED) {
         return Err(NameError::Reserved);
     }
     let mut resolved = parent.to_vec();
@@ -210,7 +344,7 @@ pub(crate) fn link_target(target: &[u8], parent: &[String]) -> Result<Vec<String
                 }
             }
             _ => {
-                let name = check_name(component.as_bytes())?;
+                let name = check_name_for(component.as_bytes(), rules)?;
                 resolved.extend(name.components);
             }
         }
@@ -238,8 +372,9 @@ pub(crate) fn link_on_the_way(
         }
         if component == ".." {
             walked.pop();
-        } else if let Ok(name) = check_name(component.as_bytes()) {
-            walked.extend(name.components);
+        } else {
+            // What link_target took first: each part a name.
+            walked.push(component.to_owned());
         }
     }
     None
@@ -352,27 +487,45 @@ mod tests {
     fn link_targets_stay_inside() {
         let parent = vec!["a".to_string(), "b".to_string()];
         assert_eq!(
-            link_target(b"c", &parent),
+            link_target(b"c", &parent, NameRules::Portable),
             Ok(vec!["a".into(), "b".into(), "c".into()])
         );
         assert_eq!(
-            link_target(b"../c", &parent),
+            link_target(b"../c", &parent, NameRules::Portable),
             Ok(vec!["a".into(), "c".into()])
         );
         assert_eq!(
-            link_target(b"../../c/./d", &parent),
+            link_target(b"../../c/./d", &parent, NameRules::Portable),
             Ok(vec!["c".into(), "d".into()])
         );
-        assert_eq!(link_target(b"../..", &parent), Ok(vec![]));
-        assert_eq!(link_target(b"../../../c", &parent), Err(NameError::Dot));
         assert_eq!(
-            link_target(b"/etc/passwd", &parent),
+            link_target(b"../..", &parent, NameRules::Portable),
+            Ok(vec![])
+        );
+        assert_eq!(
+            link_target(b"../../../c", &parent, NameRules::Portable),
+            Err(NameError::Dot)
+        );
+        assert_eq!(
+            link_target(b"/etc/passwd", &parent, NameRules::Portable),
             Err(NameError::Absolute)
         );
-        assert_eq!(link_target(b"C:/x", &parent), Err(NameError::Colon));
-        assert_eq!(link_target(b"..\\x", &parent), Err(NameError::Backslash));
-        assert_eq!(link_target(b"nul", &parent), Err(NameError::Device));
-        assert_eq!(link_target(b"", &parent), Err(NameError::Empty));
+        assert_eq!(
+            link_target(b"C:/x", &parent, NameRules::Portable),
+            Err(NameError::Colon)
+        );
+        assert_eq!(
+            link_target(b"..\\x", &parent, NameRules::Portable),
+            Err(NameError::Backslash)
+        );
+        assert_eq!(
+            link_target(b"nul", &parent, NameRules::Portable),
+            Err(NameError::Device)
+        );
+        assert_eq!(
+            link_target(b"", &parent, NameRules::Portable),
+            Err(NameError::Empty)
+        );
     }
 
     #[test]
@@ -392,6 +545,24 @@ mod tests {
     }
 
     /// Names are the archive's: any bytes are checked without panicking.
+    #[test]
+    fn a_name_renamed_is_one_the_rules_take() {
+        let portable = NameRules::Portable;
+        let renamed_as = |text: &str| renamed(text, portable).map(|n| n.components.join("/"));
+        assert_eq!(renamed_as("dir/a:b?.txt").as_deref(), Some("dir/a_b_.txt"));
+        assert_eq!(renamed_as("con.txt").as_deref(), Some("_con.txt"));
+        assert_eq!(renamed_as("tab\there. ").as_deref(), Some("tab_here__"));
+        assert_eq!(renamed_as("back\\slash").as_deref(), Some("back_slash"));
+        let long = format!("{}.pdf", "ệ".repeat(100));
+        let short = renamed_as(&long).unwrap();
+        assert!(
+            short.len() <= MAX_COMPONENT && short.ends_with("ệ.pdf"),
+            "{short}"
+        );
+        // What climbs is not made to take.
+        assert_eq!(renamed_as("../x"), None);
+    }
+
     #[test]
     fn any_bytes_are_checked() {
         let mut x: u64 = 0x9e37_79b9_7f4a_7c15;

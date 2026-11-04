@@ -289,7 +289,7 @@ fn a_refused_name_gives_nothing() {
     let data = support::zip(&[Z::File(b"fine", b"x"), Z::File(b"../up", b"y")]);
     let archive = Archive::open(&data[..], OpenFlags::CHECKCONS).unwrap();
     let mut recorder = Recorder::default();
-    let e = extract_zip_to(&archive, &mut recorder, &Options::default()).unwrap_err();
+    let e = extract_zip_to(&archive, &mut recorder, &portable()).unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Name(NameError::Dot)), "{e}");
     assert!(recorder.given.is_empty());
 }
@@ -305,7 +305,7 @@ fn data_that_fails_is_discarded() {
     data[at] ^= 1;
     let archive = Archive::open(&data[..], OpenFlags::CHECKCONS).unwrap();
     let mut recorder = Recorder::default();
-    let e = extract_zip_to(&archive, &mut recorder, &Options::default()).unwrap_err();
+    let e = extract_zip_to(&archive, &mut recorder, &portable()).unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Archive(_)), "{e}");
     assert_eq!(
         recorder.given,
@@ -554,4 +554,12 @@ fn times_are_given() {
     let at = UNIX_EPOCH + Duration::from_secs(support::MTIME as u64);
     assert_eq!(recorder.times.get("docs/notes.txt"), Some(&at));
     assert_eq!(recorder.times.get("docs"), Some(&at));
+}
+
+/// The options of these tests: names checked by every system's rules, as Windows
+/// and a case-insensitive file system have them, wherever the tests run.
+fn portable() -> hivepack::extract::Options {
+    let mut options = hivepack::extract::Options::default();
+    options.name_rules = hivepack::extract::NameRules::Portable;
+    options
 }
