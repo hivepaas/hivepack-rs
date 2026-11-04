@@ -209,7 +209,12 @@ fn same(out: &Path, disk: &Summary, recorder: &Recorder, sink: &Summary) {
             continue;
         };
         let metadata = std::fs::metadata(out.join(path)).unwrap();
-        if let Some(&mtime) = recorder.times.get(path) {
+        // A 32-bit system's `time_t` ends in January 2038: a file dated after
+        // keeps the time it was written at on disk, and the sink is given its
+        // own.
+        let ends = UNIX_EPOCH + Duration::from_secs(i32::MAX as u64);
+        let held = |t: &&SystemTime| !cfg!(target_pointer_width = "32") || **t <= ends;
+        if let Some(&mtime) = recorder.times.get(path).filter(held) {
             let on_disk = metadata.modified().unwrap();
             let apart = on_disk
                 .duration_since(mtime)
