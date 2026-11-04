@@ -23,7 +23,7 @@ use crate::extract::plan::{Item, Kind, OnRefused, Options, check};
 use crate::extract::progress::Run;
 use crate::extract::sink::{Sink, SinkState};
 use crate::extract::tar::{
-    Entry, LinkPlan, bytes_to_write, copy_of, name_of, plan_links, read_rest, write_with,
+    Entry, LinkPlan, bytes_to_write, copy_of, cut_short, name_of, plan_links, read_rest, write_with,
 };
 use crate::extract::zip::{Summary, open_destination, set_dir_times};
 
@@ -46,9 +46,11 @@ fn system_time(secs: Option<i64>) -> Option<SystemTime> {
     }
 }
 
-/// What the first reading found: the entries, those to extract, and the
-/// errors of those refused for a warning, to skip.
-type FirstReading = (Vec<Entry<Header>>, Vec<Item>, Vec<Error>);
+/// What the first reading found: the entries, those to extract, the errors of
+/// those refused for a warning, to skip, and whether the image is cut short
+/// after them, which [`Options::on_damaged`](crate::extract::Options::on_damaged)
+/// may go on from.
+type FirstReading = (Vec<Entry<Header>>, Vec<Item>, Vec<Error>, bool);
 
 /// The first reading: every header, and each file's data, read up to its
 /// size and dropped, so that data cut short or damaged stops here, before
@@ -67,10 +69,14 @@ fn read_headers<R: Read>(r: R, run: &Run<'_>, options: &Options) -> Result<First
             Ok(Some(h)) => h,
             Ok(None) => break,
             Err(e) => {
+                let kind = ErrorKind::Iso(e);
+                if run.may_be_cut(&kind) {
+                    return Ok((entries, items, refused, true));
+                }
                 return Err(Error {
                     index: Some(index),
                     name: None,
-                    kind: ErrorKind::Iso(e),
+                    kind,
                 });
             }
         };
@@ -134,14 +140,23 @@ fn read_headers<R: Read>(r: R, run: &Run<'_>, options: &Options) -> Result<First
             mtime: system_time(h.mod_time),
         });
         // The data, unless the checks are to stop it for its size.
-        if kind == Kind::File && size <= options.limits.max_entry_size {
-            check_data(&mut iso, size, run).map_err(|kind| entry_error(index, &h, kind))?;
+        if kind == Kind::File
+            && size <= options.limits.max_entry_size
+            && let Err(failed) = check_data(&mut iso, size, run)
+        {
+            if run.may_be_cut(&failed) {
+                // The image ends in its data: the second reading asks about it.
+                entry.item = Some(items.len() - 1);
+                entries.push(entry);
+                return Ok((entries, items, refused, true));
+            }
+            return Err(entry_error(index, &h, failed));
         }
         entry.item = Some(items.len() - 1);
         entries.push(entry);
     }
     read_rest(iso.into_inner(), run, options)?;
-    Ok((entries, items, refused))
+    Ok((entries, items, refused, false))
 }
 
 /// Reads up to `size` bytes of the current entry's data, and drops them.
@@ -230,7 +245,7 @@ fn extract_into<R: Read, F: FnMut() -> io::Result<R>, T: Target>(
     let run = Run::new(options);
 
     let first = open().map_err(|e| Error::global(ErrorKind::Io(e)))?;
-    let (entries, items, refused) = read_headers(first, &run, options)?;
+    let (entries, items, refused, cut) = read_headers(first, &run, options)?;
     let (kept, mut skipped) = check(&items, options)?;
     skipped.splice(0..0, refused);
     skipped.sort_by_key(|e| e.index);
@@ -321,19 +336,22 @@ fn extract_into<R: Read, F: FnMut() -> io::Result<R>, T: Target>(
                 options,
             ),
         }?;
-        summary.files += 1;
-        summary.bytes += written;
+        if let Some(written) = written {
+            summary.files += 1;
+            summary.bytes += written;
+        }
         run.entry_done();
     }
     // The second reading must end where the first did.
     match iso.next() {
-        Ok(None) => {}
+        Ok(None) if !cut => read_rest(iso.into_inner(), &run, options)?,
+        Ok(None) => return Err(Error::global(ErrorKind::Changed)),
         Ok(Some(h)) => {
             return Err(entry_error(entries.len() as u64, &h, ErrorKind::Changed));
         }
+        Err(e) if cut => cut_short(&entries, ErrorKind::Iso(e), &run)?,
         Err(e) => return Err(Error::global(ErrorKind::Iso(e))),
     }
-    read_rest(iso.into_inner(), &run, options)?;
 
     for &item in kept.iter().filter(|item| created_later(item)) {
         let error = |kind| item.error(kind);
@@ -351,6 +369,7 @@ fn extract_into<R: Read, F: FnMut() -> io::Result<R>, T: Target>(
     }
 
     set_dir_times(&destination, &kept, &run)?;
+    summary.damaged = run.take_damaged();
     Ok(summary)
 }
 
@@ -368,7 +387,7 @@ fn write_data<T: Target>(
     remaining: u64,
     run: &Run<'_>,
     options: &Options,
-) -> Result<u64, Error> {
+) -> Result<Option<u64>, Error> {
     let limits = &options.limits;
     if size > limits.max_entry_size {
         return Err(item.error(ErrorKind::EntryTooLarge));
@@ -376,7 +395,7 @@ fn write_data<T: Target>(
     if size > remaining {
         return Err(item.error(ErrorKind::TotalTooLarge));
     }
-    write_with(item, Some(size), destination, options, |file| {
+    write_with(item, Some(size), destination, run, options, |file| {
         write_into(r, size, file, run)
     })
 }

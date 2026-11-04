@@ -19,10 +19,10 @@ use crate::tar::{
     TYPE_X_GLOBAL_HEADER, Time,
 };
 
-use crate::extract::destination::{Target, TargetFile};
+use crate::extract::destination::{Counted, Target, TargetFile};
 use crate::extract::error::{Error, ErrorKind};
 use crate::extract::name::{Name, NameError, check_name, link_on_the_way, link_target, prepare};
-use crate::extract::plan::{Item, Kind, Links, Names, OnRefused, Options, check, fold};
+use crate::extract::plan::{Item, Kind, Links, Names, OnDamaged, OnRefused, Options, check, fold};
 use crate::extract::progress::Run;
 use crate::extract::sink::{Sink, SinkState};
 use crate::extract::zip::{Summary, open_destination, set_dir_times};
@@ -112,11 +112,13 @@ fn system_time(t: Option<Time>) -> Option<SystemTime> {
 }
 
 /// The first reading: every header, the data skipped.
-fn read_headers<R: Read>(
-    r: R,
-    run: &Run<'_>,
-    options: &Options,
-) -> Result<(Vec<Entry<Seen>>, Vec<Item>), Error> {
+/// What the first reading found: the entries and the items to write, and
+/// whether the stream is cut short after them, which
+/// [`Options::on_damaged`](crate::extract::Options::on_damaged) may go on from.
+type FirstReading = (Vec<Entry<Seen>>, Vec<Item>, bool);
+
+/// The first reading.
+fn read_headers<R: Read>(r: R, run: &Run<'_>, options: &Options) -> Result<FirstReading, Error> {
     let mut tr = Reader::new(r);
     let mut entries = Vec::new();
     let mut items = Vec::new();
@@ -127,10 +129,14 @@ fn read_headers<R: Read>(
             Ok(Some(h)) => h,
             Ok(None) => break,
             Err(e) => {
+                let kind = ErrorKind::Tar(e);
+                if run.may_be_cut(&kind) {
+                    return Ok((entries, items, true));
+                }
                 return Err(Error {
                     index: Some(index),
                     name: None,
-                    kind: ErrorKind::Tar(e),
+                    kind,
                 });
             }
         };
@@ -191,7 +197,29 @@ fn read_headers<R: Read>(
         });
     }
     read_rest(tr.into_inner(), run, options)?;
-    Ok((entries, items))
+    Ok((entries, items, false))
+}
+
+/// A stream cut short after `entries`, as the first reading found, met again
+/// with `kind`: gone on from, unless [`Options::on_damaged`](crate::extract::Options::on_damaged)
+/// says to stop, asked of the last entry if its data was not asked about already.
+pub(crate) fn cut_short<S>(
+    entries: &[Entry<S>],
+    kind: ErrorKind,
+    run: &Run<'_>,
+) -> Result<(), Error> {
+    let last = entries.len().checked_sub(1).map(|at| at as u64);
+    if last.is_some() && run.last_damaged() == last {
+        return Ok(());
+    }
+    let error = Error {
+        index: Some(entries.len() as u64),
+        name: None,
+        kind,
+    };
+    let (_, damage) = run.decide_on(error)?;
+    run.damaged(damage, None);
+    Ok(())
 }
 
 /// After the archive's end, the rest of the stream, read to its end: a
@@ -370,7 +398,7 @@ fn extract_into<R: Read, F: FnMut() -> io::Result<R>, T: Target>(
     let run = Run::new(options);
 
     let first = open().map_err(|e| Error::global(ErrorKind::Io(e)))?;
-    let (entries, items) = read_headers(first, &run, options)?;
+    let (entries, items, cut) = read_headers(first, &run, options)?;
     let (kept, mut skipped) = check(&items, options)?;
     let plans = plan_links(&entries, &items, &kept, options, &mut skipped)?;
     let kept_indexes: std::collections::HashSet<u64> = kept
@@ -464,13 +492,16 @@ fn extract_into<R: Read, F: FnMut() -> io::Result<R>, T: Target>(
                 )
             }
         };
-        summary.files += 1;
-        summary.bytes += written?;
+        if let Some(written) = written? {
+            summary.files += 1;
+            summary.bytes += written;
+        }
         run.entry_done();
     }
     // The second reading must end where the first did.
     match tr.next() {
-        Ok(None) => {}
+        Ok(None) if !cut => read_rest(tr.into_inner(), &run, options)?,
+        Ok(None) => return Err(Error::global(ErrorKind::Changed)),
         Ok(Some(h)) => {
             return Err(Error::new(
                 entries.len() as u64,
@@ -478,9 +509,9 @@ fn extract_into<R: Read, F: FnMut() -> io::Result<R>, T: Target>(
                 ErrorKind::Changed,
             ));
         }
+        Err(e) if cut => cut_short(&entries, ErrorKind::Tar(e), &run)?,
         Err(e) => return Err(Error::global(ErrorKind::Tar(e))),
     }
-    read_rest(tr.into_inner(), &run, options)?;
 
     for &item in kept.iter().filter(|item| created_later(item)) {
         let error = |kind| item.error(kind);
@@ -498,6 +529,7 @@ fn extract_into<R: Read, F: FnMut() -> io::Result<R>, T: Target>(
     }
 
     set_dir_times(&destination, &kept, &run)?;
+    summary.damaged = run.take_damaged();
     Ok(summary)
 }
 
@@ -540,32 +572,58 @@ pub(crate) fn bytes_to_write<S>(
 
 /// Writes `item` as a file of `size` bytes, if they are known, whose data `data`
 /// writes into it, then its time and permissions: the bytes `data` says it wrote.
-/// A file whose data fails is not left.
+/// A file whose data fails is not left, unless it is damaged and
+/// [`Options::on_damaged`](crate::extract::Options::on_damaged) says to go on:
+/// none if it is left out, or the bytes kept of it.
 pub(crate) fn write_with<T: Target>(
     item: &Item,
     size: Option<u64>,
     destination: &T,
+    run: &Run<'_>,
     options: &Options,
-    data: impl FnOnce(&mut T::File<'_>) -> Result<u64, ErrorKind>,
-) -> Result<u64, Error> {
+    data: impl FnOnce(&mut Counted<T::File<'_>>) -> Result<u64, ErrorKind>,
+) -> Result<Option<u64>, Error> {
     let error = |kind| item.error(kind);
     let components = &item
         .name
         .as_ref()
         .map_err(|e| error(ErrorKind::Name(*e)))?
         .components;
-    let mut file = destination
+    let file = destination
         .create_file(item, components, size, options)
         .map_err(error)?;
-    data(&mut file)
-        .and_then(|written| {
-            destination.finish_file(file, item, options)?;
-            Ok(written)
-        })
-        .map_err(|kind| {
-            destination.remove_file(components);
-            error(kind)
-        })
+    let mut file = Counted { file, len: 0 };
+    let failed = match data(&mut file) {
+        Ok(written) => match destination.finish_file(file.file, item, options) {
+            Ok(()) => return Ok(Some(written)),
+            Err(kind) => kind,
+        },
+        Err(kind) => match run.decide(item, kind) {
+            Ok((OnDamaged::Keep, damage)) => {
+                destination.damaged(&damage);
+                let kept = file.len;
+                match destination.finish_file(file.file, item, options) {
+                    Ok(()) => {
+                        run.damaged(damage, Some(kept));
+                        return Ok(Some(kept));
+                    }
+                    Err(kind) => kind,
+                }
+            }
+            Ok((_, damage)) => {
+                destination.damaged(&damage);
+                destination.remove_file(components);
+                run.damaged(damage, None);
+                return Ok(None);
+            }
+            Err(e) => {
+                destination.remove_file(components);
+                return Err(e);
+            }
+        },
+    };
+    destination.remove_file(components);
+    Err(error(failed))
 }
 
 /// Writes `item` as a file of the `size` bytes of `r`, at most `remaining` in
@@ -583,8 +641,8 @@ pub(crate) fn write_from<T: Target>(
     holes: bool,
     run: &Run<'_>,
     options: &Options,
-) -> Result<u64, Error> {
-    write_with(item, Some(size), destination, options, |file| {
+) -> Result<Option<u64>, Error> {
+    write_with(item, Some(size), destination, run, options, |file| {
         write_into(r, size, file, remaining, holes, run, options)
     })
 }
@@ -655,7 +713,7 @@ pub(crate) fn copy_of<T: Target>(
     remaining: u64,
     run: &Run<'_>,
     options: &Options,
-) -> Result<u64, Error> {
+) -> Result<Option<u64>, Error> {
     let (mut source, size) = destination
         .open_file(target)
         .map_err(|kind| item.error(kind))?;

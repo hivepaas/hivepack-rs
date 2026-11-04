@@ -7,7 +7,7 @@ use std::io::{self, Read, Write};
 use std::time::SystemTime;
 
 use crate::extract::destination::{Target, TargetFile};
-use crate::extract::error::ErrorKind;
+use crate::extract::error::{Error, ErrorKind};
 use crate::extract::plan::{Item, Options, Permissions};
 
 /// An entry, as it is given to a [`Sink`].
@@ -70,6 +70,15 @@ pub trait Sink {
 
     /// A hard link to the file at `target`, given before it.
     fn hard_link(&mut self, entry: &Entry<'_>, target: &[String]) -> io::Result<()>;
+
+    /// The file being given is damaged, as `error` says, and
+    /// [`Options::on_damaged`] goes on from it: [`Sink::finish_file`] follows, of
+    /// what was given of it, with [`OnDamaged::Keep`](crate::extract::OnDamaged::Keep),
+    /// or [`Sink::discard_file`] with [`OnDamaged::Skip`](crate::extract::OnDamaged::Skip).
+    /// Nothing by default.
+    fn damaged(&mut self, error: &Error) {
+        let _ = error;
+    }
 }
 
 /// The permission bits a sink is told of, as `zip::set_permissions` sets them
@@ -270,5 +279,9 @@ impl<'s, 'k: 's> Target for SinkTarget<'s, 'k> {
 
     fn copies_hard_links(&self, _: &Options) -> bool {
         false
+    }
+
+    fn damaged(&self, error: &Error) {
+        self.sink.borrow_mut().damaged(error);
     }
 }

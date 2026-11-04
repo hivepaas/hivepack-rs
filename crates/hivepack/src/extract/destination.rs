@@ -19,7 +19,7 @@ use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, SystemTimeSpec};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, File, OpenOptions};
 
-use crate::extract::error::ErrorKind;
+use crate::extract::error::{Error, ErrorKind};
 use crate::extract::name::NameError;
 use crate::extract::origin::Origin;
 use crate::extract::plan::{Item, Links, Options};
@@ -234,6 +234,46 @@ pub(crate) trait Target: Sized {
     /// Whether a hard link is written as a copy of its file, as
     /// [`Links::AsFile`] says for a folder.
     fn copies_hard_links(&self, options: &Options) -> bool;
+
+    /// The file being written is damaged, as `error` says, and is to be gone on
+    /// from: kept as it is, or removed, next.
+    fn damaged(&self, _error: &Error) {}
+}
+
+/// A file a [`Target`] writes, and how long it is so far.
+pub(crate) struct Counted<F> {
+    pub(crate) file: F,
+    pub(crate) len: u64,
+}
+
+impl<F: Write> Write for Counted<F> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.file.write(buf)?;
+        self.len += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
+}
+
+impl<F: TargetFile> TargetFile for Counted<F> {
+    fn has_holes(&self) -> bool {
+        self.file.has_holes()
+    }
+
+    fn skip(&mut self, n: u64) -> io::Result<()> {
+        self.file.skip(n)?;
+        self.len += n;
+        Ok(())
+    }
+
+    fn set_len(&mut self, len: u64) -> io::Result<()> {
+        self.file.set_len(len)?;
+        self.len = len;
+        Ok(())
+    }
 }
 
 /// A file a [`Target`] writes.

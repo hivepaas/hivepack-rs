@@ -98,6 +98,7 @@ Each rule that is not about writing outside the destination can be relaxed, by n
 | `backslash_separator` | `false` | `\` taken for a separator, as PowerShell 5.1's `Compress-Archive` writes it |
 | `select` | none: all entries | Extracts only the entries a function picks by path; the others are not checked, counted or written, and data a picked entry depends on in a solid block is still read |
 | `decode_names` | none: ZIP reads CP437, the others refuse | A `NameDecoder` makes text of names that are not UTF-8, told the bytes and what the format reads them as; `NameDecoder::lossy()` keeps that, or else puts U+FFFD for what is not UTF-8. Its text is checked as any name is |
+| `on_damaged` | none: stop | A function told each entry whose data is damaged, which answers to stop, leave it out or keep what was read of it (see [Damaged data](#damaged-data)) |
 | `on_refused` | `OnRefused::Stop` | `Skip`: an entry refused for its name, as a link or as the same path as another is left out, listed in `Summary::skipped` with its reason, and the rest extracted. The limits and overlapping data still stop the extraction: they are about the archive, not one entry |
 | `overwrite` | `false` | Files that are there are replaced, if they are files: opened without following a link and emptied. A link or a directory there still stops it |
 | `permissions` | `Permissions::Masked` | `Preserve`: the entry's bits but setuid, setgid and sticky. `Ignore`: the system's |
@@ -107,6 +108,24 @@ Each rule that is not about writing outside the destination can be relaxed, by n
 | `time_limit` | none | how long the extraction may take (see [Time, cancelling and progress](#time-cancelling-and-progress)) |
 | `cancel` | none | a `Cancel` token that stops it |
 | `progress` | none | a function told how far it is |
+
+## Damaged data
+
+By default an entry whose data is damaged stops the extraction, the entry removed, as any error does. `Options::on_damaged` is asked instead, on the extracting thread, for each such entry, and answers `OnDamaged::Stop`, `Skip` (left out, and on to the next) or `Keep` (what was read of it kept, as it came, and on to the next). The entries gone on from are in `Summary::damaged`, each with its error and the bytes kept.
+
+Only damage is asked about (`ErrorKind::is_damage`): data that fails its check (a CRC-32, RAR's hash, WinZip AES's authentication code), cannot be decompressed, ends before the size the archive says, or cannot be read from the archive. Everything else stops whatever the answer: names, the same path twice, links, devices, the limits, overlapping data, an archive that changed between its readings, the destination, a cancel or the time limit, and a wrong or missing password, which is for the caller to ask for again. A kept file holds no more than its entry says, and counts against the limits as any file.
+
+What can be gone on to depends on the format:
+
+| Format | After a damaged entry |
+|---|---|
+| ZIP, UDF | the next entry, read on its own |
+| RAR | the next entry; in a solid stream what follows may fail too, and is asked about in turn |
+| XAR | the next entry, if the archive reads on from there; one cut short stops the extraction |
+| 7z | the next file, if its folder's stream is whole (a CRC that fails); otherwise the rest of that folder is lost, each of its files asked about and left out, and the next folder read |
+| tar, cpio, ISO 9660 | the stream is read in order: one cut short, or that cannot be read on from a place, is extracted up to there. The first reading stops there too, rather than stopping the extraction, so the entry the stream ends in is asked about when the second reading gets to it; a stream that ends between entries is asked about once, with no entry's name |
+
+A `Sink` is told with `Sink::damaged`, before `finish_file` (kept) or `discard_file` (left out).
 
 ## Into something other than a folder
 

@@ -627,3 +627,45 @@ fn walked_files(dir: &Path) -> usize {
     }
     files
 }
+
+#[test]
+fn a_hash_that_fails_can_be_gone_on_from() {
+    use hivepack::extract::{OnDamaged, OnDamagedFn};
+    let bad = Entry {
+        bad_crc: true,
+        ..Entry::file(b"bad.txt", b"data")
+    };
+    for (how, kept) in [(OnDamaged::Skip, None), (OnDamaged::Keep, Some(4))] {
+        for data in [
+            with_entries(&[
+                Entry::file(b"good.txt", b"ok"),
+                bad,
+                Entry::file(b"after.txt", b"next"),
+            ]),
+            with_entries15(&[
+                Entry::file(b"good.txt", b"ok"),
+                bad,
+                Entry::file(b"after.txt", b"next"),
+            ]),
+        ] {
+            let f: OnDamagedFn = std::sync::Arc::new(move |_| how);
+            let mut options = Options::default();
+            options.on_damaged = Some(f);
+            let scratch = Scratch::new();
+            let summary = extract(&data, &scratch.out(), &options).unwrap();
+            assert_eq!(read(scratch.out().join("good.txt")), b"ok");
+            assert_eq!(read(scratch.out().join("after.txt")), b"next");
+            assert_eq!(
+                scratch.out().join("bad.txt").exists(),
+                kept.is_some(),
+                "{how:?}"
+            );
+            assert_eq!(summary.damaged.len(), 1);
+            assert_eq!(summary.damaged[0].kept, kept);
+            assert!(matches!(
+                summary.damaged[0].error.kind,
+                ErrorKind::RarEntry(RarProblem::BrokenData)
+            ));
+        }
+    }
+}
