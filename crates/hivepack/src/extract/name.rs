@@ -61,8 +61,10 @@ pub enum NameRules {
     /// This system's (the default): Windows' characters, device names and ends
     /// of names on Windows only, so that `a:b` and `aux.txt` extract on Linux and
     /// macOS; and two names that differ only in case, or in how their Unicode is
-    /// composed, are the same path only on Windows and macOS, whose file systems
-    /// take them for one.
+    /// composed, are the same path only where the destination's file system takes
+    /// them for one, as it is found to before anything is written: on Windows and
+    /// macOS by default, a USB stick in exFAT on Linux too, and never in a
+    /// [`Sink`](crate::extract::Sink), whose archive can hold both.
     #[default]
     Native,
     /// Every system's, wherever it runs, as [`check_name`] has them: what extracts
@@ -74,12 +76,6 @@ impl NameRules {
     /// Whether Windows' rules apply.
     pub(crate) fn windows(self) -> bool {
         cfg!(windows) || self == NameRules::Portable
-    }
-
-    /// Whether two names that differ only in case, or in how their Unicode is
-    /// composed, are one.
-    pub(crate) fn folds(self) -> bool {
-        cfg!(any(windows, target_os = "macos")) || self == NameRules::Portable
     }
 }
 

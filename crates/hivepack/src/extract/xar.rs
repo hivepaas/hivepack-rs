@@ -278,6 +278,7 @@ pub fn extract_xar<R: Read + Send, F: FnMut() -> io::Result<R>>(
             .check_supported()
             .map_err(|e| Error::global(ErrorKind::Origin(e)))?;
     }
+    let options = &options.for_folder(destination);
     extract_into(open, || open_destination(destination, options), options)
 }
 
@@ -290,6 +291,7 @@ pub fn extract_xar_to<R: Read + Send, F: FnMut() -> io::Result<R>>(
     options: &Options,
 ) -> Result<Summary, Error> {
     let state = SinkState::new(sink);
+    let options = &options.for_sink();
     extract_into(open, || Ok(state.target(options)), options)
 }
 

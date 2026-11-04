@@ -289,6 +289,10 @@ pub struct Options {
     /// be used is not picked. All of them by default. Data the picked ones
     /// depend on, in a solid block or stream, is still read.
     pub select: Option<Select>,
+    /// Whether the destination takes two names that differ only in case, or in
+    /// how their Unicode is composed, for one, as found there; the system's
+    /// default if it could not be.
+    pub(crate) folds: Option<bool>,
 }
 
 /// Shows the options, not the password or the progress function.
@@ -313,6 +317,7 @@ impl std::fmt::Debug for Options {
             .field("progress", &self.progress.as_ref().map(|_| ".."))
             .field("origin", &self.origin)
             .field("select", &self.select.as_ref().map(|_| ".."))
+            .field("folds", &self.folds)
             .finish()
     }
 }
@@ -363,15 +368,81 @@ pub(crate) fn fold(components: &[String]) -> String {
     crate::extract::unicode::key(&components.join("/"))
 }
 
-/// A path as two names that are one on this system are the same: folded as
-/// [`fold`] folds it where `rules` say names that differ in case are one, and as
-/// it is elsewhere.
-pub(crate) fn key(components: &[String], rules: NameRules) -> String {
-    if rules.folds() {
+/// A path as two names that are one where it is extracted are the same: folded
+/// as [`fold`] folds it where they are ([`folds`]), and as it is elsewhere.
+pub(crate) fn key(components: &[String], folds: bool) -> String {
+    if folds {
         fold(components)
     } else {
         components.join("/")
     }
+}
+
+/// Whether two names that differ only in case, or in how their Unicode is
+/// composed, are one where `options` extract: always by every system's rules;
+/// by this one's, as the destination was found to take them, or else as
+/// Windows and macOS do by default.
+pub(crate) fn folds(options: &Options) -> bool {
+    match options.name_rules {
+        NameRules::Portable => true,
+        _ => options
+            .folds
+            .unwrap_or(cfg!(any(windows, target_os = "macos"))),
+    }
+}
+
+impl Options {
+    /// These options, for an extraction into the folder at `destination`: what
+    /// its file system takes for one name found, if this system's rules apply.
+    pub(crate) fn for_folder(&self, destination: &std::path::Path) -> Options {
+        let mut options = self.clone();
+        if options.name_rules == NameRules::Native {
+            options.folds = folds_at(destination);
+        }
+        options
+    }
+
+    /// These options, for an extraction into a [`Sink`](crate::extract::Sink):
+    /// no file system takes two names for one there.
+    pub(crate) fn for_sink(&self) -> Options {
+        let mut options = self.clone();
+        if options.name_rules == NameRules::Native {
+            options.folds = Some(false);
+        }
+        options
+    }
+}
+
+/// Whether the file system at `destination`, or at the nearest folder above it
+/// that is there, takes two names that differ only in case, or in how their
+/// Unicode is composed, for one: a file made there, looked for by those names,
+/// and taken away. None if it cannot be told.
+pub(crate) fn folds_at(destination: &std::path::Path) -> Option<bool> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let mut at = destination;
+    while !at.as_os_str().is_empty() && !at.is_dir() {
+        at = at.parent()?;
+    }
+    if at.as_os_str().is_empty() {
+        at = std::path::Path::new(".");
+    }
+    let base = format!(
+        ".hivepack-probe-{}-{}-",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    // É as one character, and é as one, and É as E and an accent.
+    let made = at.join(format!("{base}\u{c9}"));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&made)
+        .ok()?;
+    let found = |name: String| at.join(name).symlink_metadata().is_ok();
+    let folds = found(format!("{base}\u{e9}")) || found(format!("{base}E\u{301}"));
+    let _ = std::fs::remove_file(&made);
+    Some(folds)
 }
 
 /// `text`, an entry's name, prepared as `options` say ([`Names`], a `\\` for a
@@ -472,7 +543,7 @@ pub(crate) fn check<'a>(
                     return Err(item.error(ErrorKind::TotalTooLarge));
                 }
                 match &item.name {
-                    Ok(name) => duplicate(&mut seen, item, name, options.name_rules)
+                    Ok(name) => duplicate(&mut seen, item, name, folds(options))
                         .map(|first| ErrorKind::Duplicate { first }),
                     Err(e) => Some(ErrorKind::Name(*e)),
                 }
@@ -529,6 +600,7 @@ pub(crate) fn settle(items: &mut [Item], options: &Options) -> Result<Settled, E
         return Ok(Settled::default());
     };
     let rules = options.name_rules;
+    let folds = folds(options);
     // Each, and why: a name refused, or one the system takes for another's.
     let mut unnamable: Vec<(usize, ErrorKind)> = Vec::new();
     let mut seen: HashMap<String, Seen> = HashMap::new();
@@ -539,7 +611,7 @@ pub(crate) fn settle(items: &mut [Item], options: &Options) -> Result<Settled, E
         match (&item.name, item.kind) {
             (Err(e), _) if e.is_unnamable() => unnamable.push((at, ErrorKind::Name(*e))),
             (Ok(name), kind) if kind != Kind::Special => {
-                if let Some(first) = duplicate(&mut seen, item, name, rules)
+                if let Some(first) = duplicate(&mut seen, item, name, folds)
                     && let Some(other) = items.iter().find(|i| i.index == first)
                     && other
                         .name
@@ -585,7 +657,7 @@ pub(crate) fn settle(items: &mut [Item], options: &Options) -> Result<Settled, E
                     for end in 1..=name.components.len() {
                         let path = &name.components[..end];
                         taken
-                            .entry(key(path, rules))
+                            .entry(key(path, folds))
                             .or_insert_with(|| path.to_vec());
                     }
                 }
@@ -596,12 +668,12 @@ pub(crate) fn settle(items: &mut [Item], options: &Options) -> Result<Settled, E
                     ErrorKind::Name(_) => renamed(&item.text, rules),
                     _ => item.name.clone().ok(),
                 };
-                match wanted.map(|name| free(name, &taken, rules)) {
+                match wanted.map(|name| free(name, &taken, folds)) {
                     Some(name) => {
                         for end in 1..=name.components.len() {
                             let path = &name.components[..end];
                             taken
-                                .entry(key(path, rules))
+                                .entry(key(path, folds))
                                 .or_insert_with(|| path.to_vec());
                         }
                         given.push(Renamed {
@@ -627,14 +699,14 @@ pub(crate) fn settle(items: &mut [Item], options: &Options) -> Result<Settled, E
 
 /// `name`, its folders spelled as those already `taken` that the system takes
 /// them for, and its last part numbered (`a (2).txt`) if that is taken too.
-fn free(mut name: Name, taken: &HashMap<String, Vec<String>>, rules: NameRules) -> Name {
+fn free(mut name: Name, taken: &HashMap<String, Vec<String>>, folds: bool) -> Name {
     let n = name.components.len();
     for end in 1..n {
-        if let Some(spelling) = taken.get(&key(&name.components[..end], rules)) {
+        if let Some(spelling) = taken.get(&key(&name.components[..end], folds)) {
             name.components[end - 1] = spelling[end - 1].clone();
         }
     }
-    if !taken.contains_key(&key(&name.components, rules)) || n == 0 {
+    if !taken.contains_key(&key(&name.components, folds)) || n == 0 {
         return name;
     }
     let last = name.components[n - 1].clone();
@@ -644,7 +716,7 @@ fn free(mut name: Name, taken: &HashMap<String, Vec<String>>, rules: NameRules) 
     };
     for number in 2.. {
         name.components[n - 1] = format!("{stem} ({number}){extension}");
-        if !taken.contains_key(&key(&name.components, rules)) {
+        if !taken.contains_key(&key(&name.components, folds)) {
             break;
         }
     }
@@ -666,18 +738,18 @@ fn duplicate(
     seen: &mut HashMap<String, Seen>,
     item: &Item,
     name: &Name,
-    rules: NameRules,
+    folds: bool,
 ) -> Option<u64> {
     let components = &name.components;
     // The directories on the way.
     for end in 1..components.len() {
         let prefix = &components[..end];
-        match seen.get(&key(prefix, rules)) {
+        match seen.get(&key(prefix, folds)) {
             Some(other) if other.spelling != prefix || !other.is_dir => return Some(other.first),
             Some(_) => {}
             None => {
                 seen.insert(
-                    key(prefix, rules),
+                    key(prefix, folds),
                     Seen {
                         spelling: prefix.to_vec(),
                         is_dir: true,
@@ -689,7 +761,7 @@ fn duplicate(
         }
     }
     let is_dir = item.kind == Kind::Dir;
-    match seen.get_mut(&key(components, rules)) {
+    match seen.get_mut(&key(components, folds)) {
         // A directory named after files in it.
         Some(other) if is_dir && other.is_dir && !other.named && other.spelling == *components => {
             other.named = true;
@@ -698,7 +770,7 @@ fn duplicate(
         Some(other) => Some(other.first),
         None => {
             seen.insert(
-                key(components, rules),
+                key(components, folds),
                 Seen {
                     spelling: components.clone(),
                     is_dir,
@@ -708,5 +780,24 @@ fn duplicate(
             );
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_destination_is_found_to_take_names_for_one_or_not() {
+        let dir = std::env::temp_dir().join(format!("hivepack-folds-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // The systems' own file systems, as CI's runners have them.
+        let default = cfg!(any(windows, target_os = "macos"));
+        assert_eq!(folds_at(&dir), Some(default));
+        // A folder not there yet is on the file system of the one above it.
+        assert_eq!(folds_at(&dir.join("not/there/yet")), Some(default));
+        // Nothing is left of the probe.
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

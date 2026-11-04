@@ -11,8 +11,10 @@ mod support;
 use std::sync::{Arc, Mutex};
 
 use hivepack::extract::{
-    ErrorKind, Links, NameError, NameRules, OnRefused, OnUnnamable, Options, check_name_for,
+    ErrorKind, Links, NameError, NameRules, OnRefused, OnUnnamable, Options, Sink, check_name_for,
+    extract_zip_to,
 };
+use hivepack::zip::{Archive, OpenFlags};
 use support::{Entry, Scratch, extract, listing, zip};
 
 /// Options by every system's rules, as Windows and macOS have them anywhere,
@@ -266,4 +268,72 @@ fn a_link_that_leads_outside_can_be_left_out() {
         .map(|e| e.name.as_deref().unwrap())
         .collect();
     assert_eq!(left, [&b"out"[..], b"up"]);
+}
+
+/// What a sink is given: the paths of its files.
+#[derive(Default)]
+struct Names(Vec<String>);
+
+impl Sink for Names {
+    fn directory(&mut self, _: &hivepack::extract::Entry<'_>) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn start_file(&mut self, entry: &hivepack::extract::Entry<'_>) -> std::io::Result<()> {
+        self.0.push(entry.path.join("/"));
+        Ok(())
+    }
+    fn write(&mut self, _: &[u8]) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn finish_file(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn discard_file(&mut self) {}
+    fn symlink(&mut self, _: &hivepack::extract::Entry<'_>, _: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn hard_link(&mut self, _: &hivepack::extract::Entry<'_>, _: &[String]) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A sink takes two names that differ only in case, on every system: what it
+/// makes is an archive, which holds both, not a folder.
+#[test]
+fn a_sink_takes_names_that_differ_only_in_case() {
+    let data = zip(&[
+        Entry::File(b"README", b"upper"),
+        Entry::File(b"readme", b"lower"),
+    ]);
+    let archive = Archive::open(&data[..], OpenFlags::CHECKCONS).unwrap();
+    let mut names = Names::default();
+    extract_zip_to(&archive, &mut names, &Options::default()).unwrap();
+    assert_eq!(names.0, ["README", "readme"]);
+    // By every system's rules, they are one.
+    let mut options = Options::default();
+    options.name_rules = NameRules::Portable;
+    let mut names = Names::default();
+    let error = extract_zip_to(&archive, &mut names, &options).unwrap_err();
+    assert!(
+        matches!(error.kind, ErrorKind::Duplicate { first: 0 }),
+        "{error}"
+    );
+}
+
+/// On Windows and macOS, whose file systems take two names that differ only in
+/// case for one, as the destination is found to, they are asked about by this
+/// system's rules too.
+#[cfg(any(windows, target_os = "macos"))]
+#[test]
+fn names_one_where_extracted_are_asked_about() {
+    let data = zip(&[
+        Entry::File(b"README", b"upper"),
+        Entry::File(b"readme", b"lower"),
+    ]);
+    let (mut options, asked) = asking(OnUnnamable::Rename);
+    options.name_rules = NameRules::Native;
+    let scratch = Scratch::new();
+    let summary = extract(&data, &scratch.out(), &options).unwrap();
+    assert_eq!(*asked.lock().unwrap(), [["readme"]]);
+    assert_eq!(summary.renamed[0].to, ["readme (2)"]);
 }

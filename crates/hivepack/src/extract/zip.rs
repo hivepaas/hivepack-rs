@@ -287,6 +287,7 @@ pub fn extract_zip<R: ReadAt>(
             .check_supported()
             .map_err(|e| Error::global(ErrorKind::Origin(e)))?;
     }
+    let options = &options.for_folder(destination);
     extract_into(archive, || open_destination(destination, options), options)
 }
 
@@ -298,6 +299,7 @@ pub fn extract_zip_to<R: ReadAt>(
     options: &Options,
 ) -> Result<Summary, Error> {
     let state = SinkState::new(sink);
+    let options = &options.for_sink();
     extract_into(archive, || Ok(state.target(options)), options)
 }
 

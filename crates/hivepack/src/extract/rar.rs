@@ -426,6 +426,7 @@ where
             .check_supported()
             .map_err(|e| Error::global(ErrorKind::Origin(e)))?;
     }
+    let options = &options.for_folder(destination);
     extract_into(open, || open_destination(destination, options), options)
 }
 
@@ -442,6 +443,7 @@ where
     F: FnMut(&str) -> Result<Archive<R>, crate::rar::Error>,
 {
     let state = SinkState::new(sink);
+    let options = &options.for_sink();
     extract_into(open, || Ok(state.target(options)), options)
 }
 

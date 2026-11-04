@@ -267,6 +267,7 @@ pub fn extract_7z<R: Read + Seek>(
             .check_supported()
             .map_err(|e| Error::global(ErrorKind::Origin(e)))?;
     }
+    let options = &options.for_folder(destination);
     extract_into(archive, || open_destination(destination, options), options)
 }
 
@@ -278,6 +279,7 @@ pub fn extract_7z_to<R: Read + Seek>(
     options: &Options,
 ) -> Result<Summary, Error> {
     let state = SinkState::new(sink);
+    let options = &options.for_sink();
     extract_into(archive, || Ok(state.target(options)), options)
 }
 
