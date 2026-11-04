@@ -15,6 +15,7 @@ use crate::extract::plan::{
 };
 use crate::extract::progress::Run;
 use crate::extract::sink::{Sink, SinkState};
+use crate::extract::tar::write_with;
 
 /// What was extracted.
 #[derive(Debug, Default)]
@@ -27,6 +28,21 @@ pub struct Summary {
     pub bytes: u64,
     /// The entries left out with [`OnRefused::Skip`], and why.
     pub skipped: Vec<Error>,
+    /// The entries whose data was damaged, gone on from with
+    /// [`Options::on_damaged`](crate::extract::Options::on_damaged), in the
+    /// order met.
+    pub damaged: Vec<Damaged>,
+}
+
+/// An entry whose data was damaged, gone on from.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct Damaged {
+    /// The entry, and what was wrong with its data.
+    pub error: Error,
+    /// The bytes of its data kept, with [`OnDamaged::Keep`](crate::extract::OnDamaged::Keep);
+    /// none if it was left out.
+    pub kept: Option<u64>,
 }
 
 /// The type bits of a Unix mode.
@@ -351,22 +367,15 @@ fn extract_into<R: ReadAt, T: Target>(
             run.entry_done();
             continue;
         }
-        let file = destination
-            .create_file(item, components, Some(item.size), options)
-            .map_err(error)?;
         let remaining = limits.max_total_size.saturating_sub(summary.bytes);
-        match write_file(archive, item, &destination, file, remaining, &run, options) {
-            Ok(written) => {
-                summary.files += 1;
-                summary.bytes += written;
-                run.entry_done();
-            }
-            Err(kind) => {
-                // A file whose data failed is not left.
-                destination.remove_file(components);
-                return Err(error(kind));
-            }
+        let written = write_with(item, Some(item.size), &destination, &run, options, |file| {
+            write_file(archive, item, file, remaining, &run, options)
+        })?;
+        if let Some(written) = written {
+            summary.files += 1;
+            summary.bytes += written;
         }
+        run.entry_done();
     }
 
     for link in &links {
@@ -383,6 +392,7 @@ fn extract_into<R: ReadAt, T: Target>(
     }
 
     set_dir_times(&destination, &kept, &run)?;
+    summary.damaged = run.take_damaged();
     Ok(summary)
 }
 
@@ -414,12 +424,11 @@ pub(crate) fn set_dir_times<T: Target>(
 }
 
 /// Writes the data of `item` into `file`, at most `remaining` bytes in
-/// all, then its time and permissions: the bytes written.
-fn write_file<R: ReadAt, T: Target>(
+/// all: the bytes written.
+fn write_file<R: ReadAt>(
     archive: &Archive<R>,
     item: &Item,
-    destination: &T,
-    mut file: T::File<'_>,
+    file: &mut impl Write,
     remaining: u64,
     run: &Run<'_>,
     options: &Options,
@@ -449,7 +458,6 @@ fn write_file<R: ReadAt, T: Target>(
     if written != item.size {
         return Err(ErrorKind::SizeMismatch);
     }
-    destination.finish_file(file, item, options)?;
     Ok(written)
 }
 

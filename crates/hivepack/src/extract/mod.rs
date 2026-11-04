@@ -98,7 +98,8 @@ pub use iso::{extract_iso, extract_iso_to};
 pub use name::{MAX_COMPONENT, Name, NameError, check_name};
 pub use origin::Origin;
 pub use plan::{
-    Limits, Links, NameDecoder, Names, OnRefused, Options, Packages, Permissions, Select,
+    Limits, Links, NameDecoder, Names, OnDamaged, OnDamagedFn, OnRefused, Options, Packages,
+    Permissions, Select,
 };
 pub use progress::{Cancel, Progress, ProgressFn};
 #[cfg(feature = "rar")]
@@ -110,4 +111,4 @@ pub use udf::{extract_udf, extract_udf_to};
 /// The version of Unicode names are compared with: major, minor, update.
 pub use unicode::VERSION as UNICODE_VERSION;
 pub use xar::{extract_xar, extract_xar_to};
-pub use zip::{Summary, extract_zip, extract_zip_to};
+pub use zip::{Damaged, Summary, extract_zip, extract_zip_to};

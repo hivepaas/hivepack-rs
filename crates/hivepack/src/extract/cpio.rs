@@ -30,7 +30,7 @@ use crate::extract::plan::{Item, Kind, OnRefused, Options, check};
 use crate::extract::progress::Run;
 use crate::extract::sink::{Sink, SinkState};
 use crate::extract::tar::{
-    Entry, LinkPlan, bytes_to_write, copy_of, name_of, plan_links, read_rest, write_with,
+    Entry, LinkPlan, bytes_to_write, copy_of, cut_short, name_of, plan_links, read_rest, write_with,
 };
 use crate::extract::zip::{Summary, open_destination, set_dir_times};
 
@@ -71,6 +71,9 @@ struct FirstReading {
     groups: HashMap<u64, Group>,
     /// The first entry of the file each hard link is a name of.
     first_of: HashMap<u64, u64>,
+    /// Whether the stream is cut short after the entries, which
+    /// [`Options::on_damaged`](crate::extract::Options::on_damaged) may go on from.
+    cut: bool,
 }
 
 /// The first reading: every header, the data skipped (which reading it
@@ -88,10 +91,15 @@ fn read_headers<R: Read>(r: R, run: &Run<'_>, options: &Options) -> Result<First
             Ok(Some(h)) => h,
             Ok(None) => break,
             Err(e) => {
+                let kind = ErrorKind::Cpio(e);
+                if run.may_be_cut(&kind) {
+                    first.cut = true;
+                    return Ok(first);
+                }
                 return Err(Error {
                     index: Some(index),
                     name: None,
-                    kind: ErrorKind::Cpio(e),
+                    kind,
                 });
             }
         };
@@ -245,6 +253,7 @@ fn extract_into<R: Read, F: FnMut() -> io::Result<R>, T: Target>(
     };
     let second = open().map_err(|e| Error::global(ErrorKind::Io(e)))?;
     write(second, &mut plan, &destination, &run, options, &mut summary)?;
+    summary.damaged = run.take_damaged();
     Ok(summary)
 }
 
@@ -260,6 +269,8 @@ pub(crate) struct Plan {
     kept_indexes: HashSet<u64>,
     /// The errors of the entries left out, with [`OnRefused::Skip`].
     pub(crate) skipped: Vec<Error>,
+    /// Whether the stream is cut short after the entries.
+    cut: bool,
 }
 
 impl Plan {
@@ -288,6 +299,7 @@ pub(crate) fn plan<R: Read>(r: R, run: &Run<'_>, options: &Options) -> Result<Pl
         refused,
         groups,
         first_of,
+        cut,
     } = read_headers(r, run, options)?;
     let (kept, mut skipped) = check(&items, options)?;
     skipped.splice(0..0, refused);
@@ -319,6 +331,7 @@ pub(crate) fn plan<R: Read>(r: R, run: &Run<'_>, options: &Options) -> Result<Pl
         kept,
         kept_indexes,
         skipped,
+        cut,
     })
 }
 
@@ -341,6 +354,7 @@ pub(crate) fn write<R: Read, T: Target>(
         plans,
         kept,
         kept_indexes,
+        cut,
         ..
     } = plan;
     let kept: Vec<&Item> = kept.iter().map(|&at| &items[at]).collect();
@@ -441,13 +455,14 @@ pub(crate) fn write<R: Read, T: Target>(
     }
     // The second reading must end where the first did.
     match cpio.next() {
-        Ok(None) => {}
+        Ok(None) if !*cut => read_rest(cpio.into_inner(), run, options)?,
+        Ok(None) => return Err(Error::global(ErrorKind::Changed)),
         Ok(Some(h)) => {
             return Err(entry_error(entries.len() as u64, &h, ErrorKind::Changed));
         }
+        Err(e) if *cut => cut_short(entries, ErrorKind::Cpio(e), run)?,
         Err(e) => return Err(Error::global(ErrorKind::Cpio(e))),
     }
-    read_rest(cpio.into_inner(), run, options)?;
 
     for &item in kept.iter().filter(|item| created_later(item)) {
         let error = |kind| item.error(kind);
@@ -492,7 +507,7 @@ impl<T: Target> Writer<'_, T> {
             .limits
             .max_total_size
             .saturating_sub(summary.bytes);
-        let written = write_data(
+        if let Some(written) = write_data(
             r,
             item,
             size,
@@ -501,9 +516,10 @@ impl<T: Target> Writer<'_, T> {
             self.run,
             self.options,
             self.data_error,
-        )?;
-        summary.files += 1;
-        summary.bytes += written;
+        )? {
+            summary.files += 1;
+            summary.bytes += written;
+        }
         self.run.entry_done();
         Ok(())
     }
@@ -532,16 +548,17 @@ impl<T: Target> Writer<'_, T> {
             .limits
             .max_total_size
             .saturating_sub(summary.bytes);
-        let written = copy_of(
+        if let Some(written) = copy_of(
             self.destination,
             target,
             item,
             remaining,
             self.run,
             self.options,
-        )?;
-        summary.files += 1;
-        summary.bytes += written;
+        )? {
+            summary.files += 1;
+            summary.bytes += written;
+        }
         self.run.entry_done();
         Ok(())
     }
@@ -559,7 +576,7 @@ fn write_data<T: Target>(
     run: &Run<'_>,
     options: &Options,
     data_error: fn(io::Error) -> ErrorKind,
-) -> Result<u64, Error> {
+) -> Result<Option<u64>, Error> {
     let limits = &options.limits;
     if size > limits.max_entry_size {
         return Err(item.error(ErrorKind::EntryTooLarge));
@@ -567,7 +584,7 @@ fn write_data<T: Target>(
     if size > remaining {
         return Err(item.error(ErrorKind::TotalTooLarge));
     }
-    write_with(item, Some(size), destination, options, |file| {
+    write_with(item, Some(size), destination, run, options, |file| {
         write_into(r, size, file, run, data_error)
     })
 }

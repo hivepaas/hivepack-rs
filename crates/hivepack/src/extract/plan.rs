@@ -94,6 +94,28 @@ pub enum OnRefused {
     Skip,
 }
 
+/// What to do with an entry whose data is damaged: it fails its check (a CRC, a
+/// hash, an authentication code), cannot be decompressed, or ends before its
+/// size ([`ErrorKind::is_damage`]). Asked of [`Options::on_damaged`] for each
+/// such entry; the other errors, and among them every check against what an
+/// archive can do to the destination, stop the extraction whatever it says.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OnDamaged {
+    /// Stop, the entry not left (the default).
+    #[default]
+    Stop,
+    /// Leave the entry out, and go on with the next.
+    Skip,
+    /// Keep what was read of the entry's data, as it came, and go on with the
+    /// next.
+    Keep,
+}
+
+/// Told an entry's damage, and what to do with it: called on the extracting
+/// thread, which waits for its answer.
+pub type OnDamagedFn = Arc<dyn Fn(&Error) -> OnDamaged + Send + Sync>;
+
 /// What permissions files get on Unix.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -190,6 +212,20 @@ pub struct Options {
     /// `Compress-Archive` writes it; refused otherwise.
     pub backslash_separator: bool,
     pub on_refused: OnRefused,
+    /// What to do with each entry whose data is damaged ([`OnDamaged`]); none by
+    /// default, which stops. The entries gone on from are in
+    /// [`Summary::damaged`](crate::extract::Summary::damaged).
+    ///
+    /// What follows a damaged entry may be lost with it: the rest of a solid
+    /// block in 7z, whose files are asked about too, as left out. A tar, cpio or
+    /// ISO 9660 stream cut short, or that cannot be read on from a place, is
+    /// extracted up to there: the entry it ends in is asked about, or, if it ends
+    /// between entries, what it ends with, an error at the index the next entry
+    /// would have, with no name. So the first reading no longer stops what is
+    /// before from being written, as it does without this.
+    ///
+    /// The time it takes to answer counts against [`Options::time_limit`].
+    pub on_damaged: Option<OnDamagedFn>,
     /// Replaces files that are there, which must be files: not links, not
     /// directories. Nothing is overwritten otherwise.
     pub overwrite: bool,
@@ -228,6 +264,7 @@ impl std::fmt::Debug for Options {
             .field("decode_names", &self.decode_names)
             .field("backslash_separator", &self.backslash_separator)
             .field("on_refused", &self.on_refused)
+            .field("on_damaged", &self.on_damaged.as_ref().map(|_| ".."))
             .field("overwrite", &self.overwrite)
             .field("permissions", &self.permissions)
             .field("time_limit", &self.time_limit)

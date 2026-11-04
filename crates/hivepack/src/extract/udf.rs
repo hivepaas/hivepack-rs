@@ -324,8 +324,10 @@ fn extract_into<R: Read + Seek, T: Target>(
             ),
             (_, None) => Err(error(ErrorKind::HardLinkTarget)),
         }?;
-        summary.files += 1;
-        summary.bytes += written;
+        if let Some(written) = written {
+            summary.files += 1;
+            summary.bytes += written;
+        }
         run.entry_done();
     }
 
@@ -345,6 +347,7 @@ fn extract_into<R: Read + Seek, T: Target>(
     }
 
     set_dir_times(&destination, &kept, &run)?;
+    summary.damaged = run.take_damaged();
     Ok(summary)
 }
 
@@ -359,7 +362,7 @@ fn write_data<T: Target>(
     remaining: u64,
     run: &Run<'_>,
     options: &Options,
-) -> Result<u64, Error> {
+) -> Result<Option<u64>, Error> {
     let limits = &options.limits;
     if size > limits.max_entry_size {
         return Err(item.error(ErrorKind::EntryTooLarge));
@@ -367,7 +370,7 @@ fn write_data<T: Target>(
     if size > remaining {
         return Err(item.error(ErrorKind::TotalTooLarge));
     }
-    write_with(item, Some(size), destination, options, |file| {
+    write_with(item, Some(size), destination, run, options, |file| {
         write_into(r, size, file, run)
     })
 }

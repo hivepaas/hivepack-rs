@@ -14,7 +14,7 @@ use crate::rar::{
 use crate::extract::destination::Target;
 use crate::extract::error::{Error, ErrorKind, RarProblem};
 use crate::extract::name::{NameError, check_name, prepare};
-use crate::extract::plan::{Item, Kind, Links, Names, Options, check, fold};
+use crate::extract::plan::{Item, Kind, Links, Names, OnDamaged, Options, check, fold};
 use crate::extract::progress::Run;
 use crate::extract::sink::{Sink, SinkState};
 use crate::extract::tar::{Entry, LinkPlan, bytes_to_write, copy_of, plan_links, write_from};
@@ -335,6 +335,58 @@ impl<W: Write> Out<'_, W> {
     }
 }
 
+/// The file `item` at `place`, whose data failed with `kind` after `written`
+/// bytes: the error to stop with, unless it is damage that
+/// [`Options::on_damaged`] goes on from, the file then kept as it is or removed.
+/// With no file, nothing to go on from: the error.
+#[allow(clippy::too_many_arguments)]
+fn damaged_file<T: Target>(
+    destination: &T,
+    item: Option<&Item>,
+    place: Option<&[String]>,
+    file: Option<T::File<'_>>,
+    written: u64,
+    kind: ErrorKind,
+    run: &Run<'_>,
+    options: &Options,
+    summary: &mut Summary,
+) -> Result<(), Error> {
+    let (Some(item), Some(place), Some(file)) = (item, place, file) else {
+        if let Some(place) = place {
+            destination.remove_file(place);
+        }
+        return Err(match item {
+            Some(item) => item.error(kind),
+            None => Error::global(kind),
+        });
+    };
+    match run.decide(item, kind) {
+        Ok((OnDamaged::Keep, damage)) => {
+            destination.damaged(&damage);
+            if let Err(kind) = destination.finish_file(file, item, options) {
+                destination.remove_file(place);
+                return Err(item.error(kind));
+            }
+            summary.files += 1;
+            summary.bytes += written;
+            run.damaged(damage, Some(written));
+        }
+        Ok((_, damage)) => {
+            destination.damaged(&damage);
+            drop(file);
+            destination.remove_file(place);
+            run.damaged(damage, None);
+        }
+        Err(e) => {
+            drop(file);
+            destination.remove_file(place);
+            return Err(e);
+        }
+    }
+    run.entry_done();
+    Ok(())
+}
+
 /// Extracts the RAR archive that `open` gives into `destination`, which is
 /// created if it is not there, with `options`. Only with the feature `rar`.
 ///
@@ -495,10 +547,12 @@ where
                         run.entry_done();
                     } else {
                         let remaining = options.limits.max_total_size.saturating_sub(summary.bytes);
-                        let written =
-                            copy_of(&destination, target, item, remaining, &run, options)?;
-                        summary.files += 1;
-                        summary.bytes += written;
+                        if let Some(written) =
+                            copy_of(&destination, target, item, remaining, &run, options)?
+                        {
+                            summary.files += 1;
+                            summary.bytes += written;
+                        }
                         run.entry_done();
                     }
                 } else if matches!(plan, Some(LinkPlan::SymlinkAsFile)) {
@@ -557,8 +611,21 @@ where
         let go = match result {
             Ok(go) => go,
             Err(e) => {
-                remove(&place);
-                return Err(at_error(sink.failed.take().unwrap_or_else(|| rar_error(e))));
+                let kind = sink.failed.take().unwrap_or_else(|| rar_error(e));
+                let (file, written) = (sink.file.take(), sink.written);
+                damaged_file(
+                    &destination,
+                    item.filter(|_| as_file),
+                    place,
+                    file,
+                    written,
+                    kind,
+                    &run,
+                    options,
+                    &mut summary,
+                )?;
+                // What follows may still be read: the next header says.
+                true
             }
         };
         let Out { file, written, .. } = sink;
@@ -566,9 +633,25 @@ where
             remove(&place);
             return Err(at_error(ErrorKind::RarEntry(found)));
         }
-        if (as_file || link_file) && extract.broken_file {
-            remove(&place);
+        if link_file && extract.broken_file {
             return Err(at_error(ErrorKind::RarEntry(RarProblem::BrokenData)));
+        }
+        if as_file && file.is_some() && extract.broken_file {
+            damaged_file(
+                &destination,
+                item,
+                place,
+                file,
+                written,
+                ErrorKind::RarEntry(RarProblem::BrokenData),
+                &run,
+                options,
+                &mut summary,
+            )?;
+            if !go {
+                break;
+            }
+            continue;
         }
         if let (Some(at), true) = (current, arc.format != Format::Rar50)
             && items[at].kind == Kind::Link
@@ -585,8 +668,21 @@ where
                 && written != about.size
                 && !arc.file_head.split_after
             {
-                remove(&place);
-                return Err(at_error(ErrorKind::SizeMismatch));
+                damaged_file(
+                    &destination,
+                    item,
+                    place,
+                    Some(file),
+                    written,
+                    ErrorKind::SizeMismatch,
+                    &run,
+                    options,
+                    &mut summary,
+                )?;
+                if !go {
+                    break;
+                }
+                continue;
             }
             destination
                 .finish_file(file, about, options)
@@ -600,7 +696,7 @@ where
             if let (Some(at), Some(_)) = (current, &link_place) {
                 let target = &entries[at].target;
                 let remaining = options.limits.max_total_size.saturating_sub(summary.bytes);
-                let written = write_from(
+                if let Some(written) = write_from(
                     &mut &target[..],
                     about,
                     target.len() as u64,
@@ -609,9 +705,10 @@ where
                     false,
                     &run,
                     options,
-                )?;
-                summary.files += 1;
-                summary.bytes += written;
+                )? {
+                    summary.files += 1;
+                    summary.bytes += written;
+                }
                 run.entry_done();
             }
         } else {
@@ -646,5 +743,6 @@ where
     }
 
     set_dir_times(&destination, &kept, &run)?;
+    summary.damaged = run.take_damaged();
     Ok(summary)
 }

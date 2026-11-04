@@ -358,6 +358,7 @@ fn extract_into<R: Read + Seek, T: Target>(
         run.entry_done();
     }
     set_dir_times(&destination, &kept, &run)?;
+    summary.damaged = run.take_damaged();
     Ok(summary)
 }
 
@@ -374,9 +375,44 @@ fn write_entries<R: Read + Seek, T: Target>(
     summary: &mut Summary,
 ) -> Result<(), Error> {
     let mut files = archive.files();
+    // Whether the last file written was damaged, and gone on from.
+    let mut gone_on = false;
+    // The files of a folder whose data failed, after what failed, and why.
+    let mut lost: Option<(std::ops::Range<usize>, crate::sevenz::Error)> = None;
     for item in items {
         run.check().map_err(Error::global)?;
-        match files.next() {
+        let index = item.index as usize;
+        if let Some((range, e)) = &lost
+            && range.contains(&index)
+        {
+            // Nothing of it can be read: left out, unless to stop.
+            if written_now.contains(&item.index) && item.kind != Kind::Dir {
+                let (_, damage) = run.decide(item, ErrorKind::SevenZip(*e))?;
+                run.damaged(damage, None);
+                run.entry_done();
+            }
+            continue;
+        }
+        let mut next = files.next();
+        if let (Err(e), true) = (&next, gone_on) {
+            // The folder of the file gone on from cannot be read past it.
+            let e = *e;
+            let range = files.skip_folder();
+            let in_it = range.contains(&index);
+            lost = Some((range, e));
+            if in_it {
+                if written_now.contains(&item.index) && item.kind != Kind::Dir {
+                    let (_, damage) = run.decide(item, ErrorKind::SevenZip(e))?;
+                    run.damaged(damage, None);
+                    run.entry_done();
+                }
+                gone_on = false;
+                continue;
+            }
+            next = files.next();
+        }
+        gone_on = false;
+        match next {
             Ok(Some(_)) => {}
             Ok(None) => return Err(item.error(ErrorKind::SizeMismatch)),
             // What was skipped before it failed its checks.
@@ -397,16 +433,22 @@ fn write_entries<R: Read + Seek, T: Target>(
             continue;
         }
         let remaining = options.limits.max_total_size.saturating_sub(summary.bytes);
-        let written = write_with(item, Some(item.size), destination, options, |file| {
+        let before = run.damaged_count();
+        let written = write_with(item, Some(item.size), destination, run, options, |file| {
             write_data(&mut files, item, file, remaining, run, options)
         })?;
-        summary.files += 1;
-        summary.bytes += written;
+        gone_on = run.damaged_count() > before;
+        if let Some(written) = written {
+            summary.files += 1;
+            summary.bytes += written;
+        }
         run.entry_done();
     }
-    // Past the last file: its folder's checks, if it was skipped.
+    // Past the last file: its folder's checks, if it was skipped; none to make
+    // of a folder gone on from.
     match files.next() {
         Ok(_) => Ok(()),
+        Err(_) if gone_on => Ok(()),
         Err(e) => Err(Error::global(ErrorKind::SevenZip(e))),
     }
 }

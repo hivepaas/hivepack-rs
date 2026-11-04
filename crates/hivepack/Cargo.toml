@@ -240,6 +240,11 @@ path = "tests/extract_cves.rs"
 required-features = ["extract", "xz", "zip"]
 
 [[test]]
+name = "extract_damaged"
+path = "tests/extract_damaged.rs"
+required-features = ["cpio", "deflate", "extract", "iso", "sevenz", "tar", "xz", "zip"]
+
+[[test]]
 name = "extract_extract"
 path = "tests/extract_extract.rs"
 required-features = ["extract", "xz", "zip"]

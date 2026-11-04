@@ -442,6 +442,22 @@ impl<R: Read + Seek> Files<'_, R> {
         Ok(())
     }
 
+    /// Leaves the folder of the current file, whose data failed to read: the
+    /// files after it in that folder, whose data comes after what failed, are
+    /// not given, and the next is the first of another folder. The indexes of
+    /// those left.
+    pub fn skip_folder(&mut self) -> std::ops::Range<usize> {
+        let start = self.next;
+        self.current = None;
+        if let Some((fo, _)) = self.folder.take() {
+            let db = &self.archive.db;
+            while self.next < self.archive.len() && db.file_to_folder[self.next] as usize == fo {
+                self.next += 1;
+            }
+        }
+        start..self.next
+    }
+
     /// The current folder read to its end, and checked.
     fn end_folder(&mut self) -> Result<()> {
         let Some((_, mut folder)) = self.folder.take() else {

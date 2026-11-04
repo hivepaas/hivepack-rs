@@ -158,6 +158,47 @@ pub enum ErrorKind {
     Io(std::io::Error),
 }
 
+impl ErrorKind {
+    /// Whether this says an entry's data is damaged: it fails its check (a
+    /// CRC, a hash, an authentication code), cannot be decompressed, or ends
+    /// before the size the archive says, which [`OnDamaged`](crate::extract::OnDamaged)
+    /// can go on from. A wrong or missing password is not damage, nor a method
+    /// not known, nor anything about names, links, limits, the destination or
+    /// the archive as a whole.
+    pub fn is_damage(&self) -> bool {
+        use crate::zip::ErrorCode;
+        match self {
+            ErrorKind::SizeMismatch => true,
+            ErrorKind::Archive(e) => !matches!(
+                e.code(),
+                ErrorCode::NoPasswd
+                    | ErrorCode::WrongPasswd
+                    | ErrorCode::EncrNotSupp
+                    | ErrorCode::CompNotSupp
+                    | ErrorCode::Memory
+                    | ErrorCode::Cancelled
+            ),
+            ErrorKind::Tar(_)
+            | ErrorKind::Iso(_)
+            | ErrorKind::Cpio(_)
+            | ErrorKind::Xar(_)
+            | ErrorKind::Udf(_) => true,
+            ErrorKind::SevenZip(e) => !matches!(
+                e,
+                crate::sevenz::Error::PasswordRequired
+                    | crate::sevenz::Error::WrongPassword
+                    | crate::sevenz::Error::Unsupported
+                    | crate::sevenz::Error::Mem
+            ),
+            #[cfg(feature = "rar")]
+            ErrorKind::Rar(e) => matches!(e, crate::rar::Error::Io(_)),
+            #[cfg(feature = "rar")]
+            ErrorKind::RarEntry(problem) => *problem == RarProblem::BrokenData,
+            _ => false,
+        }
+    }
+}
+
 impl Error {
     pub(crate) fn new(index: u64, name: &[u8], kind: ErrorKind) -> Error {
         Error {

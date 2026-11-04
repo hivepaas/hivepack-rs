@@ -450,5 +450,6 @@ fn extract_into<R: Read + Send, F: FnMut() -> io::Result<R>, T: Target>(
     }
 
     set_dir_times(&destination, &kept, &run)?;
+    summary.damaged = run.take_damaged();
     Ok(summary)
 }
