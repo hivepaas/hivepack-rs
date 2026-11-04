@@ -15,7 +15,7 @@
 //! linked to it then, or as they come after.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -23,15 +23,16 @@ use crate::cpio::{
     AE_IFBLK, AE_IFCHR, AE_IFDIR, AE_IFIFO, AE_IFLNK, AE_IFMT, AE_IFSOCK, Header, Reader,
 };
 
-use crate::extract::destination::Destination;
+use crate::extract::destination::Target;
 use crate::extract::error::{Error, ErrorKind};
 use crate::extract::name::NameError;
-use crate::extract::plan::{Item, Kind, Links, OnRefused, Options, check};
+use crate::extract::plan::{Item, Kind, OnRefused, Options, check};
 use crate::extract::progress::Run;
+use crate::extract::sink::{Sink, SinkState};
 use crate::extract::tar::{
-    Entry, LinkPlan, bytes_to_write, copy_of, finish_file, name_of, plan_links, read_rest,
+    Entry, LinkPlan, bytes_to_write, copy_of, name_of, plan_links, read_rest, write_with,
 };
-use crate::extract::zip::{Summary, set_dir_times};
+use crate::extract::zip::{Summary, open_destination, set_dir_times};
 
 /// An entry's error, by its index and its path.
 fn entry_error(index: u64, h: &Header, kind: ErrorKind) -> Error {
@@ -203,23 +204,41 @@ fn read_headers<R: Read>(r: R, run: &Run<'_>, options: &Options) -> Result<First
 /// comes, and its names linked to it. An archive cut short, or without
 /// `TRAILER!!!`, fails the first reading.
 pub fn extract_cpio<R: Read, F: FnMut() -> io::Result<R>>(
-    mut open: F,
+    open: F,
     destination: &Path,
     options: &Options,
 ) -> Result<Summary, Error> {
-    let run = Run::new(options);
     if let Some(origin) = &options.origin {
         origin
             .check_supported()
             .map_err(|e| Error::global(ErrorKind::Origin(e)))?;
     }
+    extract_into(open, || open_destination(destination, options), options)
+}
 
+/// Extracts the cpio archive that `open` gives into `sink`, with the checks and
+/// in the order of [`extract_cpio`], reading it twice as it does: see [`Sink`].
+pub fn extract_cpio_to<R: Read, F: FnMut() -> io::Result<R>>(
+    open: F,
+    sink: &mut dyn Sink,
+    options: &Options,
+) -> Result<Summary, Error> {
+    let state = SinkState::new(sink);
+    extract_into(open, || Ok(state.target(options)), options)
+}
+
+/// [`extract_cpio`] into the target `make` makes, once the archive is checked.
+fn extract_into<R: Read, F: FnMut() -> io::Result<R>, T: Target>(
+    mut open: F,
+    make: impl FnOnce() -> Result<T, Error>,
+    options: &Options,
+) -> Result<Summary, Error> {
+    let run = Run::new(options);
     let first = open().map_err(|e| Error::global(ErrorKind::Io(e)))?;
     let mut plan = plan(first, &run, options)?;
     run.start(plan.entries_to_write(), plan.bytes_to_write(options));
 
-    let destination = Destination::open(destination, options.origin.as_ref())
-        .map_err(|e| Error::global(ErrorKind::Io(e)))?;
+    let destination = make()?;
     let mut summary = Summary {
         skipped: std::mem::take(&mut plan.skipped),
         ..Summary::default()
@@ -306,10 +325,10 @@ pub(crate) fn plan<R: Read>(r: R, run: &Run<'_>, options: &Options) -> Result<Pl
 /// The second reading of the archive `r`, which must be the one `plan`
 /// read: its entries written into `destination`, then its symbolic links
 /// and its directories' times.
-pub(crate) fn write<R: Read>(
+pub(crate) fn write<R: Read, T: Target>(
     r: R,
     plan: &mut Plan,
-    destination: &Destination<'_>,
+    destination: &T,
     run: &Run<'_>,
     options: &Options,
     summary: &mut Summary,
@@ -378,7 +397,9 @@ pub(crate) fn write<R: Read>(
         };
         let error = |kind| item.error(kind);
         if item.kind == Kind::Dir {
-            destination.directory(&name.components).map_err(error)?;
+            destination
+                .directory(item, &name.components)
+                .map_err(error)?;
             summary.directories += 1;
             run.entry_done();
             continue;
@@ -435,13 +456,10 @@ pub(crate) fn write<R: Read>(
         else {
             continue;
         };
-        let (last, parents) = name
-            .components
-            .split_last()
-            .ok_or_else(|| error(ErrorKind::Name(NameError::Empty)))?;
         run.check().map_err(error)?;
-        let dir = destination.directory(parents).map_err(error)?;
-        Destination::symlink(&dir, last, target, *to_dir).map_err(error)?;
+        destination
+            .symlink(item, &name.components, target, *to_dir)
+            .map_err(error)?;
         summary.links += 1;
         run.entry_done();
     }
@@ -451,8 +469,8 @@ pub(crate) fn write<R: Read>(
 }
 
 /// What a second reading writes with.
-pub(crate) struct Writer<'a> {
-    pub(crate) destination: &'a Destination<'a>,
+pub(crate) struct Writer<'a, T> {
+    pub(crate) destination: &'a T,
     pub(crate) plans: &'a HashMap<u64, LinkPlan>,
     pub(crate) run: &'a Run<'a>,
     pub(crate) options: &'a Options,
@@ -460,7 +478,7 @@ pub(crate) struct Writer<'a> {
     pub(crate) data_error: fn(io::Error) -> ErrorKind,
 }
 
-impl Writer<'_> {
+impl<T: Target> Writer<'_, T> {
     /// Writes `item` as a file of the `size` bytes `r` gives.
     pub(crate) fn file(
         &self,
@@ -469,116 +487,98 @@ impl Writer<'_> {
         size: u64,
         summary: &mut Summary,
     ) -> Result<(), Error> {
-        let error = |kind| item.error(kind);
-        let name = item.name.as_ref().map_err(|e| error(ErrorKind::Name(*e)))?;
-        let (last, parents) = name
-            .components
-            .split_last()
-            .ok_or_else(|| error(ErrorKind::Name(NameError::Empty)))?;
-        let dir = self.destination.directory(parents).map_err(error)?;
-        let file = Destination::create_file(&dir, last, self.options.overwrite).map_err(error)?;
         let remaining = self
             .options
             .limits
             .max_total_size
             .saturating_sub(summary.bytes);
-        match write_data(
+        let written = write_data(
             r,
             item,
             size,
-            file,
+            self.destination,
             remaining,
             self.run,
             self.options,
             self.data_error,
-        ) {
-            Ok(written) => {
-                summary.files += 1;
-                summary.bytes += written;
-                self.run.entry_done();
-                Ok(())
-            }
-            Err(kind) => {
-                // A file whose data failed is not left.
-                let _ = dir.remove_file(last);
-                Err(error(kind))
-            }
-        }
+        )?;
+        summary.files += 1;
+        summary.bytes += written;
+        self.run.entry_done();
+        Ok(())
     }
 
     /// Makes `item` a hard link to the file its plan names, which is
-    /// written: a copy of it, with [`Links::AsFile`].
+    /// written: a copy of it, with [`Links::AsFile`](crate::extract::Links::AsFile).
     pub(crate) fn hard_link(&self, item: &Item, summary: &mut Summary) -> Result<(), Error> {
         let error = |kind| item.error(kind);
         let Some(LinkPlan::Hard(target)) = self.plans.get(&item.index) else {
             return Err(error(ErrorKind::HardLinkTarget));
         };
         let name = item.name.as_ref().map_err(|e| error(ErrorKind::Name(*e)))?;
-        let (last, parents) = name
-            .components
-            .split_last()
-            .ok_or_else(|| error(ErrorKind::Name(NameError::Empty)))?;
-        let dir = self.destination.directory(parents).map_err(error)?;
-        if self.options.links != Links::AsFile {
-            let (target_last, target_parents) = target
-                .split_last()
-                .ok_or_else(|| error(ErrorKind::HardLinkTarget))?;
-            let target_dir = self.destination.directory(target_parents).map_err(error)?;
-            Destination::hard_link(&target_dir, target_last, &dir, last).map_err(error)?;
+        if name.components.is_empty() {
+            return Err(error(ErrorKind::Name(NameError::Empty)));
+        }
+        if !self.destination.copies_hard_links(self.options) {
+            self.destination
+                .hard_link(item, &name.components, target)
+                .map_err(error)?;
             summary.files += 1;
             self.run.entry_done();
             return Ok(());
         }
-        let file = Destination::create_file(&dir, last, self.options.overwrite).map_err(error)?;
         let remaining = self
             .options
             .limits
             .max_total_size
             .saturating_sub(summary.bytes);
-        match copy_of(
+        let written = copy_of(
             self.destination,
             target,
             item,
-            file,
             remaining,
             self.run,
             self.options,
-        ) {
-            Ok(written) => {
-                summary.files += 1;
-                summary.bytes += written;
-                self.run.entry_done();
-                Ok(())
-            }
-            Err(kind) => {
-                let _ = dir.remove_file(last);
-                Err(error(kind))
-            }
-        }
+        )?;
+        summary.files += 1;
+        summary.bytes += written;
+        self.run.entry_done();
+        Ok(())
     }
 }
 
 /// Writes the `size` bytes of `r` into `file`, for `item`, at most
 /// `remaining` in all, then its time and permissions: the bytes written.
 #[allow(clippy::too_many_arguments)]
-fn write_data(
+fn write_data<T: Target>(
     r: &mut impl Read,
     item: &Item,
     size: u64,
-    file: cap_std::fs::File,
+    destination: &T,
     remaining: u64,
     run: &Run<'_>,
     options: &Options,
     data_error: fn(io::Error) -> ErrorKind,
-) -> Result<u64, ErrorKind> {
+) -> Result<u64, Error> {
     let limits = &options.limits;
     if size > limits.max_entry_size {
-        return Err(ErrorKind::EntryTooLarge);
+        return Err(item.error(ErrorKind::EntryTooLarge));
     }
     if size > remaining {
-        return Err(ErrorKind::TotalTooLarge);
+        return Err(item.error(ErrorKind::TotalTooLarge));
     }
-    let mut file = file.into_std();
+    write_with(item, Some(size), destination, options, |file| {
+        write_into(r, size, file, run, data_error)
+    })
+}
+
+fn write_into(
+    r: &mut impl Read,
+    size: u64,
+    file: &mut impl std::io::Write,
+    run: &Run<'_>,
+    data_error: fn(io::Error) -> ErrorKind,
+) -> Result<u64, ErrorKind> {
     let mut written: u64 = 0;
     let mut buffer = vec![0u8; 64 * 1024];
     while written < size {
@@ -594,6 +594,5 @@ fn write_data(
         file.write_all(&buffer[..n]).map_err(ErrorKind::Io)?;
         run.wrote(n as u64);
     }
-    finish_file(&file, item, options)?;
     Ok(written)
 }

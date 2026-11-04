@@ -7,13 +7,14 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use crate::zip::{Archive, Flags, ReadAt, opsys, stat};
 
-use crate::extract::destination::Destination;
+use crate::extract::destination::{Destination, Target};
 use crate::extract::error::{Error, ErrorKind};
 use crate::extract::name::{NameError, check_name, link_on_the_way, link_target, prepare};
 use crate::extract::plan::{
     Item, Kind, Links, Names, OnRefused, Options, Permissions, check, fold,
 };
 use crate::extract::progress::Run;
+use crate::extract::sink::{Sink, SinkState};
 
 /// What was extracted.
 #[derive(Debug, Default)]
@@ -267,13 +268,43 @@ pub fn extract_zip<R: ReadAt>(
     destination: &Path,
     options: &Options,
 ) -> Result<Summary, Error> {
-    let limits = &options.limits;
-    let run = Run::new(options);
     if let Some(origin) = &options.origin {
         origin
             .check_supported()
             .map_err(|e| Error::global(ErrorKind::Origin(e)))?;
     }
+    extract_into(archive, || open_destination(destination, options), options)
+}
+
+/// Extracts `archive` into `sink`, with the checks and in the order of
+/// [`extract_zip`], whose limits count what is given to it: see [`Sink`].
+pub fn extract_zip_to<R: ReadAt>(
+    archive: &Archive<R>,
+    sink: &mut dyn Sink,
+    options: &Options,
+) -> Result<Summary, Error> {
+    let state = SinkState::new(sink);
+    extract_into(archive, || Ok(state.target(options)), options)
+}
+
+/// The folder at `destination`, created if it is not there, for an extraction to
+/// write into.
+pub(crate) fn open_destination<'a>(
+    destination: &Path,
+    options: &'a Options,
+) -> Result<Destination<'a>, Error> {
+    Destination::open(destination, options.origin.as_ref())
+        .map_err(|e| Error::global(ErrorKind::Io(e)))
+}
+
+/// [`extract_zip`] into the target `make` makes, once the archive is checked.
+fn extract_into<R: ReadAt, T: Target>(
+    archive: &Archive<R>,
+    make: impl FnOnce() -> Result<T, Error>,
+    options: &Options,
+) -> Result<Summary, Error> {
+    let limits = &options.limits;
+    let run = Run::new(options);
     let n = archive.get_num_entries(Flags::NONE);
     if n > limits.max_entries {
         return Err(Error::global(ErrorKind::TooManyEntries));
@@ -299,8 +330,7 @@ pub fn extract_zip<R: ReadAt>(
             .fold(0, u64::saturating_add),
     );
 
-    let destination = Destination::open(destination, options.origin.as_ref())
-        .map_err(|e| Error::global(ErrorKind::Io(e)))?;
+    let destination = make()?;
     let mut summary = Summary {
         skipped,
         ..Summary::default()
@@ -316,18 +346,16 @@ pub fn extract_zip<R: ReadAt>(
         }
         run.check().map_err(error)?;
         if item.kind == Kind::Dir {
-            destination.directory(components).map_err(error)?;
+            destination.directory(item, components).map_err(error)?;
             summary.directories += 1;
             run.entry_done();
             continue;
         }
-        let (last, parents) = components
-            .split_last()
-            .ok_or_else(|| error(ErrorKind::Name(NameError::Empty)))?;
-        let dir = destination.directory(parents).map_err(error)?;
-        let file = Destination::create_file(&dir, last, options.overwrite).map_err(error)?;
+        let file = destination
+            .create_file(item, components, Some(item.size), options)
+            .map_err(error)?;
         let remaining = limits.max_total_size.saturating_sub(summary.bytes);
-        match write_file(archive, item, file, remaining, &run, options) {
+        match write_file(archive, item, &destination, file, remaining, &run, options) {
             Ok(written) => {
                 summary.files += 1;
                 summary.bytes += written;
@@ -335,7 +363,7 @@ pub fn extract_zip<R: ReadAt>(
             }
             Err(kind) => {
                 // A file whose data failed is not left.
-                let _ = dir.remove_file(last);
+                destination.remove_file(components);
                 return Err(error(kind));
             }
         }
@@ -346,13 +374,10 @@ pub fn extract_zip<R: ReadAt>(
         let Ok(name) = &link.item.name else {
             continue;
         };
-        let (last, parents) = name
-            .components
-            .split_last()
-            .ok_or_else(|| error(ErrorKind::Name(NameError::Empty)))?;
         run.check().map_err(error)?;
-        let dir = destination.directory(parents).map_err(error)?;
-        Destination::symlink(&dir, last, &link.target, link.to_dir).map_err(error)?;
+        destination
+            .symlink(link.item, &name.components, &link.target, link.to_dir)
+            .map_err(error)?;
         summary.links += 1;
         run.entry_done();
     }
@@ -363,8 +388,8 @@ pub fn extract_zip<R: ReadAt>(
 
 /// The directories' times, the deepest first, once nothing more is
 /// written in them.
-pub(crate) fn set_dir_times(
-    destination: &Destination<'_>,
+pub(crate) fn set_dir_times<T: Target>(
+    destination: &T,
     kept: &[&Item],
     run: &Run<'_>,
 ) -> Result<(), Error> {
@@ -378,29 +403,28 @@ pub(crate) fn set_dir_times(
         .collect();
     dirs.sort_by_key(|(components, _, _)| std::cmp::Reverse(components.len()));
     for (components, mtime, item) in dirs {
-        let Some((last, parents)) = components.split_last() else {
+        if components.is_empty() {
             continue;
-        };
+        }
         let error = |kind| item.error(kind);
         run.check().map_err(error)?;
-        let dir = destination.directory(parents).map_err(error)?;
-        Destination::set_time(&dir, last, mtime).map_err(error)?;
+        destination.set_time(components, mtime).map_err(error)?;
     }
     Ok(())
 }
 
 /// Writes the data of `item` into `file`, at most `remaining` bytes in
 /// all, then its time and permissions: the bytes written.
-fn write_file<R: ReadAt>(
+fn write_file<R: ReadAt, T: Target>(
     archive: &Archive<R>,
     item: &Item,
-    file: cap_std::fs::File,
+    destination: &T,
+    mut file: T::File<'_>,
     remaining: u64,
     run: &Run<'_>,
     options: &Options,
 ) -> Result<u64, ErrorKind> {
     let limits = &options.limits;
-    let mut file = file.into_std();
     let mut written: u64 = 0;
     read_entry(archive, item, run, options, |piece| {
         written += piece.len() as u64;
@@ -425,16 +449,7 @@ fn write_file<R: ReadAt>(
     if written != item.size {
         return Err(ErrorKind::SizeMismatch);
     }
-    // The mark first: writing a stream can change the file's time.
-    if let Some(origin) = &options.origin {
-        origin.write_file(&file).map_err(ErrorKind::Origin)?;
-    }
-
-    if let Some(mtime) = item.mtime {
-        set_modified(&file, mtime)?;
-    }
-    set_permissions(&file, item.mode, options.permissions)?;
-    file.flush().map_err(ErrorKind::Io)?;
+    destination.finish_file(file, item, options)?;
     Ok(written)
 }
 

@@ -10,7 +10,7 @@
 //! so that what checks the stream there is made.
 
 use std::collections::HashMap;
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Read};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -19,12 +19,13 @@ use crate::tar::{
     TYPE_X_GLOBAL_HEADER, Time,
 };
 
-use crate::extract::destination::Destination;
+use crate::extract::destination::{Target, TargetFile};
 use crate::extract::error::{Error, ErrorKind};
 use crate::extract::name::{Name, NameError, check_name, link_on_the_way, link_target, prepare};
 use crate::extract::plan::{Item, Kind, Links, Names, OnRefused, Options, check, fold};
 use crate::extract::progress::Run;
-use crate::extract::zip::{Summary, set_dir_times, set_modified, set_permissions};
+use crate::extract::sink::{Sink, SinkState};
+use crate::extract::zip::{Summary, open_destination, set_dir_times};
 
 /// GNU's volume label, which names the archive, not a file.
 const TYPE_GNU_VOLUME: u8 = b'V';
@@ -336,17 +337,37 @@ pub(crate) fn plan_links<S>(
 /// labels are the archive's, not entries. A sparse file's holes stay holes
 /// where the file system has them, and count against the limits.
 pub fn extract_tar<R: Read, F: FnMut() -> io::Result<R>>(
-    mut open: F,
+    open: F,
     destination: &Path,
     options: &Options,
 ) -> Result<Summary, Error> {
-    let limits = &options.limits;
-    let run = Run::new(options);
     if let Some(origin) = &options.origin {
         origin
             .check_supported()
             .map_err(|e| Error::global(ErrorKind::Origin(e)))?;
     }
+    extract_into(open, || open_destination(destination, options), options)
+}
+
+/// Extracts the tar archive that `open` gives into `sink`, with the checks and
+/// in the order of [`extract_tar`], reading it twice as it does: see [`Sink`].
+pub fn extract_tar_to<R: Read, F: FnMut() -> io::Result<R>>(
+    open: F,
+    sink: &mut dyn Sink,
+    options: &Options,
+) -> Result<Summary, Error> {
+    let state = SinkState::new(sink);
+    extract_into(open, || Ok(state.target(options)), options)
+}
+
+/// [`extract_tar`] into the target `make` makes, once the archive is checked.
+fn extract_into<R: Read, F: FnMut() -> io::Result<R>, T: Target>(
+    mut open: F,
+    make: impl FnOnce() -> Result<T, Error>,
+    options: &Options,
+) -> Result<Summary, Error> {
+    let limits = &options.limits;
+    let run = Run::new(options);
 
     let first = open().map_err(|e| Error::global(ErrorKind::Io(e)))?;
     let (entries, items) = read_headers(first, &run, options)?;
@@ -365,8 +386,7 @@ pub fn extract_tar<R: Read, F: FnMut() -> io::Result<R>>(
         bytes_to_write(&entries, &items, &kept_indexes, &plans, options),
     );
 
-    let destination = Destination::open(destination, options.origin.as_ref())
-        .map_err(|e| Error::global(ErrorKind::Io(e)))?;
+    let destination = make()?;
     let mut summary = Summary {
         skipped,
         ..Summary::default()
@@ -398,36 +418,29 @@ pub fn extract_tar<R: Read, F: FnMut() -> io::Result<R>>(
         let error = |kind| item.error(kind);
         let components = &name.components;
         if item.kind == Kind::Dir {
-            destination.directory(components).map_err(error)?;
+            destination.directory(item, components).map_err(error)?;
             summary.directories += 1;
             run.entry_done();
             continue;
         }
-        let (last, parents) = components
-            .split_last()
-            .ok_or_else(|| error(ErrorKind::Name(NameError::Empty)))?;
-        let dir = destination.directory(parents).map_err(error)?;
         match plans.get(&item.index) {
-            Some(LinkPlan::Hard(target)) if options.links != Links::AsFile => {
-                let (target_last, target_parents) = target
-                    .split_last()
-                    .ok_or_else(|| error(ErrorKind::HardLinkTarget))?;
-                let target_dir = destination.directory(target_parents).map_err(error)?;
-                Destination::hard_link(&target_dir, target_last, &dir, last).map_err(error)?;
+            Some(LinkPlan::Hard(target)) if !destination.copies_hard_links(options) => {
+                destination
+                    .hard_link(item, components, target)
+                    .map_err(error)?;
                 summary.files += 1;
                 run.entry_done();
                 continue;
             }
             _ => {}
         }
-        let file = Destination::create_file(&dir, last, options.overwrite).map_err(error)?;
         let remaining = limits.max_total_size.saturating_sub(summary.bytes);
         let written = match plans.get(&item.index) {
             Some(LinkPlan::SymlinkAsFile) => write_from(
                 &mut &entry.target[..],
                 item,
                 entry.target.len() as u64,
-                file,
+                &destination,
                 remaining,
                 false,
                 &run,
@@ -435,27 +448,25 @@ pub fn extract_tar<R: Read, F: FnMut() -> io::Result<R>>(
             ),
             Some(LinkPlan::Hard(target)) => {
                 // A copy of the file it names, with Links::AsFile.
-                copy_of(&destination, target, item, file, remaining, &run, options)
+                copy_of(&destination, target, item, remaining, &run, options)
             }
             _ => {
                 let holes = tr.is_sparse();
                 write_from(
-                    &mut tr, item, item.size, file, remaining, holes, &run, options,
+                    &mut tr,
+                    item,
+                    item.size,
+                    &destination,
+                    remaining,
+                    holes,
+                    &run,
+                    options,
                 )
             }
         };
-        match written {
-            Ok(written) => {
-                summary.files += 1;
-                summary.bytes += written;
-                run.entry_done();
-            }
-            Err(kind) => {
-                // A file whose data failed is not left.
-                let _ = dir.remove_file(last);
-                return Err(error(kind));
-            }
-        }
+        summary.files += 1;
+        summary.bytes += written?;
+        run.entry_done();
     }
     // The second reading must end where the first did.
     match tr.next() {
@@ -478,13 +489,10 @@ pub fn extract_tar<R: Read, F: FnMut() -> io::Result<R>>(
         else {
             continue;
         };
-        let (last, parents) = name
-            .components
-            .split_last()
-            .ok_or_else(|| error(ErrorKind::Name(NameError::Empty)))?;
         run.check().map_err(error)?;
-        let dir = destination.directory(parents).map_err(error)?;
-        Destination::symlink(&dir, last, target, *to_dir).map_err(error)?;
+        destination
+            .symlink(item, &name.components, target, *to_dir)
+            .map_err(error)?;
         summary.links += 1;
         run.entry_done();
     }
@@ -530,23 +538,68 @@ pub(crate) fn bytes_to_write<S>(
     total
 }
 
-/// Writes `size` bytes of `r` into `file`, for `item`, at most `remaining`
-/// in all, then its time and permissions: the bytes written. With `holes`, what
-/// reads as zeros is not written: the file is new or emptied, so it reads as
-/// zeros, and takes no room where the file system has holes.
+/// Writes `item` as a file of `size` bytes, if they are known, whose data `data`
+/// writes into it, then its time and permissions: the bytes `data` says it wrote.
+/// A file whose data fails is not left.
+pub(crate) fn write_with<T: Target>(
+    item: &Item,
+    size: Option<u64>,
+    destination: &T,
+    options: &Options,
+    data: impl FnOnce(&mut T::File<'_>) -> Result<u64, ErrorKind>,
+) -> Result<u64, Error> {
+    let error = |kind| item.error(kind);
+    let components = &item
+        .name
+        .as_ref()
+        .map_err(|e| error(ErrorKind::Name(*e)))?
+        .components;
+    let mut file = destination
+        .create_file(item, components, size, options)
+        .map_err(error)?;
+    data(&mut file)
+        .and_then(|written| {
+            destination.finish_file(file, item, options)?;
+            Ok(written)
+        })
+        .map_err(|kind| {
+            destination.remove_file(components);
+            error(kind)
+        })
+}
+
+/// Writes `item` as a file of the `size` bytes of `r`, at most `remaining` in
+/// all, then its time and permissions: the bytes written. With `holes`, what
+/// reads as zeros is not written where the target has holes: the file is new or
+/// emptied, so it reads as zeros, and takes no room where the file system has
+/// holes. A file whose data fails is not left.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn write_from(
+pub(crate) fn write_from<T: Target>(
     r: &mut impl Read,
     item: &Item,
     size: u64,
-    file: cap_std::fs::File,
+    destination: &T,
+    remaining: u64,
+    holes: bool,
+    run: &Run<'_>,
+    options: &Options,
+) -> Result<u64, Error> {
+    write_with(item, Some(size), destination, options, |file| {
+        write_into(r, size, file, remaining, holes, run, options)
+    })
+}
+
+fn write_into(
+    r: &mut impl Read,
+    size: u64,
+    file: &mut impl TargetFile,
     remaining: u64,
     holes: bool,
     run: &Run<'_>,
     options: &Options,
 ) -> Result<u64, ErrorKind> {
     let limits = &options.limits;
-    let mut file = file.into_std();
+    let holes = holes && file.has_holes();
     let mut written: u64 = 0;
     // Zeros not written yet, which the next write goes past.
     let mut pending: u64 = 0;
@@ -573,8 +626,10 @@ pub(crate) fn write_from(
             pending += n as u64;
         } else {
             if pending > 0 {
-                let ahead = i64::try_from(pending).map_err(|_| ErrorKind::SizeMismatch)?;
-                file.seek(SeekFrom::Current(ahead)).map_err(ErrorKind::Io)?;
+                if i64::try_from(pending).is_err() {
+                    return Err(ErrorKind::SizeMismatch);
+                }
+                file.skip(pending).map_err(ErrorKind::Io)?;
                 pending = 0;
             }
             file.write_all(&buffer[..n]).map_err(ErrorKind::Io)?;
@@ -588,52 +643,30 @@ pub(crate) fn write_from(
         // Zeros to the end: the file's length says so.
         file.set_len(written).map_err(ErrorKind::Io)?;
     }
-    finish_file(&file, item, options)?;
     Ok(written)
 }
 
-/// Writes a copy of the file at `target` into `file`, for a hard link
-/// with [`Links::AsFile`]: its bytes count as written.
-pub(crate) fn copy_of(
-    destination: &Destination<'_>,
+/// Writes `item` as a copy of the file at `target`, for a hard link with
+/// [`Links::AsFile`]: its bytes count as written.
+pub(crate) fn copy_of<T: Target>(
+    destination: &T,
     target: &[String],
     item: &Item,
-    file: cap_std::fs::File,
     remaining: u64,
     run: &Run<'_>,
     options: &Options,
-) -> Result<u64, ErrorKind> {
-    let (last, parents) = target.split_last().ok_or(ErrorKind::HardLinkTarget)?;
-    let dir = destination.directory(parents)?;
-    let source = Destination::open_file(&dir, last)?;
-    let size = source.metadata().map_err(ErrorKind::Io)?.len();
+) -> Result<u64, Error> {
+    let (mut source, size) = destination
+        .open_file(target)
+        .map_err(|kind| item.error(kind))?;
     write_from(
-        &mut source.into_std(),
+        &mut source,
         item,
         size,
-        file,
+        destination,
         remaining,
         false,
         run,
         options,
     )
-}
-
-/// A file's mark of origin, time and permissions, once its data is
-/// written.
-pub(crate) fn finish_file(
-    file: &std::fs::File,
-    item: &Item,
-    options: &Options,
-) -> Result<(), ErrorKind> {
-    // The mark first: writing a stream can change the file's time.
-    if let Some(origin) = &options.origin {
-        origin.write_file(file).map_err(ErrorKind::Origin)?;
-    }
-    if let Some(mtime) = item.mtime {
-        set_modified(file, mtime)?;
-    }
-    set_permissions(file, item.mode, options.permissions)?;
-    let mut file = file;
-    file.flush().map_err(ErrorKind::Io)
 }

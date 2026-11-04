@@ -12,15 +12,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::udf::{Node, Timespec, Udf, VType};
 
-use crate::extract::destination::Destination;
+use crate::extract::destination::{Target, TargetFile};
 use crate::extract::error::{Error, ErrorKind};
 use crate::extract::name::NameError;
-use crate::extract::plan::{Item, Kind, Links, OnRefused, Options, check};
+use crate::extract::plan::{Item, Kind, OnRefused, Options, check};
 use crate::extract::progress::Run;
+use crate::extract::sink::{Sink, SinkState};
 use crate::extract::tar::{
-    Entry, LinkPlan, bytes_to_write, copy_of, finish_file, name_of, plan_links,
+    Entry, LinkPlan, bytes_to_write, copy_of, name_of, plan_links, write_with,
 };
-use crate::extract::zip::{Summary, set_dir_times};
+use crate::extract::zip::{Summary, open_destination, set_dir_times};
 
 /// A UDF time as a `SystemTime`.
 fn system_time(t: Timespec) -> Option<SystemTime> {
@@ -214,13 +215,33 @@ pub fn extract_udf<R: Read + Seek>(
     destination: &Path,
     options: &Options,
 ) -> Result<Summary, Error> {
-    let limits = &options.limits;
-    let run = Run::new(options);
     if let Some(origin) = &options.origin {
         origin
             .check_supported()
             .map_err(|e| Error::global(ErrorKind::Origin(e)))?;
     }
+    extract_into(udf, || open_destination(destination, options), options)
+}
+
+/// Extracts the UDF volume `udf` into `sink`, with the checks and in the order of
+/// [`extract_udf`]: see [`Sink`].
+pub fn extract_udf_to<R: Read + Seek>(
+    udf: &mut Udf<R>,
+    sink: &mut dyn Sink,
+    options: &Options,
+) -> Result<Summary, Error> {
+    let state = SinkState::new(sink);
+    extract_into(udf, || Ok(state.target(options)), options)
+}
+
+/// [`extract_udf`] into the target `make` makes, once the volume is checked.
+fn extract_into<R: Read + Seek, T: Target>(
+    udf: &mut Udf<R>,
+    make: impl FnOnce() -> Result<T, Error>,
+    options: &Options,
+) -> Result<Summary, Error> {
+    let limits = &options.limits;
+    let run = Run::new(options);
 
     let (entries, items, refused) = walk(udf, &run, options)?;
     let (kept, mut skipped) = check(&items, options)?;
@@ -240,8 +261,7 @@ pub fn extract_udf<R: Read + Seek>(
         bytes_to_write(&entries, &items, &kept_indexes, &plans, options),
     );
 
-    let destination = Destination::open(destination, options.origin.as_ref())
-        .map_err(|e| Error::global(ErrorKind::Io(e)))?;
+    let destination = make()?;
     let mut summary = Summary {
         skipped,
         ..Summary::default()
@@ -262,67 +282,51 @@ pub fn extract_udf<R: Read + Seek>(
         let error = |kind| item.error(kind);
         let components = &name.components;
         if item.kind == Kind::Dir {
-            destination.directory(components).map_err(error)?;
+            destination.directory(item, components).map_err(error)?;
             summary.directories += 1;
             run.entry_done();
             continue;
         }
-        let (last, parents) = components
-            .split_last()
-            .ok_or_else(|| error(ErrorKind::Name(NameError::Empty)))?;
-        let dir = destination.directory(parents).map_err(error)?;
         match plans.get(&item.index) {
-            Some(LinkPlan::Hard(target)) if options.links != Links::AsFile => {
-                let (target_last, target_parents) = target
-                    .split_last()
-                    .ok_or_else(|| error(ErrorKind::HardLinkTarget))?;
-                let target_dir = destination.directory(target_parents).map_err(error)?;
-                Destination::hard_link(&target_dir, target_last, &dir, last).map_err(error)?;
+            Some(LinkPlan::Hard(target)) if !destination.copies_hard_links(options) => {
+                destination
+                    .hard_link(item, components, target)
+                    .map_err(error)?;
                 summary.files += 1;
                 run.entry_done();
                 continue;
             }
             _ => {}
         }
-        let file = Destination::create_file(&dir, last, options.overwrite).map_err(error)?;
         let remaining = limits.max_total_size.saturating_sub(summary.bytes);
         let written = match (plans.get(&item.index), &entry.seen) {
             (Some(LinkPlan::SymlinkAsFile), _) => write_data(
                 &mut &entry.target[..],
                 item,
                 entry.target.len() as u64,
-                file,
+                &destination,
                 remaining,
                 &run,
                 options,
             ),
             (Some(LinkPlan::Hard(target)), _) => {
                 // A copy of the file it names, with Links::AsFile.
-                copy_of(&destination, target, item, file, remaining, &run, options)
+                copy_of(&destination, target, item, remaining, &run, options)
             }
             (_, Some(node)) => write_data(
                 &mut udf.file(node),
                 item,
                 item.size,
-                file,
+                &destination,
                 remaining,
                 &run,
                 options,
             ),
-            (_, None) => Err(ErrorKind::HardLinkTarget),
-        };
-        match written {
-            Ok(written) => {
-                summary.files += 1;
-                summary.bytes += written;
-                run.entry_done();
-            }
-            Err(kind) => {
-                // A file whose data failed is not left.
-                let _ = dir.remove_file(last);
-                return Err(error(kind));
-            }
-        }
+            (_, None) => Err(error(ErrorKind::HardLinkTarget)),
+        }?;
+        summary.files += 1;
+        summary.bytes += written;
+        run.entry_done();
     }
 
     for &item in kept.iter().filter(|item| created_later(item)) {
@@ -332,13 +336,10 @@ pub fn extract_udf<R: Read + Seek>(
         else {
             continue;
         };
-        let (last, parents) = name
-            .components
-            .split_last()
-            .ok_or_else(|| error(ErrorKind::Name(NameError::Empty)))?;
         run.check().map_err(error)?;
-        let dir = destination.directory(parents).map_err(error)?;
-        Destination::symlink(&dir, last, target, *to_dir).map_err(error)?;
+        destination
+            .symlink(item, &name.components, target, *to_dir)
+            .map_err(error)?;
         summary.links += 1;
         run.entry_done();
     }
@@ -350,25 +351,33 @@ pub fn extract_udf<R: Read + Seek>(
 /// Writes `size` bytes of `r` into `file`, for `item`, at most `remaining`
 /// in all, then its time and permissions: the bytes written. Data that
 /// ends before `size` is an error ([`ErrorKind::SizeMismatch`]).
-fn write_data(
+fn write_data<T: Target>(
     r: &mut impl Read,
     item: &Item,
     size: u64,
-    file: cap_std::fs::File,
+    destination: &T,
     remaining: u64,
     run: &Run<'_>,
     options: &Options,
-) -> Result<u64, ErrorKind> {
-    use std::io::Write;
-
+) -> Result<u64, Error> {
     let limits = &options.limits;
     if size > limits.max_entry_size {
-        return Err(ErrorKind::EntryTooLarge);
+        return Err(item.error(ErrorKind::EntryTooLarge));
     }
     if size > remaining {
-        return Err(ErrorKind::TotalTooLarge);
+        return Err(item.error(ErrorKind::TotalTooLarge));
     }
-    let mut file = file.into_std();
+    write_with(item, Some(size), destination, options, |file| {
+        write_into(r, size, file, run)
+    })
+}
+
+fn write_into(
+    r: &mut impl Read,
+    size: u64,
+    file: &mut impl TargetFile,
+    run: &Run<'_>,
+) -> Result<u64, ErrorKind> {
     let mut written: u64 = 0;
     let mut buffer = vec![0u8; 64 * 1024];
     while written < size {
@@ -384,7 +393,6 @@ fn write_data(
         file.write_all(&buffer[..n]).map_err(ErrorKind::Io)?;
         run.wrote(n as u64);
     }
-    finish_file(&file, item, options)?;
     Ok(written)
 }
 

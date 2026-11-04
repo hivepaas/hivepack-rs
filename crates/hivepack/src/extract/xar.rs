@@ -27,13 +27,14 @@ use crate::xar::{
 };
 
 use crate::extract::cpio::{self, Writer};
-use crate::extract::destination::Destination;
+use crate::extract::destination::Target;
 use crate::extract::error::{Error, ErrorKind};
 use crate::extract::name::NameError;
 use crate::extract::plan::{Item, Kind, OnRefused, Options, Packages, check};
 use crate::extract::progress::Run;
+use crate::extract::sink::{Sink, SinkState};
 use crate::extract::tar::{Entry, LinkPlan, bytes_to_write, name_of, plan_links, read_rest};
-use crate::extract::zip::{Summary, set_dir_times};
+use crate::extract::zip::{Summary, open_destination, set_dir_times};
 
 /// The names of the payloads [`Packages::Expand`] extracts: a component
 /// package's files and scripts, and a `.xip` file's content.
@@ -262,17 +263,38 @@ fn xar_error(kind: ErrorKind) -> ErrorKind {
 /// read to ([`crate::xar::Error::CannotSeek`]), which a stream cannot go
 /// back to. Owners, file flags and extended attributes are not restored.
 pub fn extract_xar<R: Read + Send, F: FnMut() -> io::Result<R>>(
-    mut open: F,
+    open: F,
     destination: &Path,
     options: &Options,
 ) -> Result<Summary, Error> {
-    let limits = &options.limits;
-    let run = Run::new(options);
     if let Some(origin) = &options.origin {
         origin
             .check_supported()
             .map_err(|e| Error::global(ErrorKind::Origin(e)))?;
     }
+    extract_into(open, || open_destination(destination, options), options)
+}
+
+/// Extracts the XAR archive that `open` gives into `sink`, with the checks and in
+/// the order of [`extract_xar`], reading it twice as it does, and a package's
+/// payload under its directory: see [`Sink`].
+pub fn extract_xar_to<R: Read + Send, F: FnMut() -> io::Result<R>>(
+    open: F,
+    sink: &mut dyn Sink,
+    options: &Options,
+) -> Result<Summary, Error> {
+    let state = SinkState::new(sink);
+    extract_into(open, || Ok(state.target(options)), options)
+}
+
+/// [`extract_xar`] into the target `make` makes, once the archive is checked.
+fn extract_into<R: Read + Send, F: FnMut() -> io::Result<R>, T: Target>(
+    mut open: F,
+    make: impl FnOnce() -> Result<T, Error>,
+    options: &Options,
+) -> Result<Summary, Error> {
+    let limits = &options.limits;
+    let run = Run::new(options);
 
     let first = open().map_err(|e| Error::global(ErrorKind::Io(e)))?;
     let FirstReading {
@@ -326,8 +348,7 @@ pub fn extract_xar<R: Read + Send, F: FnMut() -> io::Result<R>>(
     let created_later = |item: &Item| matches!(plans.get(&item.index), Some(LinkPlan::Symlink(..)));
     run.start(count, bytes);
 
-    let destination = Destination::open(destination, options.origin.as_ref())
-        .map_err(|e| Error::global(ErrorKind::Io(e)))?;
+    let destination = make()?;
     let mut summary = Summary {
         skipped,
         ..Summary::default()
@@ -371,7 +392,7 @@ pub fn extract_xar<R: Read + Send, F: FnMut() -> io::Result<R>>(
         };
         let error = |kind| item.error(kind);
         if item.kind == Kind::Dir {
-            let within = destination.within(&name.components).map_err(error)?;
+            let within = destination.within(item, &name.components).map_err(error)?;
             summary.directories += 1;
             run.entry_done();
             let Some(payload) = &mut payloads[index as usize] else {
@@ -420,13 +441,10 @@ pub fn extract_xar<R: Read + Send, F: FnMut() -> io::Result<R>>(
         else {
             continue;
         };
-        let (last, parents) = name
-            .components
-            .split_last()
-            .ok_or_else(|| error(ErrorKind::Name(NameError::Empty)))?;
         run.check().map_err(error)?;
-        let dir = destination.directory(parents).map_err(error)?;
-        Destination::symlink(&dir, last, target, *to_dir).map_err(error)?;
+        destination
+            .symlink(item, &name.components, target, *to_dir)
+            .map_err(error)?;
         summary.links += 1;
         run.entry_done();
     }

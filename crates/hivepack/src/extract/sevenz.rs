@@ -14,13 +14,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::sevenz::{Archive, Entry, Files};
 
-use crate::extract::destination::Destination;
+use crate::extract::destination::Target;
 use crate::extract::error::{Error, ErrorKind};
 use crate::extract::name::{NameError, check_name, link_on_the_way, link_target, prepare};
 use crate::extract::plan::{Item, Kind, Links, Names, OnRefused, Options, check, fold};
 use crate::extract::progress::Run;
-use crate::extract::tar::finish_file;
-use crate::extract::zip::{Summary, set_dir_times};
+use crate::extract::sink::{Sink, SinkState};
+use crate::extract::tar::write_with;
+use crate::extract::zip::{Summary, open_destination, set_dir_times};
 
 /// `FILE_ATTRIBUTE_UNIX_EXTENSION`: 7-Zip keeps a Unix mode in the high 16
 /// bits of the attributes when this bit is set.
@@ -263,13 +264,33 @@ pub fn extract_7z<R: Read + Seek>(
     destination: &Path,
     options: &Options,
 ) -> Result<Summary, Error> {
-    let limits = &options.limits;
-    let run = Run::new(options);
     if let Some(origin) = &options.origin {
         origin
             .check_supported()
             .map_err(|e| Error::global(ErrorKind::Origin(e)))?;
     }
+    extract_into(archive, || open_destination(destination, options), options)
+}
+
+/// Extracts `archive` into `sink`, with the checks and in the order of
+/// [`extract_7z`], each folder decoded once: see [`Sink`].
+pub fn extract_7z_to<R: Read + Seek>(
+    archive: &mut Archive<R>,
+    sink: &mut dyn Sink,
+    options: &Options,
+) -> Result<Summary, Error> {
+    let state = SinkState::new(sink);
+    extract_into(archive, || Ok(state.target(options)), options)
+}
+
+/// [`extract_7z`] into the target `make` makes, once the archive is checked.
+fn extract_into<R: Read + Seek, T: Target>(
+    archive: &mut Archive<R>,
+    make: impl FnOnce() -> Result<T, Error>,
+    options: &Options,
+) -> Result<Summary, Error> {
+    let limits = &options.limits;
+    let run = Run::new(options);
     if let Some(password) = &options.password {
         archive.set_password(&String::from_utf8_lossy(password));
     }
@@ -310,8 +331,7 @@ pub fn extract_7z<R: Read + Seek>(
             .map(|item| item.size)
             .fold(0, u64::saturating_add),
     );
-    let destination = Destination::open(destination, options.origin.as_ref())
-        .map_err(|e| Error::global(ErrorKind::Io(e)))?;
+    let destination = make()?;
     let mut summary = Summary {
         skipped,
         ..Summary::default()
@@ -330,13 +350,10 @@ pub fn extract_7z<R: Read + Seek>(
         let Ok(name) = &link.item.name else {
             continue;
         };
-        let (last, parents) = name
-            .components
-            .split_last()
-            .ok_or_else(|| error(ErrorKind::Name(NameError::Empty)))?;
         run.check().map_err(error)?;
-        let dir = destination.directory(parents).map_err(error)?;
-        Destination::symlink(&dir, last, &link.target, link.to_dir).map_err(error)?;
+        destination
+            .symlink(link.item, &name.components, &link.target, link.to_dir)
+            .map_err(error)?;
         summary.links += 1;
         run.entry_done();
     }
@@ -347,11 +364,11 @@ pub fn extract_7z<R: Read + Seek>(
 /// The directories and files of `written_now`, in the archive's order, the
 /// folders decoded once from start to end; the last folder's checks made,
 /// whether its last files were written or skipped.
-fn write_entries<R: Read + Seek>(
+fn write_entries<R: Read + Seek, T: Target>(
     archive: &mut Archive<R>,
     items: &[Item],
     written_now: &HashSet<u64>,
-    destination: &Destination<'_>,
+    destination: &T,
     run: &Run<'_>,
     options: &Options,
     summary: &mut Summary,
@@ -374,29 +391,18 @@ fn write_entries<R: Read + Seek>(
         let error = |kind| item.error(kind);
         let components = &name.components;
         if item.kind == Kind::Dir {
-            destination.directory(components).map_err(error)?;
+            destination.directory(item, components).map_err(error)?;
             summary.directories += 1;
             run.entry_done();
             continue;
         }
-        let (last, parents) = components
-            .split_last()
-            .ok_or_else(|| error(ErrorKind::Name(NameError::Empty)))?;
-        let dir = destination.directory(parents).map_err(error)?;
-        let file = Destination::create_file(&dir, last, options.overwrite).map_err(error)?;
         let remaining = options.limits.max_total_size.saturating_sub(summary.bytes);
-        match write_data(&mut files, item, file, remaining, run, options) {
-            Ok(written) => {
-                summary.files += 1;
-                summary.bytes += written;
-                run.entry_done();
-            }
-            Err(kind) => {
-                // A file whose data failed is not left.
-                let _ = dir.remove_file(last);
-                return Err(error(kind));
-            }
-        }
+        let written = write_with(item, Some(item.size), destination, options, |file| {
+            write_data(&mut files, item, file, remaining, run, options)
+        })?;
+        summary.files += 1;
+        summary.bytes += written;
+        run.entry_done();
     }
     // Past the last file: its folder's checks, if it was skipped.
     match files.next() {
@@ -406,18 +412,17 @@ fn write_entries<R: Read + Seek>(
 }
 
 /// Writes the current file of `files` into `file`, for `item`, at most
-/// `remaining` bytes in all, then its time and permissions: the bytes
-/// written. Its data is read to its end, where its CRC is checked.
+/// `remaining` bytes in all: the bytes written. Its data is read to its end,
+/// where its CRC is checked.
 fn write_data<R: Read + Seek>(
     files: &mut Files<'_, R>,
     item: &Item,
-    file: cap_std::fs::File,
+    file: &mut impl Write,
     remaining: u64,
     run: &Run<'_>,
     options: &Options,
 ) -> Result<u64, ErrorKind> {
     let limits = &options.limits;
-    let mut file = file.into_std();
     let mut written: u64 = 0;
     let mut buffer = vec![0u8; 64 * 1024];
     loop {
@@ -449,7 +454,6 @@ fn write_data<R: Read + Seek>(
     if written != item.size {
         return Err(ErrorKind::SizeMismatch);
     }
-    finish_file(&file, item, options)?;
     Ok(written)
 }
 
