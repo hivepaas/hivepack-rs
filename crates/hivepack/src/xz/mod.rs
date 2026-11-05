@@ -423,6 +423,14 @@ impl Stream {
         ))
     }
 
+    /// Not in liblzma: the encoder of a branch converter or the delta filter
+    /// alone, which gives the filtered data, for what compresses it apart.
+    #[cfg(feature = "sevenz")]
+    pub(crate) fn filter_encoder(filter: &Filter) -> Result<Stream> {
+        let next = filter::filter_encoder_alone(filter).map_err(init_error)?;
+        Ok(Stream::new(next))
+    }
+
     /// `lzma_stream_decoder`: a .xz decoder, with a memory usage limit and
     /// the flags [`TELL_NO_CHECK`], [`TELL_UNSUPPORTED_CHECK`],
     /// [`TELL_ANY_CHECK`], [`IGNORE_CHECK`], [`CONCATENATED`] and

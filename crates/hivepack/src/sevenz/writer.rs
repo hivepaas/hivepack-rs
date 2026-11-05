@@ -9,6 +9,13 @@
 //! be written as they come, of sizes not known beforehand; the signature header,
 //! which says where the end is, is written last, which takes `Seek`. Until then it
 //! is zeros, and what is cut short is no archive.
+//!
+//! LZMA2 can be cut in blocks ([`WriteOptions::lzma2_blocks`]), as 7-Zip's
+//! encoder does in threads: each block is compressed as a stream of its own,
+//! whose first chunk resets the dictionary, and the streams, each without its
+//! end but the last, make one, which any decoder of LZMA2 reads. Threads
+//! compress the blocks apart, and decoders can decompress them apart: see
+//! `docs/7z.md`.
 
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
@@ -28,6 +35,8 @@ use crate::sevenz::aes7z::{AesEncoder, K_AES_ID, MAX_KEY_CYCLES};
 use crate::sevenz::arc_in::SIGNATURE;
 use crate::sevenz::crc;
 use crate::sevenz::error::{Error, Result};
+use crate::sevenz::workers::Workers;
+use crate::threads::Threads;
 
 /// How much a compressor gives at a time.
 const OUT_BUF: usize = 1 << 16;
@@ -93,6 +102,47 @@ pub enum Filter {
     Delta(u32),
 }
 
+/// Whether LZMA2's data is cut in blocks, each of which resets the dictionary,
+/// so that threads can compress and decompress them apart. A block is a
+/// number of bytes of a folder's data, whatever files they are of: where
+/// blocks end depends on this alone, never on the threads.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Lzma2Blocks {
+    /// A folder is one stream, as before: the default.
+    #[default]
+    None,
+    /// Blocks of 4 times the dictionary, from 1 MiB to 256 MiB, as 7-Zip
+    /// makes them: 32 MiB for the presets 6 to 9, of 8 MiB.
+    Auto,
+    /// Blocks of this many bytes, from 4 KiB to 1 GiB. The dictionary is no
+    /// larger than a block, which needs no more.
+    Size(u64),
+}
+
+/// The fewest bytes [`Lzma2Blocks::Size`] takes.
+const BLOCK_MIN: u64 = 1 << 12;
+/// The most.
+const BLOCK_MAX: u64 = 1 << 30;
+
+impl Lzma2Blocks {
+    /// The size of a block, for a dictionary of `dict` bytes; none for one
+    /// stream.
+    fn size(self, dict: u32) -> Result<Option<u64>> {
+        const MIB: u64 = 1 << 20;
+        Ok(Some(match self {
+            Lzma2Blocks::None => return Ok(None),
+            // 7-Zip's, as its `Lzma2Enc.c` makes it, rounded up to MiB.
+            Lzma2Blocks::Auto => (u64::from(dict) * 4)
+                .clamp(MIB, 256 * MIB)
+                .max(u64::from(dict))
+                .div_ceil(MIB)
+                .saturating_mul(MIB),
+            Lzma2Blocks::Size(size) if (BLOCK_MIN..=BLOCK_MAX).contains(&size) => size,
+            Lzma2Blocks::Size(_) => return Err(Error::Param),
+        }))
+    }
+}
+
 /// A filter as liblzma has it, and its ID and properties as 7z has them.
 type FilterCoder = (XzFilter, &'static [u8], Vec<u8>);
 
@@ -155,6 +205,15 @@ pub struct WriteOptions {
     /// `/dev/urandom`, and so it must be given where there is none, or the
     /// archive fails with [`Error::Fail`].
     pub random_source: Option<RandomSource>,
+    /// Whether [`Method::Lzma2`] cuts a folder's data in blocks, which threads
+    /// compress and decompress apart. Not by default: a folder is one stream.
+    /// Blocks cost a little in size, as each starts with an empty dictionary.
+    pub lzma2_blocks: Lzma2Blocks,
+    /// How many threads compress LZMA2's blocks, each taking an encoder's
+    /// memory (94 MiB for preset 6) and a block in and out; one, the caller's,
+    /// by default. Other methods, and LZMA2 in one stream, use the caller's
+    /// thread alone. What is written is the same whatever this is.
+    pub threads: Threads,
 }
 
 impl Default for WriteOptions {
@@ -168,6 +227,8 @@ impl Default for WriteOptions {
             encrypt_headers: false,
             key_cycles: 19,
             random_source: None,
+            lzma2_blocks: Lzma2Blocks::None,
+            threads: Threads::One,
         }
     }
 }
@@ -182,6 +243,8 @@ impl core::fmt::Debug for WriteOptions {
             .field("password", &self.password.as_ref().map(|_| "(hidden)"))
             .field("encrypt_headers", &self.encrypt_headers)
             .field("key_cycles", &self.key_cycles)
+            .field("lzma2_blocks", &self.lzma2_blocks)
+            .field("threads", &self.threads)
             .finish_non_exhaustive()
     }
 }
@@ -267,6 +330,8 @@ enum Compressor {
     Xz(Box<Stream>),
     Deflate(Box<Deflate>),
     BZip2(Box<Compress>),
+    /// LZMA2 in blocks.
+    Blocks(Box<Blocks>),
 }
 
 impl Compressor {
@@ -281,6 +346,7 @@ impl Compressor {
         let mut at = 0;
         match self {
             Compressor::Copy => out(input),
+            Compressor::Blocks(blocks) => blocks.code(input, finish, buf, out),
             Compressor::Xz(stream) => {
                 let action = if finish {
                     XzAction::Finish
@@ -349,6 +415,140 @@ impl Compressor {
             }
         }
     }
+}
+
+/// A block of LZMA2 to compress, with the options to compress it with.
+type BlockJob = (LzmaOptions, Vec<u8>);
+
+/// The threads that compress LZMA2's blocks, each keeping its encoder for
+/// the next block.
+type BlockWorkers = Workers<Option<Box<Stream>>, BlockJob, Result<Vec<u8>>>;
+
+/// A block compressed as a stream of its own, without its end: `spare` is the
+/// encoder of the block before, whose memory it takes over. Its first chunk
+/// resets the dictionary, as the first of a stream does.
+fn compress_block(spare: &mut Option<Box<Stream>>, (lzma, data): BlockJob) -> Result<Vec<u8>> {
+    let filters = [XzFilter::lzma2(lzma)];
+    let mut stream = match spare.take() {
+        Some(stream) => stream.raw_encoder_again(&filters),
+        None => Stream::raw_encoder(&filters),
+    }
+    .map_err(|_| Error::Fail)?;
+    let mut input = XzIn::new(&data);
+    let mut out = Vec::with_capacity(data.len() / 4 + OUT_BUF);
+    loop {
+        if out.len() == out.capacity() {
+            out.reserve(out.len() / 4 + OUT_BUF);
+        }
+        let start = out.len();
+        out.resize(out.capacity(), 0);
+        let mut output = XzOut::new(&mut out[start..]);
+        let status = stream
+            .code(&mut output, &mut input, XzAction::Finish)
+            .map_err(|_| Error::Fail)?;
+        let made = output.pos;
+        out.truncate(start + made);
+        if status == XzStatus::StreamEnd {
+            break;
+        }
+    }
+    *spare = Some(Box::new(stream));
+    // The end of the stream, which only the folder's last block has.
+    if out.pop() != Some(0) {
+        return Err(Error::Fail);
+    }
+    Ok(out)
+}
+
+/// The result of a block whose thread failed.
+fn block_lost() -> Result<Vec<u8>> {
+    Err(Error::Fail)
+}
+
+/// LZMA2 in blocks: what the folder's filter gives, on the caller's thread as
+/// it keeps state, cut every `size` bytes, each block compressed by
+/// [`compress_block`] in a thread and written in order, and the end of the
+/// stream after the last. At most a block for each thread waits to be
+/// written, besides the one being filled.
+struct Blocks {
+    filter: Option<Compressor>,
+    lzma: LzmaOptions,
+    size: usize,
+    block: Vec<u8>,
+    workers: Box<BlockWorkers>,
+}
+
+impl Blocks {
+    fn code(
+        &mut self,
+        input: &[u8],
+        finish: bool,
+        buf: &mut [u8],
+        out: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let Blocks {
+            filter,
+            lzma,
+            size,
+            block,
+            workers,
+        } = self;
+        let mut add = |mut data: &[u8]| -> io::Result<()> {
+            while !data.is_empty() {
+                let n = (*size - block.len()).min(data.len());
+                block.extend_from_slice(&data[..n]);
+                data = &data[n..];
+                if block.len() == *size {
+                    give(workers, lzma, block, out)?;
+                }
+            }
+            Ok(())
+        };
+        match filter {
+            Some(filter) => filter.code(input, finish, buf, &mut add)?,
+            None => add(input)?,
+        }
+        if finish {
+            if !block.is_empty() {
+                give(workers, lzma, block, out)?;
+            }
+            while let Some(made) = workers.take() {
+                out(&made.map_err(io::Error::other)?)?;
+            }
+            out(&[0])?;
+        }
+        Ok(())
+    }
+}
+
+/// Gives `block` to a thread, and writes the blocks before it until no more
+/// wait than there are threads.
+fn give(
+    workers: &mut BlockWorkers,
+    lzma: &LzmaOptions,
+    block: &mut Vec<u8>,
+    out: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+) -> io::Result<()> {
+    workers.give((lzma.clone(), std::mem::take(block)));
+    while workers.pending() > workers.most() {
+        match workers.take() {
+            Some(made) => out(&made.map_err(io::Error::other)?)?,
+            None => break,
+        }
+    }
+    Ok(())
+}
+
+/// The options of LZMA2's encoder, and the size of its blocks if it is cut
+/// in blocks: then the dictionary is no larger than a block.
+fn lzma2_options(options: &WriteOptions, preset: u32) -> Result<(LzmaOptions, Option<usize>)> {
+    let mut lzma = LzmaOptions::preset(preset).ok_or(Error::Param)?;
+    let Some(size) = options.lzma2_blocks.size(lzma.dict_size)? else {
+        return Ok((lzma, None));
+    };
+    let size = usize::try_from(size).map_err(|_| Error::Param)?;
+    lzma.dict_size = lzma.dict_size.min(u32::try_from(size).unwrap_or(u32::MAX));
+    Ok((lzma, Some(size)))
 }
 
 /// A coder as a folder describes it: its ID and properties.
@@ -457,6 +657,8 @@ pub struct Writer<W> {
     buf: Vec<u8>,
     /// The encoder of the last folder, for the next.
     spare: Option<Box<Stream>>,
+    /// The threads of the last folder in blocks, for the next.
+    block_workers: Option<Box<BlockWorkers>>,
     entries: Vec<Written>,
     /// Whether the last entry is a file, which takes data.
     in_file: bool,
@@ -486,8 +688,12 @@ impl<W: Write + Seek> Writer<W> {
         {
             return Err(Error::Param);
         }
-        // Finds a bad preset, level or filter before anything is written.
+        // Finds a bad preset, level, filter or block size before anything is
+        // written.
         let compressor = make_compressor(&options, &mut None)?;
+        if let Method::Lzma2 { preset } = options.method {
+            lzma2_options(&options, preset)?;
+        }
         let spare = match compressor {
             Compressor::Xz(stream) => Some(stream),
             _ => None,
@@ -514,6 +720,7 @@ impl<W: Write + Seek> Writer<W> {
             folder: None,
             method_changed: false,
             spare,
+            block_workers: None,
             folders: Vec::new(),
             pack_total: 0,
             failed: None,
@@ -565,6 +772,9 @@ impl<W: Write + Seek> Writer<W> {
             return Err(Error::Param);
         }
         make_compressor(&options, &mut None)?;
+        if let Method::Lzma2 { preset } = method {
+            lzma2_options(&options, preset)?;
+        }
         self.options.method = method;
         self.method_changed = true;
         Ok(())
@@ -600,8 +810,7 @@ impl<W: Write + Seek> Writer<W> {
         }
         self.method_changed = false;
         if self.folder.is_none() {
-            let compressor =
-                make_compressor(&self.options, &mut self.spare).map_err(io::Error::other)?;
+            let compressor = self.folder_compressor().map_err(io::Error::other)?;
             let (mut coders, aes) = (Vec::new(), self.make_aes().map_err(io::Error::other)?);
             let aes = match aes {
                 Some((encoder, props)) => {
@@ -631,6 +840,38 @@ impl<W: Write + Seek> Writer<W> {
             folder.files.push((0, 0));
         }
         Ok(())
+    }
+
+    /// The compressor of a new folder: LZMA2 in blocks, with the threads of
+    /// the folder before, or as [`make_compressor`] makes it.
+    fn folder_compressor(&mut self) -> Result<Compressor> {
+        let Method::Lzma2 { preset } = self.options.method else {
+            return make_compressor(&self.options, &mut self.spare);
+        };
+        let (lzma, Some(size)) = lzma2_options(&self.options, preset)? else {
+            return make_compressor(&self.options, &mut self.spare);
+        };
+        let filter = match self.options.filter.coder()? {
+            Some((filter, ..)) => Some(Compressor::Xz(Box::new(
+                Stream::filter_encoder(&filter).map_err(|_| Error::Param)?,
+            ))),
+            None => None,
+        };
+        let workers = match self.block_workers.take() {
+            Some(workers) => workers,
+            None => Box::new(Workers::new(
+                self.options.threads.count(),
+                compress_block,
+                block_lost,
+            )),
+        };
+        Ok(Compressor::Blocks(Box::new(Blocks {
+            filter,
+            lzma,
+            size,
+            block: Vec::new(),
+            workers,
+        })))
     }
 
     /// An AES encoder with a new IV and the coder's properties, when encrypting.
@@ -687,8 +928,10 @@ impl<W: Write + Seek> Writer<W> {
         let Some(folder) = self.folder.take() else {
             return Ok(());
         };
-        if let Compressor::Xz(stream) = folder.compressor {
-            self.spare = Some(stream);
+        match folder.compressor {
+            Compressor::Xz(stream) => self.spare = Some(stream),
+            Compressor::Blocks(blocks) => self.block_workers = Some(blocks.workers),
+            _ => {}
         }
         let mut unpack_sizes = Vec::new();
         if folder.aes.is_some() {
@@ -973,7 +1216,10 @@ fn method_coder(options: &WriteOptions) -> Result<CoderInfo> {
             props.extend_from_slice(&o.dict_size.to_le_bytes());
             (vec![0x03, 0x01, 0x01], props)
         }
-        Method::Lzma2 { preset: p } => (vec![0x21], vec![lzma2_dict_prop(preset(p)?.dict_size)]),
+        Method::Lzma2 { preset: p } => {
+            let (lzma, _) = lzma2_options(options, p)?;
+            (vec![0x21], vec![lzma2_dict_prop(lzma.dict_size)])
+        }
         Method::Deflate { .. } => (vec![0x04, 0x01, 0x08], Vec::new()),
         Method::BZip2 { .. } => (vec![0x04, 0x02, 0x02], Vec::new()),
     })

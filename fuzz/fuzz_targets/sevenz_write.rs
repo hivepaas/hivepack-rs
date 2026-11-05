@@ -8,7 +8,10 @@
 use std::io::{Cursor, Read, Write};
 use std::sync::Arc;
 
-use hivepack::sevenz::{Archive, Filter, Method, NewEntry, Options, WriteOptions, Writer};
+use hivepack::Threads;
+use hivepack::sevenz::{
+    Archive, Filter, Lzma2Blocks, Method, NewEntry, Options, WriteOptions, Writer,
+};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|input: &[u8]| {
@@ -58,6 +61,17 @@ fuzz_target!(|input: &[u8]| {
             bytes.fill(0x5A);
             Ok(())
         })),
+        // LZMA2 in blocks of 4 KiB, which threads compress and decompress.
+        lzma2_blocks: if layout & 32 != 0 {
+            Lzma2Blocks::Size(4096)
+        } else {
+            Lzma2Blocks::None
+        },
+        threads: if layout & 64 != 0 {
+            Threads::of(3)
+        } else {
+            Threads::One
+        },
     };
 
     // Each piece: a byte for its kind and length, then that much data.
@@ -95,6 +109,9 @@ fuzz_target!(|input: &[u8]| {
         ..Options::default()
     };
     let mut a = Archive::open_with(Cursor::new(archive), &open).expect("what was written opens");
+    if layout & 128 != 0 {
+        a.set_threads(Threads::of(3));
+    }
     assert_eq!(a.len(), wrote.len());
     let mut files = a.files();
     for (name, data) in &wrote {

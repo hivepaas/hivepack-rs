@@ -120,7 +120,7 @@ Each rule that is not about writing outside the destination can be relaxed, by n
 | `time_limit` | none | how long the extraction may take (see [Time, cancelling and progress](#time-cancelling-and-progress)) |
 | `cancel` | none | a `Cancel` token that stops it |
 | `progress` | none | a function told how far it is |
-| `threads` | `Threads::One` | how many files are written at once, each in a thread of its own, where the archive's entries are apart (see [Threads](#threads)) |
+| `threads` | `Threads::One` | how many threads extraction may use: files written at once where the archive's entries are apart (ZIP), LZMA2 blocks decompressed at once in 7z (see [Threads](#threads)) |
 
 ## Damaged data
 
@@ -142,9 +142,10 @@ A `Sink` is told with `Sink::damaged`, before `finish_file` (kept) or `discard_f
 
 ## Threads
 
-An extraction writes one file at a time, on the caller's thread, by default. `Options::threads` (`hivepack::Threads`: `One`, `Auto` for as many as the machine runs at once, or `Exactly(n)`) lets it write that many at once, each read and decompressed in a thread of its own, where the archive's entries are apart:
+An extraction writes one file at a time, on the caller's thread, by default. `Options::threads` (`hivepack::Threads`: `One`, `Auto` for as many as the machine runs at once, or `Exactly(n)`) lets it use that many threads, where the archive lets the work be split:
 
 - **ZIP**: each entry's data is read on its own, by position, from where the central directory says. Once every entry is checked, and the directories are made on the caller's thread in the archive's order, each thread takes the next file and writes it whole, straight from the archive into the file: as many files are open, and as many pieces of data held, as there are threads, and nothing more is kept. Links are created after every file, and the directories get their times last, as with one thread. Every thread reads the archive at once, so `extract_zip` asks its source to be `Sync`, as a `File`, `Volumes` or a slice are. On a machine of 32 threads, 20,000 text files of 400 MB in all, deflated to 130 MB, extract onto ext4 in 1.16 s on one thread, 0.61 s on two, 0.34 s on four, 0.19 s on eight and 0.08 s on all.
+- **7z**: a folder whose LZMA2 stream resets its dictionary on the way, as 7-Zip writes it in threads and `sevenz::Lzma2Blocks` does, is decompressed a block in each thread; its files are still written one after another, in order. A folder without resets is decoded as before. See [7z.md](7z.md#lzma2-in-blocks-in-threads).
 - **Into a `Sink`**, entries are given one at a time, in order, on the caller's thread, whatever this says.
 
 What is written is the same whatever the threads: the files, their bytes, modes and times, and the `Summary`, with `Summary::damaged` in the archive's order. The threads share what is counted and told: the limits count what they all write, `Options::progress` is told by the thread that wrote, one call at a time, so that what it is told never goes back, and `Options::on_damaged` is asked about one entry at a time. A cancel or the time limit stops every thread between pieces of data, and so does the first error, which is the one returned: the others remove the files they were writing, as a file cut off is removed. What is left after an error is what differs: with one thread, nothing after the entry that failed; with more, files after it in the archive may have been written.
@@ -234,6 +235,7 @@ What differs from ZIP:
 - **Devices, FIFOs and sockets** are only their mode with data, as in ZIP: written as files.
 - **The ratio**: a file's compressed size is its share of its folder's packed streams (`Archive::folder_packed_size`, by its unpacked size), so that a file is held to its folder's ratio. Folders do not share packed streams, so there is no overlap to check.
 - **Permissions** are the Unix mode 7-Zip keeps in the high bits of the attributes (bit `0x8000` set), masked; an archive made on Windows has none, and its files get the system's defaults. The time is the modification time, an NTFS time.
+- **Threads**: with `Options::threads`, a folder whose LZMA2 stream resets its dictionary on the way, as 7-Zip writes it in threads and `hivepack::sevenz::Lzma2Blocks` does, is decoded a block in each thread, for this extraction (`Archive::set_threads`). The files are still written one after another, in the archive's order, and what is written is the same; a folder without resets is decoded as before. Damaged data fails the same way, but with a filter after LZMA2 (BCJ), which one thread reads 64 KiB ahead of the files, the error may come a file later in threads, the files before it whole and right (see [7z.md](7z.md#lzma2-in-blocks-in-threads)).
 
 ## Errors
 

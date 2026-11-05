@@ -7,7 +7,11 @@
 //! python3 scripts/testdata.py fetch --group generated --group bench
 //! cargo run --release -p sevenz-bench -- [--only TEXT] [--rounds 5] [--seconds 0.5]
 //!     [--limit-mb 64] [--small 5000] [--many 100000] [--dir DIR] [DATA]
+//! cargo run --release -p sevenz-bench -- --threads [--limit-mb 400] [--rounds 1] [DATA]
 //! ```
+//!
+//! With `--threads`, it times LZMA2 in blocks in one thread and in all, against
+//! one stream, in place of the rest: see `threads.rs`.
 //!
 //! DATA is a folder of files to archive, by default the Silesia corpus, cut to
 //! `--limit-mb` in all. `7zz`, built from the same release, makes every archive.
@@ -43,6 +47,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use hivepack::sevenz::{Archive, Method, NewEntry, Options, WriteOptions, Writer};
+
+mod threads;
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -695,6 +701,7 @@ struct Options_ {
     many: usize,
     dir: Option<PathBuf>,
     data: PathBuf,
+    threads: bool,
 }
 
 fn parse_options(repository: &Path) -> Result<Options_> {
@@ -707,6 +714,7 @@ fn parse_options(repository: &Path) -> Result<Options_> {
         many: 100_000,
         dir: None,
         data: repository.join("target/testdata/silesia"),
+        threads: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -719,6 +727,7 @@ fn parse_options(repository: &Path) -> Result<Options_> {
             "--small" => options.small = value()?.parse().map_err(|_| "--small")?,
             "--many" => options.many = value()?.parse().map_err(|_| "--many")?,
             "--dir" => options.dir = Some(PathBuf::from(value()?)),
+            "--threads" => options.threads = true,
             _ if arg.starts_with("--") => return Err(format!("unknown option {arg}")),
             _ => options.data = PathBuf::from(arg),
         }
@@ -833,6 +842,24 @@ fn real_main() -> Result<()> {
     };
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let dir = dir.canonicalize().map_err(|e| e.to_string())?;
+    if options.threads {
+        let tool = repository.join(format!(
+            "target/testdata/7zz/7zz{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        let tool = tool.exists().then_some(tool);
+        threads::bench(
+            &options.data,
+            &dir,
+            options.limit_mb << 20,
+            options.rounds,
+            tool.as_deref(),
+        )?;
+        if options.dir.is_none() {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        return Ok(());
+    }
     let big_bytes = make_inputs(
         &options.data,
         &dir,

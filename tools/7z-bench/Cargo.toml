@@ -14,4 +14,4 @@ workspace = true
 unsafe-fast = ["hivepack/deflate-unsafe-fast"]
 
 [dependencies]
-hivepack = { workspace = true, features = ["sevenz"] }
+hivepack = { workspace = true, features = ["extract", "sevenz"] }
