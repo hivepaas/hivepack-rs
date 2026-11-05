@@ -257,6 +257,12 @@ fn links<'a, R: Read + Seek>(
 /// (it replaces one the archive was opened with); an archive whose headers
 /// are encrypted needs it to be opened, with
 /// [`crate::sevenz::Options::password`].
+///
+/// [`Options::threads`] decodes LZMA2 whose stream resets its dictionary on
+/// the way, as 7-Zip writes it in threads and
+/// [`crate::sevenz::Lzma2Blocks`] does, a block in each thread, in place of
+/// what [`Archive::set_threads`] said, for this extraction. The files are
+/// still written one after another, in the archive's order.
 pub fn extract_7z<R: Read + Seek>(
     archive: &mut Archive<R>,
     destination: &Path,
@@ -283,8 +289,21 @@ pub fn extract_7z_to<R: Read + Seek>(
     extract_into(archive, || Ok(state.target(options)), options)
 }
 
-/// [`extract_7z`] into the target `make` makes, once the archive is checked.
+/// [`extract_7z`] into the target `make` makes, once the archive is checked,
+/// LZMA2 decoded in [`Options::threads`] for this extraction only.
 fn extract_into<R: Read + Seek, T: Target>(
+    archive: &mut Archive<R>,
+    make: impl FnOnce() -> Result<T, Error>,
+    options: &Options,
+) -> Result<Summary, Error> {
+    let before = archive.swap_thread_count(options.threads.count());
+    let extracted = extract_with(archive, make, options);
+    archive.swap_thread_count(before);
+    extracted
+}
+
+/// [`extract_into`], with the archive's threads set.
+fn extract_with<R: Read + Seek, T: Target>(
     archive: &mut Archive<R>,
     make: impl FnOnce() -> Result<T, Error>,
     options: &Options,

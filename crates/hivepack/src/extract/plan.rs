@@ -12,6 +12,7 @@ use crate::extract::error::{Error, ErrorKind};
 use crate::extract::name::{Checks, Name, NameError, NameRules, renamed};
 use crate::extract::origin::Origin;
 use crate::extract::progress::{Cancel, ProgressFn};
+use crate::threads::Threads;
 
 /// Limits on what an archive may write, against archive bombs. They count
 /// the bytes actually written, not what the archive says: the declared
@@ -289,6 +290,10 @@ pub struct Options {
     /// be used is not picked. All of them by default. Data the picked ones
     /// depend on, in a solid block or stream, is still read.
     pub select: Option<Select>,
+    /// How many files are written at once, each read and decompressed in a
+    /// thread of its own, where the archive's entries are apart (ZIP): at most
+    /// this many. One by default. What is written is the same.
+    pub threads: Threads,
     /// Whether the destination takes two names that differ only in case, or in
     /// how their Unicode is composed, for one, as found there; the system's
     /// default if it could not be.
@@ -320,6 +325,7 @@ impl std::fmt::Debug for Options {
             .field("progress", &self.progress.as_ref().map(|_| ".."))
             .field("origin", &self.origin)
             .field("select", &self.select.as_ref().map(|_| ".."))
+            .field("threads", &self.threads)
             .field("folds", &self.folds)
             .field("into_archive", &self.into_archive)
             .finish()

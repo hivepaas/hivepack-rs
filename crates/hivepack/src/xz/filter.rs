@@ -557,6 +557,20 @@ pub(crate) fn raw_encoder_reinit(
     encoder_filter_init(&filters[..count])
 }
 
+/// Not in liblzma: the encoder of a filter that cannot end a chain, a branch
+/// converter or delta, on its own, its output the filtered data. 7z's writer
+/// runs it before LZMA2's blocks, which threads compress apart: it keeps state
+/// from one block to the next, as it does in a chain.
+#[cfg(feature = "sevenz")]
+pub(crate) fn filter_encoder_alone(filter: &Filter) -> Result<Box<dyn NextCoder>, Ret> {
+    if matches!(filter.id, FILTER_LZMA1 | FILTER_LZMA1EXT | FILTER_LZMA2)
+        || !encoder_is_supported(filter.id)
+    {
+        return Err(Ret::OptionsError);
+    }
+    encoder_filter_init(core::slice::from_ref(filter))
+}
+
 /// The `memusage` of an encoder in `encoders[]`, None for the filters
 /// without one.
 fn encoder_memusage(filter: &Filter) -> Option<u64> {

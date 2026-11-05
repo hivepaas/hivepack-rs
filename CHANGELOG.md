@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.5.0
+## Unreleased
+
+- `sevenz`: `WriteOptions::lzma2_blocks` cuts LZMA2 in blocks that each reset the dictionary, as 7-Zip does in threads (`Lzma2Blocks::Auto`, 4 times the dictionary: 32 MiB for preset 6), and `WriteOptions::threads` compresses them in threads, the filter before them on the caller's thread. What is written is the same whatever the threads, and any 7z reader reads it; the default is one stream, as before. See [docs/7z.md](docs/7z.md#lzma2-in-blocks-in-threads).
+- `sevenz`: `Archive::set_threads` decodes LZMA2 whose stream resets its dictionary on the way, a block in each thread, under `Options::decoder_memory_limit`: what 7-Zip writes in threads, and `Lzma2Blocks`. Other folders are decoded as before.
+- `extract`: `Options::threads`, one by default, decodes 7z's LZMA2 blocks in threads too (`extract_7z`, `extract_7z_to`).
 
 - `Threads`: how many threads of its own a coder may use, `One` by default; the same output whatever it is.
 - `open`: `Opener::threads` decodes an xz Stream whose Blocks have their sizes in their headers (`xz -T`, 7-Zip) a Block in each thread, under `Limits::xz_memlimit`. See [docs/open.md](docs/open.md#threads).

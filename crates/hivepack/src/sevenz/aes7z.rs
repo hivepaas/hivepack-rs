@@ -127,6 +127,8 @@ fn derive_key(cycles: u32, salt: &[u8], password: &[u8]) -> [u8; 32] {
 /// What decoding a folder needs from `Options`, and the keys it has made.
 pub(crate) struct Decoding {
     pub(crate) limit: u64,
+    /// The threads an LZMA2 coder may use, at least one.
+    pub(crate) threads: u32,
     /// In UTF-16LE.
     password: Option<Vec<u8>>,
     max_key_cycles: u32,
@@ -137,6 +139,7 @@ impl Decoding {
     pub(crate) fn new(limit: u64, password: Option<&str>, max_key_cycles: u32) -> Self {
         let mut decoding = Decoding {
             limit,
+            threads: 1,
             password: None,
             max_key_cycles,
             keys: Vec::new(),

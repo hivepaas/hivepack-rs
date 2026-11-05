@@ -224,6 +224,7 @@ What differs from ZIP:
 - **Devices, FIFOs and sockets** are only their mode with data, as in ZIP: written as files.
 - **The ratio**: a file's compressed size is its share of its folder's packed streams (`Archive::folder_packed_size`, by its unpacked size), so that a file is held to its folder's ratio. Folders do not share packed streams, so there is no overlap to check.
 - **Permissions** are the Unix mode 7-Zip keeps in the high bits of the attributes (bit `0x8000` set), masked; an archive made on Windows has none, and its files get the system's defaults. The time is the modification time, an NTFS time.
+- **Threads**: with `Options::threads`, a folder whose LZMA2 stream resets its dictionary on the way, as 7-Zip writes it in threads and `hivepack::sevenz::Lzma2Blocks` does, is decoded a block in each thread, for this extraction (`Archive::set_threads`). The files are still written one after another, in the archive's order, and what is written is the same; a folder without resets is decoded as before. Damaged data fails the same way, but with a filter after LZMA2 (BCJ), which one thread reads 64 KiB ahead of the files, the error may come a file later in threads, the files before it whole and right (see [7z.md](7z.md#lzma2-in-blocks-in-threads)).
 
 ## Errors
 

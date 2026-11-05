@@ -15,6 +15,11 @@
 //! decodes them: any graph of coders, with more methods. Each coder's stream
 //! must end where its output does and its input must be read to its end,
 //! which `7zz t` calls an error too.
+//!
+//! Not in the SDK either: given more than one thread
+//! ([`Archive::set_threads`](crate::sevenz::Archive::set_threads)), an LZMA2 coder is
+//! decoded by `lzma2_mt.rs`, a block in each thread, where its stream resets
+//! the dictionary; with one, as the SDK's is.
 
 use std::io::{Read, Seek};
 
@@ -32,6 +37,7 @@ use crate::sevenz::bcj2::{self, Bcj2Dec, Delta};
 use crate::sevenz::bra;
 use crate::sevenz::error::{Error, Result};
 use crate::sevenz::lzma_dec::LzmaDec;
+use crate::sevenz::lzma2_mt::Lzma2Mt;
 use crate::sevenz::ppmd7::{self, ByteIn, Ppmd7};
 
 /// `k_Copy`.
@@ -152,7 +158,7 @@ fn check_supported_folder(f: &Folder) -> Result<()> {
 /// A coder's input, read through a buffer of its own, so that several can be
 /// read in turns: a packed stream, a range of the archive, or another coder's
 /// output.
-struct PackReader {
+pub(crate) struct PackReader {
     pos: u64,
     end: u64,
     buf: Vec<u8>,
@@ -163,7 +169,8 @@ struct PackReader {
 }
 
 impl PackReader {
-    fn new(pos: u64, size: u64) -> Self {
+    /// The `size` bytes of the archive at `pos`.
+    pub(crate) fn new(pos: u64, size: u64) -> Self {
         PackReader {
             pos,
             end: pos.saturating_add(size),
@@ -183,13 +190,13 @@ impl PackReader {
     }
 
     /// What is left of the stream, read or not.
-    fn remaining(&self) -> u64 {
+    pub(crate) fn remaining(&self) -> u64 {
         (self.len - self.start) as u64 + (self.end - self.pos)
     }
 
     /// The buffered bytes, read from the archive when there are none; empty
     /// at the stream's end. A short archive is `eof`.
-    fn fill<R: Read + Seek>(&mut self, r: &mut R, eof: Error) -> Result<&[u8]> {
+    pub(crate) fn fill<R: Read + Seek>(&mut self, r: &mut R, eof: Error) -> Result<&[u8]> {
         if self.start == self.len && self.pos < self.end {
             if self.buf.is_empty() {
                 self.buf = vec![0; PACK_BUF_SIZE];
@@ -219,7 +226,7 @@ impl PackReader {
         Ok(&self.buf[self.start..self.len])
     }
 
-    fn consume(&mut self, n: usize) {
+    pub(crate) fn consume(&mut self, n: usize) {
         self.start += n;
     }
 
@@ -240,6 +247,8 @@ enum Main {
     Copy,
     /// `SzDecodeLzma` and `SzDecodeLzma2`.
     Lzma(Box<Stream>),
+    /// LZMA2 in threads: not in the SDK.
+    Lzma2Mt(Box<Lzma2Mt>),
     /// `SzDecodeLzma`, for what liblzma's decoder does not take.
     LzmaDec(Box<LzmaDec>),
     /// `SzDecodePpmd`; the range decoder is started by the first read.
@@ -443,12 +452,14 @@ fn lzma_decoder(props: &[u8], out_size: u64, lzma2: bool, limit: &mut u64) -> Re
 }
 
 impl MainCoder {
+    /// The coder of `method_id`, which may use up to `threads` threads.
     fn new(
         method_id: u32,
         props: &[u8],
         input: PackReader,
         out_size: u64,
         limit: &mut u64,
+        threads: u32,
     ) -> Result<Self> {
         let in_size = input.remaining();
         let method = match method_id {
@@ -466,6 +477,9 @@ impl MainCoder {
                 }
                 _ => Main::Lzma(Box::new(lzma_decoder(props, out_size, false, limit)?)),
             },
+            K_LZMA2 if threads > 1 => {
+                Main::Lzma2Mt(Box::new(Lzma2Mt::new(props, out_size, threads, limit)?))
+            }
             K_LZMA2 => Main::Lzma(Box::new(lzma_decoder(props, out_size, true, limit)?)),
             K_PPMD => Main::Ppmd(ppmd_decoder(props, limit)?, false),
             K_DEFLATE => Main::Inflate(Box::new(Inflate::new(-15).map_err(|_| Error::Mem)?)),
@@ -604,6 +618,16 @@ impl MainCoder {
                     return Err(Error::Data);
                 }
             },
+            Main::Lzma2Mt(mt) => {
+                let n = mt.read(&mut self.input, r, out)?;
+                if n == 0 {
+                    // The stream ended before the output.
+                    self.ended = true;
+                    return Err(Error::Data);
+                }
+                self.out_pos += n as u64;
+                Ok(n)
+            }
             Main::Lzma(stream) => loop {
                 let buf = if self.input.remaining() == 0 {
                     &[][..]
@@ -701,6 +725,10 @@ impl MainCoder {
                 return Err(bytes.error());
             }
             res?;
+        }
+        if let Main::Lzma2Mt(mt) = &mut self.method {
+            mt.finish(&mut self.input, r)?;
+            self.ended = true;
         }
         if let Main::Lzma(stream) = &mut self.method
             && !self.ended
@@ -1176,13 +1204,21 @@ impl Graph<'_> {
             if input.remaining() != out_size {
                 return Err(Error::Data);
             }
-            let inner = MainCoder::new(K_COPY, &[], input, out_size, &mut self.limit)?;
+            let inner = MainCoder::new(K_COPY, &[], input, out_size, &mut self.limit, 1)?;
             return Ok(Node::Filter(
                 Box::new(filter),
                 Box::new(Node::Main(Box::new(inner))),
             ));
         }
-        let main = MainCoder::new(c.method_id, props, input, out_size, &mut self.limit)?;
+        let threads = self.decoding.threads;
+        let main = MainCoder::new(
+            c.method_id,
+            props,
+            input,
+            out_size,
+            &mut self.limit,
+            threads,
+        )?;
         Ok(Node::Main(Box::new(main)))
     }
 }
@@ -1281,12 +1317,15 @@ impl FolderDecoder {
                     return Err(Error::Param);
                 }
                 let (pos, in_size) = pack(si);
+                // The MAIN stream is the large one.
+                let threads = if ci == 2 { decoding.threads } else { 1 };
                 mains.push(MainCoder::new(
                     folder.coders[ci].method_id,
                     props(ci),
                     PackReader::new(pos, in_size),
                     unpack_size,
                     &mut limit,
+                    threads,
                 )?);
             }
             let (jump_size, call_size, main_size) =
@@ -1322,6 +1361,7 @@ impl FolderDecoder {
                 PackReader::new(pos, in_size),
                 out_size,
                 &mut limit,
+                decoding.threads,
             )?;
             let main = Node::Main(Box::new(main));
             if folder.num_coders == 2 {

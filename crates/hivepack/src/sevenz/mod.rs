@@ -36,7 +36,9 @@
 //!
 //! [`Writer`] writes an archive: Copy, LZMA, LZMA2, Deflate or BZip2, with a
 //! branch converter or the delta filter before LZMA and LZMA2, solid or not, and
-//! AES with a password, the names too if wanted.
+//! AES with a password, the names too if wanted. LZMA2 can be cut in blocks
+//! ([`Lzma2Blocks`]), which threads compress ([`WriteOptions::threads`]) and
+//! decompress ([`Archive::set_threads`]) apart.
 //!
 //! ```no_run
 //! use std::io::Write;
@@ -58,19 +60,23 @@ mod bcj2;
 mod bra;
 mod dec;
 mod error;
+mod lzma2_mt;
 mod lzma_dec;
 mod ppmd7;
+mod workers;
 mod writer;
 
 use std::io::{self, Read, Seek};
 
 pub use arc_in::SIGNATURE;
 pub use error::{Error, Result};
-pub use writer::{Filter, Method, NewEntry, RandomSource, WriteOptions, Writer};
+pub use writer::{Filter, Lzma2Blocks, Method, NewEntry, RandomSource, WriteOptions, Writer};
 
 use aes7z::{Decoding, MAX_KEY_CYCLES};
 use arc_in::ArEx;
 use dec::FolderDecoder;
+
+use crate::threads::Threads;
 
 /// The 7-Zip release whose LZMA SDK this crate follows.
 pub const UPSTREAM_VERSION: &str = "26.05";
@@ -203,6 +209,25 @@ impl<R: Read + Seek> Archive<R> {
         self.decoding.set_password(password);
         // What a wrong password decoded to is not the folder.
         self.cache = None;
+    }
+
+    /// How many threads decode an LZMA2 coder whose stream resets its
+    /// dictionary on the way, a block in each, as 7-Zip writes it in threads
+    /// and [`Writer`] does with [`Lzma2Blocks`], from the next folder read on.
+    /// One, the caller's, by default. The blocks decoded and not yet read are
+    /// held in memory, as much of [`Options::decoder_memory_limit`] as the
+    /// folder's coders leave. What is read is the same whatever this is, and
+    /// errors too, though with a filter after LZMA2 one may be met a file
+    /// later (`docs/7z.md`). Other folders are decoded as before.
+    pub fn set_threads(&mut self, threads: Threads) {
+        self.decoding.threads = threads.count();
+    }
+
+    /// The threads LZMA2 is decoded in from the next folder on, at least one,
+    /// for those it was.
+    #[cfg(feature = "extract")]
+    pub(crate) fn swap_thread_count(&mut self, threads: u32) -> u32 {
+        std::mem::replace(&mut self.decoding.threads, threads.max(1))
     }
 
     /// The error for file `index`'s CRC not matching.
