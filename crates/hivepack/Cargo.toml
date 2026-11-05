@@ -340,6 +340,11 @@ path = "tests/lz4_unchecked.rs"
 required-features = ["lz4"]
 
 [[test]]
+name = "memory_limits"
+path = "tests/memory_limits.rs"
+required-features = ["bzip2", "open", "sevenz", "zstd"]
+
+[[test]]
 name = "open_age"
 path = "tests/open_age.rs"
 required-features = ["age", "extract", "open"]

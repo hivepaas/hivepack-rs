@@ -51,6 +51,13 @@ pub struct MtOptions {
     /// The input of each stream, or 0 for [`piece_size`]'s. Larger pieces
     /// make streams of several blocks.
     pub piece_size: usize,
+    /// The most bytes compressing may take: the threads are lowered until
+    /// [`MtOptions::memory_usage`] says they fit
+    /// ([`MtOptions::threads_used`]). One thread is always allowed, even
+    /// where it takes more, as liblzma allows one: the output is the same
+    /// whatever the threads. No limit (`u64::MAX`) by default. See
+    /// `docs/memory.md`.
+    pub memory_limit: u64,
 }
 
 impl Default for MtOptions {
@@ -60,9 +67,62 @@ impl Default for MtOptions {
             work_factor: 0,
             threads: Threads::One,
             piece_size: 0,
+            memory_limit: u64::MAX,
         }
     }
 }
+
+impl MtOptions {
+    /// The input of each stream.
+    fn piece(&self) -> usize {
+        match self.piece_size {
+            0 => piece_size(self.block_size_100k),
+            size => size,
+        }
+    }
+
+    /// The most bytes a [`CompressMt`] with these options takes, in
+    /// `threads` threads (0 is taken for 1): an upper bound, of what it
+    /// allocates, whatever the input. [`Error::Param`] where
+    /// [`Compress::new`] would give it.
+    ///
+    /// Each thread has a compressor ([`Compress`]'s, about 15 bytes for
+    /// each byte of a block: 14 MB at block size 9), a piece and room for
+    /// its stream, 1% more than it and 601 bytes; and as many pieces again
+    /// wait, read or compressed, besides the one being filled and the
+    /// stream being written out: 15.8 MiB a thread at block size 9, and
+    /// 2.6 MiB more. See `docs/memory.md`.
+    pub fn memory_usage(&self, threads: u32) -> Result<u64> {
+        if !(1..=9).contains(&self.block_size_100k) || !(0..=250).contains(&self.work_factor) {
+            return Err(Error::Param);
+        }
+        let threads = u64::from(threads.max(1));
+        let piece = self.piece() as u64;
+        let stream = piece + piece / 100 + 601;
+        let compress = crate::bzip2::compress_memory(self.block_size_100k);
+        let per_thread = piece + compress + 2 * stream;
+        Ok(threads
+            .saturating_mul(per_thread)
+            .saturating_add(piece + stream + MT_MEMORY))
+    }
+
+    /// The threads a [`CompressMt`] with these options compresses in: as
+    /// many as [`threads`](MtOptions::threads) says, fewer while
+    /// [`memory_usage`](MtOptions::memory_usage) is over
+    /// [`memory_limit`](MtOptions::memory_limit), and one at least.
+    /// [`Error::Param`] where [`Compress::new`] would give it.
+    pub fn threads_used(&self) -> Result<u32> {
+        let one = self.memory_usage(1)?;
+        let per_thread = self.memory_usage(2)? - one;
+        let room = self.memory_limit.saturating_sub(one) / per_thread.max(1);
+        let most = u32::try_from(room.saturating_add(1)).unwrap_or(u32::MAX);
+        Ok(self.threads.count().min(most).max(1))
+    }
+}
+
+/// What a [`CompressMt`] takes besides its pieces and compressors: the
+/// threads' channels, and itself.
+const MT_MEMORY: u64 = 1 << 20;
 
 /// Where a [`CompressMt`] is, as libbzip2's `mode`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,8 +150,10 @@ enum Mode {
 /// With [`Threads::One`], each piece is compressed in the call that fills
 /// it. With more, at most two pieces for each thread are in flight, and a
 /// call waits for the oldest of them when it can go no further without.
-/// Each thread's compressor takes about 9 bytes for each byte of a block,
-/// as [`Compress`] does: 8 MB at block size 9.
+/// Each thread's compressor takes about 15 bytes for each byte of a block,
+/// as [`Compress`] does: 14 MB at block size 9.
+/// [`MtOptions::memory_limit`] lowers the threads to fit what
+/// [`MtOptions::memory_usage`] counts.
 pub struct CompressMt {
     block_size_100k: i32,
     work_factor: i32,
@@ -125,23 +187,17 @@ impl CompressMt {
             block_size_100k,
             work_factor,
             threads,
-            piece_size: 0,
+            ..MtOptions::default()
         })
     }
 
     /// A compressor with `options`: [`Error::Param`] where
     /// [`Compress::new`] would give it.
     pub fn with_options(options: &MtOptions) -> Result<CompressMt> {
-        // What Compress::new checks.
-        if !(1..=9).contains(&options.block_size_100k) || !(0..=250).contains(&options.work_factor)
-        {
-            return Err(Error::Param);
-        }
-        let piece_size = match options.piece_size {
-            0 => piece_size(options.block_size_100k),
-            size => size,
-        };
-        let threads = usize::try_from(options.threads.count()).unwrap_or(usize::MAX);
+        // What Compress::new checks, and the threads that fit the limit.
+        let threads = options.threads_used()?;
+        let piece_size = options.piece();
+        let threads = usize::try_from(threads).unwrap_or(usize::MAX);
         let pool = Pool::new(threads);
         let in_flight = if pool.inline() {
             1

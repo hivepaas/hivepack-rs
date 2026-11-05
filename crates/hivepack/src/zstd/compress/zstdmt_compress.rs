@@ -882,14 +882,14 @@ pub(crate) struct MtCCtx {
 
 /// `ZSTDMT_createJobsTable`: the size of the job table for `nb_workers`
 /// threads: a power of 2 over `nb_workers + 2`.
-fn zstdmt_jobs_table_size(nb_workers: usize) -> usize {
+pub(crate) fn zstdmt_jobs_table_size(nb_workers: usize) -> usize {
     1 << (highbit32((nb_workers + 2) as u32) + 1)
 }
 
 /// `ZSTDMT_computeTargetJobLog`: the log of the job size by default, from
 /// the window; with long distance matching, whose window is usually far
 /// larger, from the cycle of the chain table.
-fn zstdmt_compute_target_job_log(params: &CCtxParams) -> u32 {
+pub(crate) fn zstdmt_compute_target_job_log(params: &CCtxParams) -> u32 {
     let job_log = if params.ldm_enable == ParamSwitch::Enable {
         21.max(zstd_cycle_log(params.c_params.chain_log, params.c_params.strategy) + 3)
     } else {
@@ -920,7 +920,7 @@ fn zstdmt_overlap_log(ovlog: i32, strategy: Strategy) -> i32 {
 /// `ZSTDMT_computeOverlapSize`: the overlap, a fraction of the window
 /// (with long distance matching, of the job size as long as it is
 /// smaller).
-fn zstdmt_compute_overlap_size(params: &CCtxParams) -> usize {
+pub(crate) fn zstdmt_compute_overlap_size(params: &CCtxParams) -> usize {
     let overlap_r_log = 9 - zstdmt_overlap_log(params.overlap_log, params.c_params.strategy);
     let window_log = params.c_params.window_log as i32;
     let mut ov_log = if overlap_r_log >= 8 {

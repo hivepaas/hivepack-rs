@@ -10,6 +10,10 @@ use std::num::NonZeroU32;
 /// thread or many. Where a format leaves no work to share (a gzip stream, a
 /// zstd frame, an xz Block without its sizes in its header), the caller's
 /// thread does it all whatever this says. Each coder says where it uses them.
+///
+/// Each thread takes memory of its own, and each coder that uses threads
+/// takes a limit on it, under which it uses fewer, one at least, and tells
+/// what it would take beforehand: see `docs/memory.md`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Threads {

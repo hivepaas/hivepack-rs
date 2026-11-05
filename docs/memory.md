@@ -1,0 +1,128 @@
+# Memory
+
+Threads multiply what a coder takes: each has its own encoder or decoder, and its own data in and out. Running out of memory cannot be recovered from: Rust aborts when an allocation fails, and Linux's OOM killer ends the process before it does. So an application has to choose its threads before it starts. Each coder of hivepack that uses threads takes a limit, and lowers its threads until what it would take fits it; and each tells, before it starts, what a configuration takes, so that an application that cannot fit even one thread can say how much it needs. packwing measures the memory free when a job starts, and gives each job about half of it.
+
+Lowering the threads is always safe: every coder gives the same output whatever its threads, one or many (see `hivepack::Threads`), so the limit changes how fast something is made, never what is made.
+
+## How the threads are chosen
+
+- **The most that fit.** A coder asked for `n` threads (`Threads::Exactly(n)`, or `Threads::Auto` for as many as the machine runs at once) uses the most threads, `n` or fewer, whose estimate is no more than its limit.
+- **One is always allowed**, even where one takes more than the limit, as liblzma's `memlimit_threading` allows one thread. A limit never makes a coder fail: it can only make it slower. Where one thread does not fit, the estimate of one says how much it takes, for the application to tell the user, or to refuse the job itself.
+- **No limit by default.** Every new limit is `u64::MAX` unless set, so nothing changes for a caller that does not set one. The readers' limits that were there before keep their defaults (`sevenz::Options::decoder_memory_limit`, `open::Limits::xz_memlimit`).
+- **The estimates are upper bounds** of what the coder allocates, whatever the data: they count each buffer at the size it is allocated with, where the memory a process uses (its resident set) counts only the pages written. A block's output is given room for the most it can compress to, which data that compresses never fills: so the memory used is often well below the estimate, never above it.
+
+## Writers
+
+| Coder | The limit | The estimate | The threads it takes |
+|---|---|---|---|
+| 7z, LZMA2 in blocks | `sevenz::WriteOptions::memory_limit` | `WriteOptions::memory_usage(threads)` | `WriteOptions::threads_used()` |
+| zstd with workers | `zstd::CCtx::set_workers_memory_limit(limit)` | `CCtx::estimate_memory(nb_workers)` | `CCtx::nb_workers_within_limit()` |
+| bzip2 in threads | `bzip2::MtOptions::memory_limit` | `MtOptions::memory_usage(threads)` | `MtOptions::threads_used()` |
+
+What they take, from the estimates, in MiB:
+
+| Coder | One thread | Each thread more |
+|---|---|---|
+| 7z, LZMA2 preset 1, blocks of 4 MiB | 21.7 | 16.6 |
+| 7z, LZMA2 preset 6, blocks of 32 MiB | 190 | 157 |
+| 7z, LZMA2 preset 9, blocks of 256 MiB | 1,442 | 1,185 |
+| 7z, LZMA2 preset 6 in one stream (one thread only) | 95 | |
+| zstd level 3, jobs of 8 MiB | 69 (none: 4.5) | 18.5, and more where the job table grows |
+| zstd level 19, jobs of 32 MiB | 373 (none: 90) | 153, and more where the job table grows |
+| bzip2 level 9 | 18.4 | 15.8 |
+
+zstd's workers do not cost the same each: the job table, which holds a copy of the output of each job not yet written out, grows by powers of 2 (4 places for 1 worker, 8 for 2 to 5, 16 for 6 to 13, 32 for 14 to 29), each place the output of a job. Level 3 takes 69 MiB with one worker, 120 with 2, 157 with 4 and 572 with 16; level 19 373, 656, 964 and 3,588.
+
+### 7z: LZMA2 in blocks
+
+With `WriteOptions::lzma2_blocks`, `Writer` compresses each block in a thread of its own ([7z.md](7z.md#lzma2-in-blocks-in-threads)). With `B` the size of a block, `E` the memory of an LZMA2 encoder whose dictionary is no larger than `B` (`xz::raw_encoder_memusage`, liblzma's count: 9.6 MiB for preset 1, 94 MiB for 6, 674 MiB for 9), and `O = B + 6 × ⌈B / 64 KiB⌉ + 16`, the most a block compresses to (an LZMA2 chunk of at most 64 KiB, each with a header of at most 6 bytes):
+
+```
+memory_usage(n) = max(n × (E + B + O) + O, H) + 1 MiB + 64 KiB
+```
+
+Each thread keeps its encoder from one block to the next, and holds the block it compresses and room for its output, reserved once, whole; a block more, compressed and waiting to be written, or being filled, which is no larger. The writer's own buffer is 64 KiB, and AES, a filter before the blocks (BCJ or delta) and the threads' channels fit in the 1 MiB. The other methods use one thread: LZMA and LZMA2 in one stream their encoder (`E`, the chain's, filter included), Deflate 512 KiB at most, BZip2 `Compress`'s 14 MB at level 9, Copy nothing.
+
+`H` is the encoder of the header, written at the end, once the coders are let go: LZMA2 of preset 6 with a dictionary as large as the header, from 64 KiB (2 MiB in all) to 64 MiB. What is not counted is what grows with the files rather than with the threads: the list of files, and a header of more than 64 KiB, some thousands of files, whose encoder takes about 12 times its size.
+
+The threads are chosen when a folder starts: a folder after `Writer::set_method` takes the threads that fit its own method. Before this, the writer made an encoder of one stream when it was made, and kept it beside the threads' encoders all along, for nothing: that is gone, and so are the copies of a block as it grew, as its room is now reserved whole.
+
+### zstd with workers
+
+libzstd estimates a context without workers (`ZSTD_estimateCStreamSize`) and refuses to estimate one with them. `CCtx::estimate_memory` counts what the port allocates, with workers or without (`zstd_compress/memory.rs`, beside the port). With the frame's parameters as the next frame resolves them (level, window `W`, hash, chain and strategy, its size if pledged), `S` the size of a job (`CParameter::JobSize`, or 4 times the window: 8 MiB at level 3, 32 MiB at level 19), `P` the overlap of a job with the one before (a fraction of the window by the strategy: 256 KiB at level 3, 8 MiB at level 19), `D = ZSTD_compressBound(S)`, `T` the job table's places (a power of 2 over `n + 2`), and `C` a context for blocks of `K` = 128 KiB at most:
+
+```
+C = 4 × (2^hashLog + 2^chainLog + 2^hashLog3) + 2^hashLog (the row match finder's tags),
+      each where the strategy has it
+  + K + 11 × K / 3 (a block's literals and sequences) + the optimal parser's tables (from btopt)
+  + 2 entropy tables + 1 MiB
+
+without workers: C + (W + K) + ZSTD_compressBound(K) (the buffers, when buffered)
+with n workers:  n × (C + D) + (n + 2) × (P + S) + P + T × D + 2 MiB
+```
+
+Each worker has a context and a buffer for a job's output; a job's input, after its overlap, is held in a buffer of its own until the job is done (one for each worker, one made and waiting for a worker, one being filled); and what each job writes is copied for the caller until it is written out, which the job table bounds. A caller that writes out a little at a time can fill the table. Long distance matching adds its tables, the sequences of each job, and the input its window reaches, which its buffer may hold twice and with room for twice that: `4 × (W + S)`.
+
+The limit (`CCtx::set_workers_memory_limit`) lowers each frame's workers, from those `CParameter::NbWorkers` sets, at least to one, never to none: a frame with workers is not the frame without them, while it is the same with one worker or 200. A frame of a known size of 512 KB or less takes no workers, and no limit. Under a limit, the workers' context is made again for a frame that would take other than the frame before, so that it keeps no contexts or buffers of a larger frame (libzstd's pools only grow); without a limit, it is kept, as libzstd keeps it.
+
+`xz`'s encoder in threads (`Stream::stream_encoder_mt`) is liblzma's, which has no limit for it either: `xz::stream_encoder_mt_memusage` counts what it takes, for the caller to choose its threads, as `xz --memlimit-compress` does.
+
+### bzip2 in threads
+
+`CompressMt` ([bzip2.md](bzip2.md#threads-beside-the-port)) holds at most two pieces in flight for each thread, each read, being compressed, or compressed and waiting. With `P` the size of a piece (855,000 bytes at level 9), `O = P + P / 100 + 601` the room for its stream, and `C` a `Compress` (about 15 bytes for each byte of a block: 14 MB at level 9):
+
+```
+memory_usage(n) = n × (P + C + 2 × O) + P + O + 1 MiB
+```
+
+## Readers
+
+Each reader that uses threads is bounded by a limit, as with one thread:
+
+| Reader | The limit | What it bounds |
+|---|---|---|
+| 7z, LZMA2 in blocks (`sevenz::Archive::set_threads`, `extract::Options::threads`) | `sevenz::Options::decoder_memory_limit`, 4 GiB by default | The folder's dictionaries, and the blocks given to threads and not yet read: their packed bytes, their output, and their decoders' dictionaries. Jobs wait while they would hold more; one that would hold more alone is decoded on the caller's thread. Beside it: the packed bytes of one job read ahead, at most 64 MiB and no more than the limit, and each thread's decoder's state, about 30 KiB. |
+| xz (`open::Opener::threads`) | `open::Limits::xz_memlimit`, 1 GiB by default | liblzma's `memlimit_threading`: its threads are lowered until they fit, one always allowed; and its `memlimit_stop`, past which one Block fails, as with one thread. |
+| bzip2 (`open::Opener::threads`) | `open::Limits::bzip2_memlimit`, none by default | The threads are lowered until `n × 20.5 MiB + 13 MiB` fits: for each piece in flight, two for each thread, at most 2.25 MiB read (counted twice, for the copy made when the rest goes to one thread) and 4 MiB of output; a decoder for each thread, 3.6 MB; what is read ahead, and the output being read. One thread, the caller's decoder of about 4 MiB, is always allowed. |
+| zstd, gzip, LZ4, lzip (`open`) | `open::Limits::zstd_window_log_max` for zstd | One thread each. |
+
+Extracting a ZIP archive in threads (`extract::Options::threads`) decodes an entry in each thread, each with what one thread takes for it; it is not counted here.
+
+## What is not counted
+
+- The caller's data and buffers: what is given to a coder, and the buffer it writes into.
+- The threads' stacks, which the system maps (2 MiB of address space for each of Rust's threads, of which a few KiB are touched).
+- The list of files of an archive being written, and its header, as above.
+- A zstd context's own tables, kept from frames without workers before, as libzstd keeps them; and dictionaries.
+
+## How it is shown
+
+`tests/memory_limits.rs` counts what is allocated, with an allocator that hands each call to the system's and keeps the most held at once (the one `unsafe` of the tests, outside the library). For each coder, data that compresses about as text does, enough for every thread to have work and some to wait, goes through it, and what it held at most must be no more than its estimate, and the estimate no more than twice it. Under a limit, the threads are lowered, what is written is the same as with one thread, and what is held is within the limit; a limit below one thread's estimate takes one. Data that does not compress, whose output grows, fits its room too. The default run takes the small presets and levels; `cargo test --release -p hivepack --test memory_limits -- --ignored --nocapture` takes the rest, up to 13 GB at once and 20 minutes on a machine of 32 threads, and prints what each held at most and its estimate, in MiB (November 2026):
+
+| Coder | Threads | Held | Estimated | Estimate / held |
+|---|---|---|---|---|
+| 7z, LZMA2 preset 1, blocks of 4 MiB | 1 | 20.5 | 21.7 | 1.06 |
+| | 4 | 69.7 | 71.5 | 1.03 |
+| | 16 | 266.4 | 270.6 | 1.02 |
+| 7z, LZMA2 preset 6, blocks of 32 MiB | 1 | 189.1 | 190.2 | 1.01 |
+| | 4 | 660.4 | 661.5 | 1.00 |
+| | 16 | 2,545.2 | 2,546.7 | 1.00 |
+| 7z, LZMA2 preset 9, blocks of 256 MiB | 1 | 1,441.2 | 1,442.2 | 1.00 |
+| | 4 | 4,996.5 | 4,997.6 | 1.00 |
+| 7z, LZMA2 preset 9, blocks of 64 MiB | 16 | 12,881.2 | 12,882.7 | 1.00 |
+| zstd level 3 | none | 3.5 | 4.5 | 1.29 |
+| | 1 | 42.1 | 69.4 | 1.65 |
+| | 4 | 126.8 | 157.0 | 1.24 |
+| | 16 | 433.3 | 571.9 | 1.32 |
+| zstd level 19 | none | 89.5 | 90.5 | 1.01 |
+| | 1 | 265.6 | 372.9 | 1.40 |
+| | 4 | 854.2 | 964.4 | 1.13 |
+| | 16 | 3,047.9 | 3,587.8 | 1.18 |
+| zstd level 3, long distance matching, window of 16 MiB | 4 | 69.9 | 122.3 | 1.75 |
+| bzip2 level 9 | 1 | 15.8 | 18.4 | 1.17 |
+| | 4 | 64.8 | 65.8 | 1.02 |
+| | 16 | 254.1 | 255.1 | 1.00 |
+| bzip2 read by `Opener` | 4 | 23.4 | 97.0 | 4.15 |
+| | 16 | 91.9 | 349.0 | 3.80 |
+
+7z and bzip2 hold what they are counted to hold, each buffer at its size: their estimates are a megabyte over, the slack for the writer's own. zstd's are further over with few workers, as its job table has room for more jobs waiting to be written out than a caller that writes out all it is given lets wait; and long distance matching counts room for its window that it only takes over a long input. bzip2's reader is counted for pieces of 2 MiB that decode to 4 MiB, the most its threads take, where `CompressMt`'s are a quarter of that: it is checked to hold no more, not to be near it.

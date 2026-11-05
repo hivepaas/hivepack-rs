@@ -75,6 +75,7 @@ use std::sync::{Arc, Mutex};
 
 // Compression from sequences the caller gives, or a sequence producer of
 // the caller's, and the sequences a frame would have.
+mod memory;
 mod sequences;
 pub use sequences::{
     SEQUENCE_PRODUCER_ERROR, Sequence, SequenceFormat, SequenceProducer, merge_block_delimiters,
@@ -2870,6 +2871,14 @@ pub struct CCtx {
     /// with the indices of the frame before, its tables as they are
     /// (libzstd's `ZSTDirp_continue`); see [`CCtx::compress_block_using_cdict`].
     continue_indices: bool,
+
+    // Not libzstd's: the memory the workers may take (`memory.rs`).
+    /// [`CCtx::set_workers_memory_limit`]: `u64::MAX` for none.
+    workers_memory_limit: u64,
+    /// Under a limit, the workers and the memory `mtctx` was last set up
+    /// for: a frame that would take other than that makes it again, so
+    /// that it holds no buffers or contexts sized for other frames.
+    mt_set_up_for: Option<(u32, u64)>,
 }
 
 impl CCtx {
@@ -2920,6 +2929,8 @@ impl CCtx {
             ext_seq_buf: Vec::new(),
             seq_collector: None,
             continue_indices: false,
+            workers_memory_limit: u64::MAX,
+            mt_set_up_for: None,
         }
     }
 
@@ -5178,45 +5189,32 @@ impl CCtx {
         Ok(())
     }
 
-    /// `ZSTD_CCtx_init_compressStream2`: starts a frame, with the parameters
-    /// set. With [`EndDirective::End`], `in_size` is its size.
-    fn init_compress_stream2(&mut self, end_op: EndDirective, in_size: usize) -> Result<()> {
-        // A sequence producer registered while the last frame was streamed.
-        self.commit_pending_seq_producer();
-        let mut params = self.requested_params;
-        // The dictionary loaded, made a CDict if not yet.
-        self.init_local_dict()?;
-        // A prefix serves one frame.
-        let prefix_dict = self.prefix_dict.take();
-        debug_assert!(prefix_dict.is_none() || self.cdict.is_none());
-        let cdict = self.cdict.clone();
-        if let Some(cdict) = &cdict
+    /// The parameters of a frame of `pledged_src_size` bytes, from those
+    /// set (`params`), with `cdict` or a dictionary of `dict_size` bytes:
+    /// the part of `ZSTD_CCtx_init_compressStream2` that sets them, which
+    /// [`CCtx::estimate_memory`] takes too.
+    fn resolve_frame_params(
+        &self,
+        mut params: CCtxParams,
+        cdict: Option<&CDict>,
+        dict_size: usize,
+        pledged_src_size: u64,
+    ) -> CCtxParams {
+        if let Some(cdict) = cdict
             && self.local_dict.is_none()
         {
             // A CDict referenced, not the dictionary loaded: its level over
             // the level set (0 for one made from parameters).
             params.compression_level = cdict.compression_level;
         }
-        if end_op == EndDirective::End {
-            // The size, known.
-            self.pledged_src_size_plus_one = in_size as u64 + 1;
-        }
-        let pledged_src_size = self.pledged_src_size_plus_one.wrapping_sub(1);
-        {
-            let dict_size = match (&prefix_dict, &cdict) {
-                (Some((prefix, _)), _) => prefix.len(),
-                (None, Some(cdict)) => cdict.dict_size(),
-                (None, None) => 0,
-            };
-            let mode = zstd_get_cparam_mode(cdict.as_deref(), &params, pledged_src_size);
-            params.c_params = zstd_get_cparams_from_cctx_params(
-                &params,
-                &self.requested_c_params,
-                pledged_src_size,
-                dict_size,
-                mode,
-            );
-        }
+        let mode = zstd_get_cparam_mode(cdict, &params, pledged_src_size);
+        params.c_params = zstd_get_cparams_from_cctx_params(
+            &params,
+            &self.requested_c_params,
+            pledged_src_size,
+            dict_size,
+            mode,
+        );
         // ZSTD_CCtx_init_compressStream2, in libzstd's order.
         params.post_block_splitter =
             zstd_resolve_block_splitter_mode(params.post_block_splitter, &params.c_params);
@@ -5230,6 +5228,32 @@ impl CCtx {
             params.search_for_external_repcodes,
             params.compression_level,
         );
+        params
+    }
+
+    /// `ZSTD_CCtx_init_compressStream2`: starts a frame, with the parameters
+    /// set. With [`EndDirective::End`], `in_size` is its size.
+    fn init_compress_stream2(&mut self, end_op: EndDirective, in_size: usize) -> Result<()> {
+        // A sequence producer registered while the last frame was streamed.
+        self.commit_pending_seq_producer();
+        let mut params = self.requested_params;
+        // The dictionary loaded, made a CDict if not yet.
+        self.init_local_dict()?;
+        // A prefix serves one frame.
+        let prefix_dict = self.prefix_dict.take();
+        debug_assert!(prefix_dict.is_none() || self.cdict.is_none());
+        let cdict = self.cdict.clone();
+        if end_op == EndDirective::End {
+            // The size, known.
+            self.pledged_src_size_plus_one = in_size as u64 + 1;
+        }
+        let pledged_src_size = self.pledged_src_size_plus_one.wrapping_sub(1);
+        let dict_size = match (&prefix_dict, &cdict) {
+            (Some((prefix, _)), _) => prefix.len(),
+            (None, Some(cdict)) => cdict.dict_size(),
+            (None, None) => 0,
+        };
+        params = self.resolve_frame_params(params, cdict.as_deref(), dict_size, pledged_src_size);
 
         // A sequence producer is not for worker threads: refused before the
         // size is looked at, whatever it is.
@@ -5242,6 +5266,9 @@ impl CCtx {
         if pledged_src_size <= ZSTDMT_JOBSIZE_MIN as u64 {
             params.nb_workers = 0;
         }
+        // Not libzstd's: the workers lowered to the memory limit, and a
+        // context set up for other frames made again (see `memory.rs`).
+        self.fit_workers_to_limit(&mut params)?;
         if params.nb_workers > 0 {
             // The workers' context, made by the first frame with them.
             let mtctx = match &mut self.mtctx {

@@ -658,6 +658,8 @@ impl<R: Read> Read for RpmLayer<R> {
 pub(crate) struct DecodeLimits {
     pub(crate) zstd_window_log_max: u32,
     pub(crate) xz_memlimit: u64,
+    /// What bzip2's threads may take.
+    pub(crate) bzip2_memlimit: u64,
     /// The threads xz's and bzip2's decoders may use, at least one.
     pub(crate) threads: u32,
 }
@@ -683,11 +685,14 @@ pub(crate) fn decoder<'a, R: Read + Send + 'a>(
             Box::new(Decoder::new(inner, GzipCodec { z }, layer))
         }
         // Streams one after the other, as pbzip2 writes them, a stream in
-        // each thread.
-        Layer::Bzip2 if limits.threads > 1 => Box::new(
-            crate::open::bzip2_threads::Bzip2Threads::new(inner, limits.threads),
-        ),
-        Layer::Bzip2 => Box::new(Decoder::new(inner, Bzip2Codec::new(), layer)),
+        // each thread, as many as fit the limit.
+        Layer::Bzip2 => {
+            use crate::open::bzip2_threads::{Bzip2Threads, threads_within};
+            match threads_within(limits.threads, limits.bzip2_memlimit) {
+                1 => Box::new(Decoder::new(inner, Bzip2Codec::new(), layer)),
+                threads => Box::new(Bzip2Threads::new(inner, threads)),
+            }
+        }
         Layer::Xz | Layer::Lzip | Layer::Lzma => {
             let flags = crate::xz::CONCATENATED;
             let s = match layer {
