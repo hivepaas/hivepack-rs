@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use crate::extract::error::{Error, ErrorKind};
-use crate::extract::name::{Name, NameError, NameRules, renamed};
+use crate::extract::name::{Checks, Name, NameError, NameRules, renamed};
 use crate::extract::origin::Origin;
 use crate::extract::progress::{Cancel, ProgressFn};
 
@@ -293,6 +293,9 @@ pub struct Options {
     /// how their Unicode is composed, for one, as found there; the system's
     /// default if it could not be.
     pub(crate) folds: Option<bool>,
+    /// Extracting into a [`Sink`](crate::extract::Sink), whose archive holds any
+    /// name: with this system's rules, only what leads outside is refused.
+    pub(crate) into_archive: bool,
 }
 
 /// Shows the options, not the password or the progress function.
@@ -318,6 +321,7 @@ impl std::fmt::Debug for Options {
             .field("origin", &self.origin)
             .field("select", &self.select.as_ref().map(|_| ".."))
             .field("folds", &self.folds)
+            .field("into_archive", &self.into_archive)
             .finish()
     }
 }
@@ -408,8 +412,18 @@ impl Options {
         let mut options = self.clone();
         if options.name_rules == NameRules::Native {
             options.folds = Some(false);
+            options.into_archive = true;
         }
         options
+    }
+
+    /// What names are checked for, as these options extract.
+    pub(crate) fn checks(&self) -> Checks {
+        if self.into_archive && self.name_rules == NameRules::Native {
+            Checks::Archive
+        } else {
+            Checks::Folder(self.name_rules)
+        }
     }
 }
 
@@ -454,7 +468,7 @@ pub(crate) fn named(text: &str, options: &Options) -> (String, Result<Name, Name
         options.backslash_separator,
         options.names == Names::Sanitize,
     );
-    let checked = crate::extract::name::check_name_for(prepared.as_bytes(), options.name_rules);
+    let checked = crate::extract::name::check(prepared.as_bytes(), options.checks());
     (prepared, checked)
 }
 
@@ -599,7 +613,7 @@ pub(crate) fn settle(items: &mut [Item], options: &Options) -> Result<Settled, E
     let Some(asked) = &options.on_unnamable else {
         return Ok(Settled::default());
     };
-    let rules = options.name_rules;
+    let rules = options.checks();
     let folds = folds(options);
     // Each, and why: a name refused, or one the system takes for another's.
     let mut unnamable: Vec<(usize, ErrorKind)> = Vec::new();

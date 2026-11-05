@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `extract`: into a `Sink`, by this system's rules (`NameRules::Native`), any name an archive can hold is taken, on every system, Windows too: Windows' characters, device names, ends of names and long components no longer stop converting an archive on Windows. Only what leads outside where the archive made is extracted, on any system, is refused (`a\..\x`, `\x`, `C:x`), and control characters. See [docs/extract.md](docs/extract.md#into-something-other-than-a-folder).
+
 ## 0.4.0
 
 - `extract`: names are checked by this system's rules by default (`Options::name_rules`, `NameRules::Native`): Windows' characters, device names and ends of names only on Windows, so that `a:b.txt` or `aux.txt` extract on Linux and macOS; and two names that differ only in case are one only where the destination's file system takes them for one, found by a file made there and taken away before anything is written (never in a `Sink`). `NameRules::Portable` keeps every system's rules, as before. What leads outside the destination is refused everywhere, as before, and a name that climbs through Windows' separator or a stream (`a\..\x`, `a.txt:..`) is now refused as `NameError::Dot`. See [docs/extract.md](docs/extract.md#refuse-do-not-repair).
