@@ -72,6 +72,8 @@ fuzz_target!(|input: &[u8]| {
         } else {
             Threads::One
         },
+        // Under a limit no thread fits, the one thread always allowed.
+        memory_limit: if layout & 128 != 0 { 1 } else { u64::MAX },
     };
 
     // Each piece: a byte for its kind and length, then that much data.
