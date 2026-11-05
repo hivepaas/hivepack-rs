@@ -42,7 +42,7 @@ fn decode_error(layer: Layer, message: String) -> io::Error {
 
 /// What a step of a codec did.
 #[derive(Default)]
-struct Step {
+pub(super) struct Step {
     consumed: usize,
     produced: usize,
     /// A stream (a frame, a member) ended.
@@ -53,7 +53,7 @@ struct Step {
 }
 
 /// A decompressor, a step at a time.
-trait Codec {
+pub(super) trait Codec {
     /// From `input` into `output`; `finish` once the input has no more.
     fn step(&mut self, input: &[u8], output: &mut [u8], finish: bool) -> Step;
 
@@ -71,7 +71,7 @@ trait Codec {
 
 /// What may follow the last stream.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum After {
+pub(super) enum After {
     Nothing,
     Zeros,
     /// Anything, read to its end and ignored, so that the layers around
@@ -85,7 +85,7 @@ const MAGIC_LEN: usize = 6;
 const BUFFER: usize = 64 * 1024;
 
 /// A codec over a reader.
-struct Decoder<R, C> {
+pub(super) struct Decoder<R, C> {
     inner: R,
     codec: C,
     layer: Layer,
@@ -101,7 +101,7 @@ struct Decoder<R, C> {
 }
 
 impl<R: Read, C: Codec> Decoder<R, C> {
-    fn new(inner: R, codec: C, layer: Layer) -> Decoder<R, C> {
+    pub(super) fn new(inner: R, codec: C, layer: Layer) -> Decoder<R, C> {
         Decoder {
             inner,
             codec,
@@ -114,6 +114,12 @@ impl<R: Read, C: Codec> Decoder<R, C> {
             done: false,
             failed: None,
         }
+    }
+
+    /// Where a stream has just ended: what follows is another, or what
+    /// may follow the last.
+    pub(super) fn after_a_stream(&mut self) {
+        self.ended = true;
     }
 
     fn error(&mut self, message: String) -> io::Error {
@@ -296,8 +302,16 @@ impl Codec for GzipCodec {
 }
 
 /// bzip2: streams one after the other, zeros after them.
-struct Bzip2Codec {
+pub(super) struct Bzip2Codec {
     d: crate::bzip2::Decompress,
+}
+
+impl Bzip2Codec {
+    pub(super) fn new() -> Bzip2Codec {
+        Bzip2Codec {
+            d: crate::bzip2::Decompress::new(false),
+        }
+    }
 }
 
 impl Codec for Bzip2Codec {
@@ -644,7 +658,7 @@ impl<R: Read> Read for RpmLayer<R> {
 pub(crate) struct DecodeLimits {
     pub(crate) zstd_window_log_max: u32,
     pub(crate) xz_memlimit: u64,
-    /// The threads xz's decoder may use, at least one.
+    /// The threads xz's and bzip2's decoders may use, at least one.
     pub(crate) threads: u32,
 }
 
@@ -668,13 +682,12 @@ pub(crate) fn decoder<'a, R: Read + Send + 'a>(
             let z = crate::deflate::Inflate::new(16 + 15).map_err(|e| invalid(e.to_string()))?;
             Box::new(Decoder::new(inner, GzipCodec { z }, layer))
         }
-        Layer::Bzip2 => Box::new(Decoder::new(
-            inner,
-            Bzip2Codec {
-                d: crate::bzip2::Decompress::new(false),
-            },
-            layer,
-        )),
+        // Streams one after the other, as pbzip2 writes them, a stream in
+        // each thread.
+        Layer::Bzip2 if limits.threads > 1 => Box::new(
+            crate::open::bzip2_threads::Bzip2Threads::new(inner, limits.threads),
+        ),
+        Layer::Bzip2 => Box::new(Decoder::new(inner, Bzip2Codec::new(), layer)),
         Layer::Xz | Layer::Lzip | Layer::Lzma => {
             let flags = crate::xz::CONCATENATED;
             let s = match layer {

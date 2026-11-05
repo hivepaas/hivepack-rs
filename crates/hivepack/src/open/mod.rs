@@ -39,6 +39,7 @@
 
 #![forbid(unsafe_code)]
 
+mod bzip2_threads;
 mod decode;
 mod detect;
 mod error;
