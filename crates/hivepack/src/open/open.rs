@@ -10,6 +10,7 @@ use crate::open::detect::{
     Container, Detected, HEAD_LEN, Layer, UDF_HEAD_LEN, detect, is_lzma_alone,
 };
 use crate::open::error::Error;
+use crate::threads::Threads;
 
 /// How far an [`Opener`] goes.
 #[derive(Clone, Copy, Debug)]
@@ -88,6 +89,7 @@ pub struct Opener<F> {
     name: Option<String>,
     identities: Vec<BoxedIdentity>,
     limits: Limits,
+    threads: Threads,
     /// The file key of each age layer decrypted, the outermost first.
     file_keys: Vec<FileKey>,
     /// What the first open found, which the next must find again.
@@ -100,6 +102,7 @@ impl<F> std::fmt::Debug for Opener<F> {
             .field("name", &self.name)
             .field("identities", &self.identities.len())
             .field("limits", &self.limits)
+            .field("threads", &self.threads)
             .field("found", &self.found)
             .finish_non_exhaustive()
     }
@@ -118,6 +121,7 @@ where
             name: None,
             identities: Vec::new(),
             limits: Limits::default(),
+            threads: Threads::One,
             file_keys: Vec::new(),
             found: None,
         }
@@ -145,6 +149,19 @@ where
         self
     }
 
+    /// How many threads its decoders may use: one, the caller's, by
+    /// default. An xz Stream whose Blocks have their sizes in their headers,
+    /// as `xz -T`, 7-Zip and [`Stream::stream_encoder_mt`] write them, is
+    /// decoded a Block in each, as far as [`Limits::xz_memlimit`] allows; the
+    /// other layers, and the Blocks without their sizes, on the caller's
+    /// thread. What is read is the same either way, errors too.
+    ///
+    /// [`Stream::stream_encoder_mt`]: crate::xz::Stream::stream_encoder_mt
+    pub fn threads(mut self, threads: Threads) -> Opener<F> {
+        self.threads = threads;
+        self
+    }
+
     /// The file opened again, through its layers.
     pub fn open<'a>(&mut self) -> Result<Opened<'a>, Error>
     where
@@ -153,6 +170,7 @@ where
         let decode_limits = DecodeLimits {
             zstd_window_log_max: self.limits.zstd_window_log_max,
             xz_memlimit: self.limits.xz_memlimit,
+            threads: self.threads.count(),
         };
         let mut reader: Box<dyn Read + Send + 'a> = Box::new((self.open)()?);
         let full_name = self.name.clone();

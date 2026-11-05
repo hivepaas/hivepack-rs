@@ -644,6 +644,8 @@ impl<R: Read> Read for RpmLayer<R> {
 pub(crate) struct DecodeLimits {
     pub(crate) zstd_window_log_max: u32,
     pub(crate) xz_memlimit: u64,
+    /// The threads xz's decoder may use, at least one.
+    pub(crate) threads: u32,
 }
 
 /// The decoder of `layer` over `inner`.
@@ -676,6 +678,16 @@ pub(crate) fn decoder<'a, R: Read + Send + 'a>(
         Layer::Xz | Layer::Lzip | Layer::Lzma => {
             let flags = crate::xz::CONCATENATED;
             let s = match layer {
+                // Its Blocks a thread each, under the same limit as one.
+                Layer::Xz if limits.threads > 1 => {
+                    crate::xz::Stream::stream_decoder_mt(&crate::xz::MtOptions {
+                        flags,
+                        threads: limits.threads,
+                        memlimit_threading: limits.xz_memlimit,
+                        memlimit_stop: limits.xz_memlimit,
+                        ..crate::xz::MtOptions::default()
+                    })
+                }
                 Layer::Xz => crate::xz::Stream::stream_decoder(limits.xz_memlimit, flags),
                 Layer::Lzip => crate::xz::Stream::lzip_decoder(limits.xz_memlimit, flags),
                 _ => crate::xz::Stream::alone_decoder(limits.xz_memlimit),

@@ -70,3 +70,6 @@ pub mod xz;
 pub mod zip;
 #[cfg(feature = "zstd")]
 pub mod zstd;
+
+mod threads;
+pub use threads::Threads;

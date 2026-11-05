@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `Threads`: how many threads of its own a coder may use, `One` by default; the same output whatever it is.
+- `open`: `Opener::threads` decodes an xz Stream whose Blocks have their sizes in their headers (`xz -T`, 7-Zip) a Block in each thread, under `Limits::xz_memlimit`. See [docs/open.md](docs/open.md#threads).
+
 - `extract`: into a `Sink`, by this system's rules (`NameRules::Native`), any name an archive can hold is taken, on every system, Windows too: Windows' characters, device names, ends of names and long components no longer stop converting an archive on Windows. Only what leads outside where the archive made is extracted, on any system, is refused (`a\..\x`, `\x`, `C:x`), and control characters. See [docs/extract.md](docs/extract.md#into-something-other-than-a-folder).
 
 ## 0.4.0
