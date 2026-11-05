@@ -107,6 +107,12 @@ impl Crc {
         }
     }
 
+    /// Whether the CRC is complete, which is what changes the stat. Not in
+    /// libzip.
+    pub(crate) fn complete(&self) -> bool {
+        self.crc_complete
+    }
+
     /// `ZIP_SOURCE_STAT`, on the lower source's stat: once the CRC is
     /// complete, it and the length read, which must be the length the
     /// lower source says (`ZIP_ER_DATA_LENGTH`).

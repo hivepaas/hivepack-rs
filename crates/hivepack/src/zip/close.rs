@@ -11,6 +11,7 @@ use std::cmp::Ordering;
 use std::io::{Seek, Write};
 
 use crate::zip::buffer::Buffer;
+use crate::zip::close_threads::Precompressed;
 use crate::zip::dirent::{Dirent, DosTime, cm_actual, u2d_time};
 use crate::zip::error::{Error, ErrorCode, Result};
 use crate::zip::extra_field::read_local_ef;
@@ -231,16 +232,27 @@ impl<R: ReadAt> Archive<R> {
         // allocation for each.
         let mut ahead = None;
         let mut buf = Vec::new();
-        for &i in &filelist {
-            if self.entry[i]
+        let cloned = |entry: &Entry| {
+            entry
                 .orig
                 .as_ref()
                 .is_some_and(|orig| orig.offset < unchanged_offset)
-            {
+        };
+        // Not in libzip: new data compressed in threads, ahead of the entry
+        // written, if the archive is given threads.
+        let written: Vec<usize> = filelist
+            .iter()
+            .copied()
+            .filter(|&i| !cloned(&self.entry[i]))
+            .collect();
+        let mut threads = self.compress_ahead(&written, stream);
+        for &i in &filelist {
+            if cloned(&self.entry[i]) {
                 // already implicitly copied by cloning
                 continue;
             }
-            self.write_entry(i, &mut out, &mut ahead, &mut buf)?;
+            let precompressed = threads.as_mut().and_then(|threads| threads.take(i));
+            self.write_entry(i, &mut out, &mut ahead, &mut buf, precompressed)?;
         }
 
         write_cdir(self, &filelist, &mut out)?;
@@ -249,13 +261,15 @@ impl<R: ReadAt> Archive<R> {
     }
 
     /// The loop body of `zip_close`: writes entry `i`, its local header and
-    /// its data, and keeps where in its dirent of changes.
+    /// its data, and keeps where in its dirent of changes. `precompressed`
+    /// is what a thread made of its new data, taken if it fits.
     pub(crate) fn write_entry<W: Write + Seek>(
         &mut self,
         i: usize,
         out: &mut Output<W>,
         ahead: &mut Option<ReadAhead>,
         buf: &mut Vec<u8>,
+        precompressed: Option<Box<Precompressed>>,
     ) -> Result<()> {
         let want_torrentzip = self.want_torrentzip();
         let entry = &self.entry[i];
@@ -310,6 +324,7 @@ impl<R: ReadAt> Archive<R> {
                 check_consistency,
                 self.default_password.as_deref(),
                 self.random.as_ref(),
+                precompressed,
             );
             if let Some(changes) = self.entry[i].changes.as_deref_mut() {
                 *changes = de;
@@ -380,6 +395,7 @@ impl<R: ReadAt> Archive<R> {
             self.open_flags.intersects(OpenFlags::CHECKCONS),
             self.default_password.as_deref(),
             self.random.as_ref(),
+            None,
         );
         if let Some(changes) = self.entry[i].changes.as_deref_mut() {
             *changes = de;
@@ -437,6 +453,12 @@ fn torrentzip_compare_names(a: &Option<Vec<u8>>, b: &Option<Vec<u8>>) -> Orderin
 /// if it has one, and fills in what the data tells: port of `add_data`.
 /// The header is written again once the sizes are known, if they changed
 /// it.
+///
+/// Differs from libzip: `precompressed`, what a thread made of new data
+/// (see `close_threads.rs`), stands for the data and the layers that compute
+/// the CRC and compress it, if it was made for the entry as it is
+/// compressed here.
+#[allow(clippy::too_many_arguments)]
 fn add_data<R: ReadAt + ?Sized, W: Write + Seek>(
     src: Base<'_, R>,
     de: &mut Dirent,
@@ -445,6 +467,7 @@ fn add_data<R: ReadAt + ?Sized, W: Write + Seek>(
     check_consistency: bool,
     default_password: Option<&[u8]>,
     random: Option<&RandomSource>,
+    precompressed: Option<Box<Precompressed>>,
 ) -> Result<()> {
     let mut st = src.stat()?;
 
@@ -542,6 +565,22 @@ fn add_data<R: ReadAt + ?Sized, W: Write + Seek>(
         de.changed &= !changed::LAST_MOD;
     }
 
+    let precompressed = precompressed.filter(|made| {
+        !needs_decrypt
+            && !needs_decompress
+            && needs_crc
+            && needs_compress
+            && matches!(&src, Base::Data { source, .. } if made.fits(
+                source,
+                de.comp_method,
+                de.compression_level,
+                if needs_encrypt { de.encryption_method } else { em::NONE },
+                out.stream,
+            ))
+    });
+    let needs_crc = needs_crc && precompressed.is_none();
+    let needs_compress = needs_compress && precompressed.is_none();
+
     let decrypt = match needs_decrypt {
         true => Some(Layer::new(Decrypt::new(
             st.encryption_method,
@@ -571,6 +610,7 @@ fn add_data<R: ReadAt + ?Sized, W: Write + Seek>(
         decompress,
         crc,
         compress,
+        precompressed: precompressed.map(|made| Layer::new(*made)),
         encrypt: None,
     };
 

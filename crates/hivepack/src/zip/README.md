@@ -2,7 +2,7 @@
 
 ZIP archives in safe Rust, the container logic ported from [libzip](https://libzip.org) 1.12.1.
 
-> **Status:** opens archives, reads their central directory and local headers, and reads stored, deflated, bzip2, LZMA, XZ, Zstandard, Deflate64 and PPMd entries, with libzip's rules and errors (PPMd, which libzip lacks, as 7-Zip reads it); edits entries' names, comments, times and attributes, deletes them, adds and replaces data, stored, deflated, bzip2, LZMA, XZ or Zstandard, and writes the archive as libzip writes it, byte for byte; encrypts and decrypts ZipCrypto and WinZip AES entries; reads split archives (`name.z01`, …, `name.zip`, and 7-Zip's `name.zip.001`, …) from their volumes, which libzip refuses. All compared with libzip itself, and PPMd and the split archives with 7-Zip. This crate is not on crates.io.
+> **Status:** opens archives, reads their central directory and local headers, and reads stored, deflated, bzip2, LZMA, XZ, Zstandard, Deflate64 and PPMd entries, with libzip's rules and errors (PPMd, which libzip lacks, as 7-Zip reads it); edits entries' names, comments, times and attributes, deletes them, adds and replaces data, stored, deflated, bzip2, LZMA, XZ or Zstandard, and writes the archive as libzip writes it, byte for byte; encrypts and decrypts ZipCrypto and WinZip AES entries; compresses new data in threads when asked (`Archive::set_threads`), which libzip cannot, the archive the same, byte for byte, as with one thread; reads split archives (`name.z01`, …, `name.zip`, and 7-Zip's `name.zip.001`, …) from their volumes, which libzip refuses. All compared with libzip itself, and PPMd and the split archives with 7-Zip. This crate is not on crates.io.
 
 ```rust
 use hivepack::zip::{Archive, Flags, OpenFlags};

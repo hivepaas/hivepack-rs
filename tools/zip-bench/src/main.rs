@@ -6,6 +6,7 @@
 //! python3 scripts/testdata.py fetch --group bench
 //! cargo run --release -p zip-bench -- [--only TEXT] [--rounds 5] [--seconds 0.5]
 //!     [--limit-mb 64] [--small 20000] [--many 200000] [--dir DIR] [DATA]
+//! cargo run --release -p zip-bench -- --threads [--limit-mb 400] [--rounds 1] [DATA]
 //! ```
 //!
 //! DATA is a folder of files to archive, by default the Silesia corpus. They
@@ -30,6 +31,9 @@
 //! table of the best speeds, which what else the machine does cannot make better,
 //! and the port's over libzip's: above 1 the port is faster. Both must get the same results: the same counts, and, except for
 //! encrypted archives, which use random bytes, the same bytes written.
+//!
+//! With `--threads`, it times the port alone, writing in one thread and in
+//! more, in place of the rest: see `threads.rs`.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -39,6 +43,8 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
 use hivepack::zip::{Archive, BufferSource, Flags, OpenFlags, cm, em};
+
+mod threads;
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -795,6 +801,7 @@ struct Options {
     many: usize,
     dir: Option<PathBuf>,
     data: PathBuf,
+    threads: bool,
 }
 
 fn parse_options() -> Result<Options> {
@@ -808,6 +815,7 @@ fn parse_options() -> Result<Options> {
         many: 200_000,
         dir: None,
         data: repository.join("target/testdata/silesia"),
+        threads: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -820,6 +828,7 @@ fn parse_options() -> Result<Options> {
             "--small" => options.small = value()?.parse().map_err(|_| "--small")?,
             "--many" => options.many = value()?.parse().map_err(|_| "--many")?,
             "--dir" => options.dir = Some(PathBuf::from(value()?)),
+            "--threads" => options.threads = true,
             _ if arg.starts_with("--") => return Err(format!("unknown option {arg}")),
             _ => options.data = PathBuf::from(arg),
         }
@@ -895,6 +904,13 @@ fn real_main() -> Result<()> {
             .join(format!("zip-bench-{}", std::process::id())),
     };
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    if options.threads {
+        threads::bench(&options.data, &dir, options.limit_mb << 20, options.rounds)?;
+        if options.dir.is_none() {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        return Ok(());
+    }
 
     let loaded = load_files(&options.data, options.limit_mb << 20)?;
     // The inputs as files of their own, cut as they are here, for libzip's

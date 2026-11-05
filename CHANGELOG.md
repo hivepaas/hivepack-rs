@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `zip`: `Archive::set_threads` compresses new data in threads, ahead of the entry being written, the entries still written in order on the caller's thread, encrypted there; the archive is the same, byte for byte, as with one thread, and so is an error and what was written before it. Up to 32 MiB per thread waits to be written; a larger entry is compressed as it is written. See [docs/zip.md](docs/zip.md#compressing-in-threads).
+
 ## 0.6.0
 
 - `extract`: `Options::threads` lets `extract_zip` write that many files at once, each read and decompressed in a thread of its own, `Threads::One` by default; what is written, and the `Summary`, are the same. `extract_zip` now asks the archive's source to be `Sync`, as every `ReadAt` here is; a `Sink` is still given one entry at a time. See [docs/extract.md](docs/extract.md#threads).

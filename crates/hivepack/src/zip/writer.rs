@@ -209,7 +209,7 @@ impl<W: Write + Seek> Writer<W> {
     /// Writes the entry `i`, whose data its source holds.
     fn write(&mut self, i: usize) -> Result<()> {
         self.archive
-            .write_entry(i, &mut self.out, &mut None, &mut Vec::new())?;
+            .write_entry(i, &mut self.out, &mut None, &mut Vec::new(), None)?;
         self.written.push(i);
         Ok(())
     }

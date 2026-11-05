@@ -73,3 +73,5 @@ pub mod zstd;
 
 mod threads;
 pub use threads::Threads;
+#[cfg(any(feature = "sevenz", feature = "zip"))]
+mod workers;
