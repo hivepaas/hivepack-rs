@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- `bzip2`: `CompressMt` compresses in threads, as pbzip2 does: the input in pieces of a fixed size (`piece_size`, 95% of a block), each a bzip2 stream of its own, the streams one after the other, which `bzip2 -d` reads as one. It is called as `Compress` is, and its output is the same whatever the threads, one too. See [docs/bzip2.md](docs/bzip2.md#threads-beside-the-port).
+- `open`: `Opener::threads` decodes bzip2 streams one after the other (pbzip2's, `CompressMt`'s) a stream in each thread. A file of one stream, as `bzip2` writes it, is read on the caller's thread as before; what is read is the same either way, errors too. See [docs/open.md](docs/open.md#threads).
+
 ## 0.5.0
 
 - `Threads`: how many threads of its own a coder may use, `One` by default; the same output whatever it is.

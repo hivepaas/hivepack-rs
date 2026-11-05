@@ -4,8 +4,16 @@
 //! compressed streams must be the same, byte for byte.
 //!
 //! ```text
-//! cargo run --release -p bzip2-bench -- [--levels 1,9] [--rounds 3] [--seconds 1] [--small | --compress] PATH...
+//! cargo run --release -p bzip2-bench -- [--levels 1,9] [--rounds 3] [--seconds 1] [--small | --compress | --threads N] PATH...
 //! ```
+//!
+//! With `--threads N`, the streams one after the other of
+//! `hivepack::bzip2::CompressMt` instead: compressed with one thread and
+//! with N (`0` for as many as the machine has), which must give the same
+//! file, then read through `hivepack::open::Opener` with one thread and
+//! with N; and libbzip2's one stream read with N too, which has nothing to
+//! share. Each is timed once a round, as packwing runs them: a megabyte
+//! of input and output at a time.
 //!
 //! Each run is one call, with all the input and room for all the output,
 //! on a new stream, as `BZ2_bzBuffToBuffCompress` and
@@ -27,6 +35,7 @@ enum Mode {
     Decompress,
     Small,
     Compress,
+    Threads(u32),
 }
 
 trait Codec {
@@ -151,6 +160,9 @@ fn options(args: impl Iterator<Item = String>) -> Result<Options> {
             }
             "--small" => options.mode = Mode::Small,
             "--compress" => options.mode = Mode::Compress,
+            "--threads" => {
+                options.mode = Mode::Threads(value()?.parse().map_err(|_| "bad --threads")?);
+            }
             "--rounds" => options.rounds = value()?.parse().map_err(|_| "bad --rounds")?,
             "--seconds" => {
                 let seconds: f64 = value()?.parse().map_err(|_| "bad --seconds")?;
@@ -159,7 +171,7 @@ fn options(args: impl Iterator<Item = String>) -> Result<Options> {
             }
             "-h" | "--help" => {
                 return Err(
-                    "usage: bzip2-bench [--levels 1,9] [--rounds N] [--seconds S] [--small | --compress] PATH..."
+                    "usage: bzip2-bench [--levels 1,9] [--rounds N] [--seconds S] [--small | --compress | --threads N] PATH..."
                         .into(),
                 );
             }
@@ -291,14 +303,132 @@ fn bench(options: &Options, codecs: &mut [Box<dyn Codec>], input: &Path) -> Resu
     Ok(())
 }
 
+/// `input` through `hivepack::bzip2::CompressMt`, a megabyte at a time.
+fn compress_mt(level: u32, threads: hivepack::Threads, input: &[u8]) -> Result<Vec<u8>> {
+    use hivepack::bzip2::{Action, CompressMt, InBuffer, OutBuffer, Status};
+    let mut stream =
+        CompressMt::new(level as i32, 0, threads).map_err(|e| format!("CompressMt: {e}"))?;
+    let mut file = Vec::new();
+    let mut room = vec![0; 1 << 20];
+    let mut chunks = input.chunks(1 << 20).peekable();
+    loop {
+        let chunk = chunks.next().unwrap_or(&[]);
+        let action = if chunks.peek().is_none() {
+            Action::Finish
+        } else {
+            Action::Run
+        };
+        let mut src = InBuffer::new(chunk);
+        loop {
+            let mut dst = OutBuffer::new(&mut room);
+            let status = stream
+                .compress(&mut dst, &mut src, action)
+                .map_err(|e| format!("CompressMt: {e}"))?;
+            let made = dst.pos;
+            file.extend_from_slice(&room[..made]);
+            match status {
+                Status::StreamEnd => return Ok(file),
+                Status::RunOk if src.pos == src.src.len() => break,
+                _ => {}
+            }
+        }
+    }
+}
+
+/// `file` read through `hivepack::open::Opener` with `threads`.
+fn open_with(threads: hivepack::Threads, file: &[u8], output: &mut Vec<u8>) -> Result<()> {
+    use std::io::Read;
+    let mut opener =
+        hivepack::open::Opener::new(|| Ok(std::io::Cursor::new(file))).threads(threads);
+    let mut opened = opener.open().map_err(|e| format!("open: {e}"))?;
+    output.clear();
+    opened
+        .read_to_end(output)
+        .map_err(|e| format!("open: {e}"))?;
+    Ok(())
+}
+
+/// Seconds `op` takes, once.
+fn once(op: impl FnOnce() -> Result<()>) -> Result<f64> {
+    let start = Instant::now();
+    op()?;
+    Ok(start.elapsed().as_secs_f64())
+}
+
+fn bench_threads(options: &Options, threads: u32, input: &Path) -> Result<()> {
+    let many = hivepack::Threads::of(threads);
+    let one = hivepack::Threads::One;
+    let data = std::fs::read(input).map_err(|e| format!("{}: {e}", input.display()))?;
+    let name = input.file_name().map_or_else(
+        || input.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    let megabytes = data.len() as f64 / 1e6;
+    for &level in &options.levels {
+        let mut single = Vec::new();
+        Libbzip2.compress(level, &data, &mut single)?;
+        let mut file = Vec::new();
+        let mut speeds: [Option<Range>; 5] = Default::default();
+        let mut scratch = Vec::new();
+        for _ in 0..options.rounds {
+            let mut timed = [0.0; 5];
+            timed[0] = once(|| {
+                file = compress_mt(level, one, &data)?;
+                Ok(())
+            })?;
+            timed[1] = once(|| {
+                if compress_mt(level, many, &data)? != file {
+                    return Err(format!("{name} level {level}: not the same with threads"));
+                }
+                Ok(())
+            })?;
+            for (i, (threads, file)) in [(one, &file), (many, &file), (many, &single)]
+                .into_iter()
+                .enumerate()
+            {
+                timed[2 + i] = once(|| open_with(threads, file, &mut scratch))?;
+                if scratch != data {
+                    return Err(format!("{name} level {level}: does not round trip"));
+                }
+            }
+            for (speed, seconds) in speeds.iter_mut().zip(timed) {
+                *speed = Range::add(speed.take(), megabytes / seconds);
+            }
+        }
+        let ratio = data.len() as f64 / file.len().max(1) as f64;
+        let single_ratio = data.len() as f64 / single.len().max(1) as f64;
+        let cells: Vec<String> = speeds
+            .iter()
+            .map(|r| r.as_ref().map_or_else(String::new, Range::to_string))
+            .collect();
+        println!(
+            "| {name} | {megabytes:.1} | {level} | {ratio:.3} ({single_ratio:.3}) | {} |",
+            cells.join(" | ")
+        );
+    }
+    Ok(())
+}
+
 fn run() -> Result<()> {
     let options = options(std::env::args().skip(1))?;
+    if let Mode::Threads(threads) = options.mode {
+        let many = hivepack::Threads::of(threads).count();
+        println!("Streams one after the other, MB/s, with 1 thread and {many}:\n");
+        println!(
+            "| input | MB | level | ratio (one stream's) | compress, 1 | compress, {many} | decompress, 1 | decompress, {many} | one stream, {many} |"
+        );
+        println!("|---|---|---|---|---|---|---|---|---|");
+        for input in inputs(&options.paths)? {
+            bench_threads(&options, threads, &input)?;
+        }
+        return Ok(());
+    }
     let mut codecs: Vec<Box<dyn Codec>> = vec![Box::new(Libbzip2), Box::new(Port)];
     let header: Vec<String> = codecs.iter().map(|c| c.name()).collect();
     let mode = match options.mode {
         Mode::Decompress => "Decompression",
         Mode::Small => "Decompression, small",
-        Mode::Compress => "Compression",
+        Mode::Compress | Mode::Threads(_) => "Compression",
     };
     println!("{mode}, MB/s:\n");
     println!(

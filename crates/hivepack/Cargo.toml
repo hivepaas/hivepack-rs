@@ -170,6 +170,11 @@ path = "tests/bzip2_oracle.rs"
 required-features = ["bzip2"]
 
 [[test]]
+name = "bzip2_threads"
+path = "tests/bzip2_threads.rs"
+required-features = ["bzip2", "open"]
+
+[[test]]
 name = "cpio_oracle"
 path = "tests/cpio_oracle.rs"
 required-features = ["bzip2", "cpio", "deflate"]

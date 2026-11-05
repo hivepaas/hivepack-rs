@@ -152,11 +152,14 @@ where
     /// How many threads its decoders may use: one, the caller's, by
     /// default. An xz Stream whose Blocks have their sizes in their headers,
     /// as `xz -T`, 7-Zip and [`Stream::stream_encoder_mt`] write them, is
-    /// decoded a Block in each, as far as [`Limits::xz_memlimit`] allows; the
-    /// other layers, and the Blocks without their sizes, on the caller's
-    /// thread. What is read is the same either way, errors too.
+    /// decoded a Block in each, as far as [`Limits::xz_memlimit`] allows;
+    /// bzip2 streams one after the other, as pbzip2 and [`CompressMt`] write
+    /// them, a stream in each; the other layers, the Blocks without their
+    /// sizes and a file of one bzip2 stream, on the caller's thread. What is
+    /// read is the same either way, errors too.
     ///
     /// [`Stream::stream_encoder_mt`]: crate::xz::Stream::stream_encoder_mt
+    /// [`CompressMt`]: crate::bzip2::CompressMt
     pub fn threads(mut self, threads: Threads) -> Opener<F> {
         self.threads = threads;
         self

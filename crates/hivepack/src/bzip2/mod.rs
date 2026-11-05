@@ -4,9 +4,11 @@
 //! Compression ([`Compress`]) gives libbzip2's output, byte for byte, at
 //! every block size and work factor, whatever pieces the input and output
 //! come in, and decompression ([`Decompress`]) libbzip2's results, in its
-//! fast and small modes, randomised blocks included. The rules the port
-//! follows, and how it is checked, are in the repository: `docs/bzip2.md`
-//! and `docs/safety.md`.
+//! fast and small modes, randomised blocks included. Beside the port,
+//! [`CompressMt`] compresses in threads, as pbzip2 does: a stream for each
+//! piece of the input, one after the other. The rules the port follows,
+//! and how it is checked, are in the repository: `docs/bzip2.md` and
+//! `docs/safety.md`.
 //!
 //! ```
 //! # fn main() -> Result<(), hivepack::bzip2::Error> {
@@ -51,6 +53,7 @@ mod compress;
 mod crctable;
 mod decompress;
 mod huffman;
+pub(crate) mod mt;
 mod private;
 mod randtable;
 
@@ -58,6 +61,7 @@ pub use bzlib::{
     Action, Compress, Decompress, Error, InBuffer, OutBuffer, Result, Status,
     buff_to_buff_compress, buff_to_buff_decompress, version,
 };
+pub use mt::{CompressMt, MtOptions, piece_size};
 
 /// The libbzip2 release this crate follows.
 pub const UPSTREAM_VERSION: &str = "1.0.8";

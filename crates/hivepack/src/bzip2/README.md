@@ -22,7 +22,7 @@ let written = output.pos;
 assert_eq!(&out[..written], b"hello");
 ```
 
-It also has libbzip2's one-call functions, `buff_to_buff_compress` and `buff_to_buff_decompress`.
+It also has libbzip2's one-call functions, `buff_to_buff_compress` and `buff_to_buff_decompress`; and, beside the port, `CompressMt`, which compresses in threads as pbzip2 does, a stream for each piece of the input, one after the other, called as `Compress` is. `hivepack::open` decodes such streams a stream in each thread.
 
 The goals:
 

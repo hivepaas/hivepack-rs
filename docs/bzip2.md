@@ -60,6 +60,30 @@ AMD Ryzen 9 9950X (x86-64, Linux), October 2026, the 12 Silesia files at block s
 
 Every stream was libbzip2's, byte for byte. Decompression was there as first ported. Compression was at 0.81–0.94× until `mainGtU` compared eight bytes at a time; the most repetitive files, `nci` and `xml`, gained most, as their rotations share the longest prefixes. arm64 is not measured yet.
 
+## Threads, beside the port
+
+libbzip2 has no threads, and neither has the port: `Compress` and `Decompress` are libbzip2's, and nothing here changes what they do. Beside them, in `crates/hivepack/src/bzip2/mt.rs`, is what pbzip2 does:
+
+- **`CompressMt`** cuts the input into pieces of a fixed size and makes each a whole bzip2 stream (`BZh`, its block, the end's magic and the stream's CRC) with `Compress`, in a thread of its own, and writes the streams one after the other. `bzip2 -d`, pbzip2, lbzip2, 7-Zip, Python's `bz2` and the other readers that read streams one after the other read them as one; each stream is `Compress`'s stream of its piece, byte for byte. It is called as `Compress` is, `CompressMt::new(block_size_100k, work_factor, threads)` then `compress(&mut OutBuffer, &mut InBuffer, Action)` with the same results and checks (`MtOptions` and `with_options` for the size of the pieces), so that one can take the other's place.
+- **The same output whatever the threads.** The pieces are cut where their size says, and where a flush or the end is asked for, never where the threads would cut them: the output depends on the input, the options and where the flushes are, and is the same with `Threads::One`, which compresses each piece in the call that fills it, as with many. With more than one thread, two pieces for each thread are in flight at most, and a call waits for the oldest when it can go no further without; each thread's compressor takes the 8 MB of `Compress` at block size 9.
+- **The pieces: 95% of a block** (`piece_size`, 855,000 bytes at block size 9). libbzip2 ends a block once its first run-length coding has made the block size less 19 bytes, and that coding makes a run of 4 to 255 bytes 5 bytes: more than it read for runs of exactly 4 (indents of four spaces), much less for longer runs (a tar archive's zeros). A piece of a whole block spills over into a second, small block whenever it grows, which it did in 63 of the 236 streams of Silesia (as a tar archive, block size 9); at 95% only where more than about one byte in five is in a run of exactly 4, which happened in none at 9 and in 2 of 2,234 at 1. The file is 0.1% larger than with pieces of a whole block, and 0.2% larger than `bzip2 -9`'s one stream (0.6% for a tar archive of source code, whose zeros let libbzip2's blocks hold more than 900,000 bytes); 90% would cost another 0.2–0.4%, 80% 0.7–0.9%.
+- **Reading them**: `Decompress` reads one stream, as `BZ2_bzDecompress` does. `hivepack::open` reads streams one after the other, as `bzip2 -d` does, and with `Opener::threads` decodes them a stream in each thread, finding where each starts by its first ten bytes and checking that each piece is exactly one stream, so that what is read is the same as with one thread, errors too ([open.md](open.md#threads)).
+
+`tests/bzip2_threads.rs` checks that `CompressMt`'s output is each piece's stream from `Compress`, one after the other, the same with 1, 2, 8 and all threads, with the input and the output in pieces of every size (a byte at a time too) and flushes; that each stream is one block, and where a piece spills over; an empty input (one empty stream, as `bzip2` writes); the checks of the calls (`Error::Param`, `Error::Sequence`); and that `bzip2 -d` reads the streams back, where it is installed. With the opener: the streams, `bzip2`'s one stream and several, one stream larger than a thread takes, empty streams and zeros after, read with 1, 2, 8 and all threads as with one, in reads of two sizes; and the same data and error with threads as with one for streams cut short at seven places, damaged at three, followed by other data, zeros, `BZh9` without a magic, a block's magic and the end's where no stream starts (after the last and between two), and a reader under them that fails. A unit test tells where streams start, and near misses; another makes a start every 1,000 bytes inside the streams, which must be joined until each piece is a stream.
+
+### Speed
+
+`--threads N` in `tools/bzip2-bench` compresses each file with `CompressMt` with one thread and with N, which must give the same file, and reads it through the opener with one thread and with N, a megabyte at a time as packwing does; and libbzip2's one stream with N, which has nothing to share. AMD Ryzen 9 9950X (16 cores, 32 threads), November 2026, MB/s of uncompressed data, best of three rounds, on a machine that other work was using too; `bzip2` 1.0.8, the system's, for reference:
+
+| Input | Block size | Ratio (`bzip2`'s) | Compression, 1 thread | 32 threads | `bzip2` | Decompression, 1 thread | 32 threads | `bzip2 -d` | `bzip2`'s one stream, 32 threads |
+|---|---|---|---|---|---|---|---|---|---|
+| tar of source code, 445 MB | 1 | 4.615 (4.685) | 31.6 | 656 | 30.0 | 94.2 | 1,893 | 83.0 | 95.2 |
+| | 9 | 5.257 (5.291) | 32.7 | 553 | 30.8 | 86.0 | 1,426 | 72.5 | 85.7 |
+| Silesia as a tar archive, 212 MB | 1 | 3.487 (3.504) | 27.8 | 538 | 26.1 | 78.6 | 1,596 | 69.5 | 78.5 |
+| | 9 | 3.875 (3.882) | 25.9 | 416 | 23.5 | 64.9 | 1,015 | 59.6 | 64.8 |
+
+So 16–21× for compression and 16–20× for decompression on 16 cores, where `bzip2`'s one stream reads at the speed of one thread, threads or not. The tar archive of source code at block size 9 decompresses with 2, 4, 8 and 16 threads at 154, 324, 637 and 1,218 MB/s, and compresses at 60, 128, 244 and 456 MB/s.
+
 ## Progress
 
 | libbzip2 | Port | Status | Checked against libbzip2 by |
@@ -75,7 +99,7 @@ Every stream was libbzip2's, byte for byte. Decompression was there as first por
 
 ## Not ported, for now
 
-- `bzlib.c`'s file functions: `BZ2_bzReadOpen`, `BZ2_bzRead`, `BZ2_bzWriteOpen` and the others, and the zlib-like `BZ2_bzopen`, `BZ2_bzread`, `BZ2_bzwrite` and `BZ2_bzclose`, built on `FILE*`. Reading concatenated streams, as `bzip2 -d` and `BZ2_bzRead` do, is a decompressor for each stream: `Decompress` stops at the end of one and leaves the rest of the input unread.
+- `bzlib.c`'s file functions: `BZ2_bzReadOpen`, `BZ2_bzRead`, `BZ2_bzWriteOpen` and the others, and the zlib-like `BZ2_bzopen`, `BZ2_bzread`, `BZ2_bzwrite` and `BZ2_bzclose`, built on `FILE*`. Reading concatenated streams, as `bzip2 -d` and `BZ2_bzRead` do, is a decompressor for each stream: `Decompress` stops at the end of one and leaves the rest of the input unread. `hivepack::open` reads them so.
 - The programs: `bzip2.c`, `bzip2recover.c`, and the tests' tools.
 - Verbosity, and the `BZ_DEBUG` checks (`AssertD`).
 
