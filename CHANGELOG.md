@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0
 
 - `zip`: `Archive::set_threads` compresses and encrypts new data in threads, ahead of the entry being written, the entries still written in order on the caller's thread, which draws the random bytes of salts and headers ahead in the order one thread draws them; the archive is the same, byte for byte, as with one thread, and so is an error and what was written before it. Up to 32 MiB per thread waits to be written; a larger entry is compressed and encrypted as it is written. See [docs/zip.md](docs/zip.md#compressing-in-threads).
 - Memory limits for the coders that use threads, so that threads never make an application run out of memory: each takes a limit under which it lowers its threads until what it would take fits, one thread always allowed, as liblzma does; and each tells beforehand what a configuration takes, an upper bound of what it allocates. What is made is the same whatever the threads, so the limit changes how fast, never what. No limit by default. See [docs/memory.md](docs/memory.md).

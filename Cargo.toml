@@ -11,7 +11,7 @@ repository = "https://github.com/hivepaas/hivepack-rs"
 homepage = "https://github.com/hivepaas/hivepack-rs"
 
 [workspace.dependencies]
-hivepack = { path = "crates/hivepack", version = "0.6.0", default-features = false }
+hivepack = { path = "crates/hivepack", version = "0.7.0", default-features = false }
 # The official libraries, used only as the reference in tests and
 # benchmarks. zstd 0.14.3 builds libzstd 1.5.7, the release hivepack::zstd
 # ports. The legacy formats (v0.1 to v0.7) are left out, as the port does not
