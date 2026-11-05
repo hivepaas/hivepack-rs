@@ -1,9 +1,8 @@
 //! Stopping an extraction, from another thread or past a time, and
 //! following how far it is.
 
-use std::cell::{Cell, RefCell};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
 use crate::extract::error::{Error, ErrorKind};
@@ -52,13 +51,25 @@ pub struct Progress {
 pub type ProgressFn = Arc<dyn Fn(&Progress) + Send + Sync>;
 
 /// Where an extraction is, and what stops it before it ends: the time
-/// limit and the token of [`Options`].
+/// limit and the token of [`Options`]. Shared by the threads that write files
+/// at once ([`Options::threads`]): each is told in turn.
 pub(crate) struct Run<'a> {
     options: &'a Options,
     deadline: Option<Instant>,
-    progress: Cell<Progress>,
+    /// Set when one of the threads writing at once failed: the others stop.
+    halted: AtomicBool,
+    progress: Mutex<Progress>,
+    /// Held while [`Options::on_damaged`] is asked, so that it is asked of
+    /// one entry at a time.
+    asking: Mutex<()>,
     /// The entries gone on from, their data damaged.
-    damaged: RefCell<Vec<Damaged>>,
+    damaged: Mutex<Vec<Damaged>>,
+}
+
+/// What `mutex` holds, even if a thread panicked holding it: the panic goes on
+/// to the caller anyway.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl Run<'_> {
@@ -69,18 +80,27 @@ impl Run<'_> {
             deadline: options
                 .time_limit
                 .and_then(|limit| Instant::now().checked_add(limit)),
-            progress: Cell::new(Progress::default()),
-            damaged: RefCell::new(Vec::new()),
+            halted: AtomicBool::new(false),
+            progress: Mutex::new(Progress::default()),
+            asking: Mutex::new(()),
+            damaged: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Stops the threads writing at once, one of them having failed: they stop
+    /// as if cancelled, and only the first error is kept.
+    pub(crate) fn halt(&self) {
+        self.halted.store(true, Ordering::Relaxed);
     }
 
     /// Whether the extraction is to stop: cancelled, or past its time.
     pub(crate) fn check(&self) -> Result<(), ErrorKind> {
-        if self
-            .options
-            .cancel
-            .as_ref()
-            .is_some_and(Cancel::is_cancelled)
+        if self.halted.load(Ordering::Relaxed)
+            || self
+                .options
+                .cancel
+                .as_ref()
+                .is_some_and(Cancel::is_cancelled)
         {
             return Err(ErrorKind::Cancelled);
         }
@@ -111,7 +131,15 @@ impl Run<'_> {
         else {
             return Err(error);
         };
-        match on_damaged(&error) {
+        // Not asked once another thread failed: the extraction stops anyway.
+        if self.halted.load(Ordering::Relaxed) {
+            return Err(error);
+        }
+        let answer = {
+            let _asking = lock(&self.asking);
+            on_damaged(&error)
+        };
+        match answer {
             OnDamaged::Stop => Err(error),
             how => Ok((how, error)),
         }
@@ -119,7 +147,7 @@ impl Run<'_> {
 
     /// `error`'s entry gone on from, with `kept` bytes of its data.
     pub(crate) fn damaged(&self, error: Error, kept: Option<u64>) {
-        self.damaged.borrow_mut().push(Damaged { error, kept });
+        lock(&self.damaged).push(Damaged { error, kept });
     }
 
     /// Whether a stream that ends before its archive does is gone on from, if
@@ -131,17 +159,17 @@ impl Run<'_> {
 
     /// The index of the entry last gone on from.
     pub(crate) fn last_damaged(&self) -> Option<u64> {
-        self.damaged.borrow().last().and_then(|d| d.error.index)
+        lock(&self.damaged).last().and_then(|d| d.error.index)
     }
 
     /// How many entries were gone on from so far.
     pub(crate) fn damaged_count(&self) -> usize {
-        self.damaged.borrow().len()
+        lock(&self.damaged).len()
     }
 
     /// The entries gone on from so far, taken.
     pub(crate) fn take_damaged(&self) -> Vec<Damaged> {
-        self.damaged.take()
+        std::mem::take(&mut *lock(&self.damaged))
     }
 
     /// The entries are checked: `entries` to write, which say they hold
@@ -170,11 +198,11 @@ impl Run<'_> {
         self.update(|progress| progress.entries += 1);
     }
 
-    /// Changes the progress and tells [`Options::progress`].
+    /// Changes the progress and tells [`Options::progress`], one change at a
+    /// time, so that what it is told never goes back.
     fn update(&self, change: impl FnOnce(&mut Progress)) {
-        let mut progress = self.progress.get();
+        let mut progress = lock(&self.progress);
         change(&mut progress);
-        self.progress.set(progress);
         if let Some(f) = &self.options.progress {
             f(&progress);
         }

@@ -61,7 +61,7 @@ These are hivepack's own, and each one has its own oracles.
 | Deflate64 and PPMd | Not among libzip's methods | Deflate64: read with `hivepack::deflate`'s `Inflate9`, which decodes as zlib's `contrib/infback9` (done). PPMd (method 98, PPMd var.I rev. 1): read with `ppmd8.rs`, the port of 7-Zip's `Ppmd8.c` and `Ppmd8Dec.c`, as 7-Zip's ZIP handler reads it (done) | 7-Zip, libarchive's test archives |
 | Writing to a stream | `add_data` seeks back to rewrite the local header, and forces Zip64 when the size is unknown | A streaming writer with data descriptors | Every oracle reads what it writes |
 | Reading a stream | Needs a seekable source | An opt-in streaming reader that checks what it read against the central directory at the end | libarchive's streaming reader |
-| Parallel work | One thread | Entries decompressed in parallel through `ReaderAt`; compressed in parallel and written in order | The single-threaded output, byte for byte |
+| Parallel work | One thread | Entries decompressed in parallel through `ReaderAt`: extracting, each file in a thread of its own, with `extract::Options::threads` (done, see [extract.md](extract.md#threads)). Compressed in parallel and written in order: later | The single-threaded output, byte for byte |
 | Extracting to disk | None: libzip is an archive library | `hivepack::extract`, shared with tar and RAR, safe by default (see [extract.md](extract.md)) | ZipDiff samples, David Fifield's zip bombs, the archives behind recent CVEs in other extractors |
 
 ## Strict by default

@@ -114,7 +114,8 @@ pub enum OnDamaged {
 }
 
 /// Told an entry's damage, and what to do with it: called on the extracting
-/// thread, which waits for its answer.
+/// thread, which waits for its answer. With [`Options::threads`], on the
+/// thread writing the entry, about one entry at a time.
 pub type OnDamagedFn = Arc<dyn Fn(&Error) -> OnDamaged + Send + Sync>;
 
 /// What to do with the entries whose names this system cannot take, asked once,
@@ -276,6 +277,7 @@ pub struct Options {
     pub cancel: Option<Cancel>,
     /// Told how far the extraction is: once the entries are checked, after
     /// each piece of data written (at most 64 KiB), and after each entry.
+    /// With [`Options::threads`], by the thread that wrote, one at a time.
     pub progress: Option<ProgressFn>,
     /// The archive's mark of origin ([`Origin::of`]), written on every file
     /// extracted, and on macOS every directory created; a mark not written
@@ -290,9 +292,13 @@ pub struct Options {
     /// be used is not picked. All of them by default. Data the picked ones
     /// depend on, in a solid block or stream, is still read.
     pub select: Option<Select>,
-    /// How many files are written at once, each read and decompressed in a
-    /// thread of its own, where the archive's entries are apart (ZIP): at most
-    /// this many. One by default. What is written is the same.
+    /// How many threads extraction may use, at most; one by default. Where the
+    /// archive's entries are apart (ZIP), that many files are written at once,
+    /// each read and decompressed in a thread of its own. In 7z, a folder whose
+    /// LZMA2 stream resets its dictionary on the way (7-Zip's in threads,
+    /// [`Lzma2Blocks`](crate::sevenz::Lzma2Blocks)) is decompressed a block in
+    /// each thread, its files still written one after another. What is written
+    /// is the same.
     pub threads: Threads,
     /// Whether the destination takes two names that differ only in case, or in
     /// how their Unicode is composed, for one, as found there; the system's
