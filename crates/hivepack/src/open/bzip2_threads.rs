@@ -19,6 +19,9 @@
 //! A file of one stream, as `bzip2` writes it, has nothing to share: once
 //! [`MAX_PIECE`] bytes are read without another start, it is all decoded
 //! on the caller's thread.
+//!
+//! What it holds is bounded by the constants below, [`memory_usage`] of
+//! them, and `Limits::bzip2_memlimit` lowers the threads to fit it.
 
 use std::collections::VecDeque;
 use std::io::{self, Cursor, Read};
@@ -44,6 +47,29 @@ const READ: usize = 256 << 10;
 
 /// `BZh`, the block size, and the magic after it.
 const START_LEN: usize = 10;
+
+/// The most bytes the decoder takes in `threads` threads, two pieces in
+/// flight for each: for each piece, what was read (twice, while the rest
+/// goes to one thread) and what it decodes to; for each thread, a decoder;
+/// and what is read and not in a piece, the output being read, and the
+/// decoder of one thread that may take what is left.
+pub(super) fn memory_usage(threads: u32) -> u64 {
+    let threads = u64::from(threads);
+    let decoder = crate::bzip2::decompress_memory();
+    let read = (MAX_PIECE + READ) as u64;
+    let piece = 2 * read + MAX_OUTPUT as u64;
+    threads * (2 * piece + decoder) + 2 * read + MAX_OUTPUT as u64 + decoder + (1 << 20)
+}
+
+/// The threads to decode in, at most `threads`, whose [`memory_usage`] fits
+/// `limit`: one, the decoder of one thread, if no more than one does.
+pub(super) fn threads_within(threads: u32, limit: u64) -> u32 {
+    let mut threads = threads.max(1);
+    while threads > 1 && memory_usage(threads) > limit {
+        threads -= 1;
+    }
+    threads
+}
 
 /// What a thread made of a piece.
 enum Outcome {
@@ -97,6 +123,8 @@ fn decode_piece(data: &[u8], last: bool) -> Outcome {
             Ok(_) if out.len() >= MAX_OUTPUT => return Outcome::Other,
             Ok(_) => {
                 let more = (out.len() * 2).min(MAX_OUTPUT);
+                // No more than that, as [`memory_usage`] counts it.
+                out.reserve_exact(more - out.len());
                 out.resize(more, 0);
             }
         }
@@ -212,8 +240,9 @@ impl<R: Read> Bzip2Threads<R> {
         loop {
             match (self.find)(&self.read, self.looked) {
                 Ok(at) => {
-                    let rest = self.read.split_off(at);
-                    let data = std::mem::replace(&mut self.read, rest);
+                    // Its own bytes, no more, and the room read in kept.
+                    let data = self.read[..at].to_vec();
+                    self.read.drain(..at);
                     self.looked = 1;
                     self.give(data, false);
                     return;
@@ -278,7 +307,10 @@ impl<R: Read> Bzip2Threads<R> {
 
     /// One thread reads the rest, from `from`, as it would have.
     fn serial(&mut self, from: &[u8]) -> Option<&mut Serial<R>> {
-        let mut rest = from.to_vec();
+        // As much as there is, no more, as [`memory_usage`] counts it.
+        let pieces: usize = self.pieces.iter().map(|piece| piece.data.len()).sum();
+        let mut rest = Vec::with_capacity(from.len() + pieces + self.read.len());
+        rest.extend_from_slice(from);
         for piece in self.pieces.drain(..) {
             rest.extend_from_slice(&piece.data);
         }
@@ -339,7 +371,8 @@ impl<R: Read> Read for Bzip2Threads<R> {
                         // Not where a stream starts after all: the two
                         // pieces are one.
                         Some(next) if piece.data.len() + next.data.len() <= MAX_PIECE => {
-                            let mut data = piece.data.to_vec();
+                            let mut data = Vec::with_capacity(piece.data.len() + next.data.len());
+                            data.extend_from_slice(&piece.data);
                             data.extend_from_slice(&next.data);
                             let joined = self.piece(data, next.last);
                             self.pieces.push_front(joined);

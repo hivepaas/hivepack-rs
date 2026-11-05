@@ -24,8 +24,14 @@ pub struct Limits {
     /// `--long` or `--memory`.
     pub zstd_window_log_max: u32,
     /// What xz, lzip and .lzma's decoders may use: 1 GiB by default. `xz
-    /// -9` needs 65 MiB.
+    /// -9` needs 65 MiB. With [`Opener::threads`], xz's threads are lowered
+    /// to fit it, as liblzma lowers them, one always allowed.
     pub xz_memlimit: u64,
+    /// What bzip2's decoder may use in threads ([`Opener::threads`]): they
+    /// are lowered until they fit, about 20.5 MiB each, and one, the
+    /// caller's, about 4 MiB, is always allowed. No limit (`u64::MAX`) by
+    /// default. See `docs/memory.md`.
+    pub bzip2_memlimit: u64,
 }
 
 impl Default for Limits {
@@ -34,6 +40,7 @@ impl Default for Limits {
             max_layers: 8,
             zstd_window_log_max: 27,
             xz_memlimit: 1 << 30,
+            bzip2_memlimit: u64::MAX,
         }
     }
 }
@@ -154,7 +161,8 @@ where
     /// as `xz -T`, 7-Zip and [`Stream::stream_encoder_mt`] write them, is
     /// decoded a Block in each, as far as [`Limits::xz_memlimit`] allows;
     /// bzip2 streams one after the other, as pbzip2 and [`CompressMt`] write
-    /// them, a stream in each; the other layers, the Blocks without their
+    /// them, a stream in each, as far as [`Limits::bzip2_memlimit`] allows;
+    /// the other layers, the Blocks without their
     /// sizes and a file of one bzip2 stream, on the caller's thread. What is
     /// read is the same either way, errors too.
     ///
@@ -173,6 +181,7 @@ where
         let decode_limits = DecodeLimits {
             zstd_window_log_max: self.limits.zstd_window_log_max,
             xz_memlimit: self.limits.xz_memlimit,
+            bzip2_memlimit: self.limits.bzip2_memlimit,
             threads: self.threads.count(),
         };
         let mut reader: Box<dyn Read + Send + 'a> = Box::new((self.open)()?);

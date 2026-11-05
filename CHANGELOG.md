@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Memory limits for the coders that use threads, so that threads never make an application run out of memory: each takes a limit under which it lowers its threads until what it would take fits, one thread always allowed, as liblzma does; and each tells beforehand what a configuration takes, an upper bound of what it allocates. What is made is the same whatever the threads, so the limit changes how fast, never what. No limit by default. See [docs/memory.md](docs/memory.md).
+- `sevenz`: `WriteOptions::memory_limit`, `WriteOptions::memory_usage(threads)` and `WriteOptions::threads_used()`, for LZMA2's blocks in threads: an encoder, a block and room for its output for each thread, 157 MiB at preset 6. The writer no longer keeps an encoder of one stream beside the threads' encoders, for nothing (94 MiB at preset 6, 674 MiB at preset 9), nor copies a block as it grows.
+- `zstd`: `CCtx::estimate_memory(nb_workers)`, with workers or without, and `CCtx::set_workers_memory_limit`, which lowers each frame's workers, never to none; `CCtx::nb_workers_within_limit()`. Not libzstd's, beside the port, whose frames are the same.
+- `bzip2`: `MtOptions::memory_limit`, `MtOptions::memory_usage(threads)` and `MtOptions::threads_used()`, for `CompressMt`.
+- `open`: `Limits::bzip2_memlimit` bounds bzip2's threads (`Opener::threads`), about 20.5 MiB each; xz's are bounded by `xz_memlimit`, as before, and 7z's blocks by `sevenz::Options::decoder_memory_limit`.
+- Breaking: `sevenz::WriteOptions` and `bzip2::MtOptions` have a field more (`memory_limit`), so one written out in full takes `..Default::default()`.
+
 ## 0.6.0
 
 - `extract`: `Options::threads` lets `extract_zip` write that many files at once, each read and decompressed in a thread of its own, `Threads::One` by default; what is written, and the `Summary`, are the same. `extract_zip` now asks the archive's source to be `Sync`, as every `ReadAt` here is; a `Sink` is still given one entry at a time. See [docs/extract.md](docs/extract.md#threads).

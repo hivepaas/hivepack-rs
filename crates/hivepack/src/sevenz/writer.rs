@@ -212,8 +212,18 @@ pub struct WriteOptions {
     /// How many threads compress LZMA2's blocks, each taking an encoder's
     /// memory (94 MiB for preset 6) and a block in and out; one, the caller's,
     /// by default. Other methods, and LZMA2 in one stream, use the caller's
-    /// thread alone. What is written is the same whatever this is.
+    /// thread alone. What is written is the same whatever this is. Fewer
+    /// are used where they would take more than
+    /// [`memory_limit`](WriteOptions::memory_limit).
     pub threads: Threads,
+    /// The most bytes compressing may take: the threads LZMA2's blocks are
+    /// compressed in are lowered until [`WriteOptions::memory_usage`] says
+    /// they fit ([`WriteOptions::threads_used`]). One thread is always
+    /// allowed, even where it takes more, as liblzma allows one: so the
+    /// limit never makes an archive fail, and what is written is the same
+    /// whatever it is. No limit (`u64::MAX`) by default. See
+    /// `docs/memory.md`.
+    pub memory_limit: u64,
 }
 
 impl Default for WriteOptions {
@@ -229,6 +239,7 @@ impl Default for WriteOptions {
             random_source: None,
             lzma2_blocks: Lzma2Blocks::None,
             threads: Threads::One,
+            memory_limit: u64::MAX,
         }
     }
 }
@@ -245,7 +256,119 @@ impl core::fmt::Debug for WriteOptions {
             .field("key_cycles", &self.key_cycles)
             .field("lzma2_blocks", &self.lzma2_blocks)
             .field("threads", &self.threads)
+            .field("memory_limit", &self.memory_limit)
             .finish_non_exhaustive()
+    }
+}
+
+/// What a writer takes besides its coders, at most: its buffer, AES, a
+/// filter before LZMA2's blocks, the threads' channels. Not the list of
+/// files, nor the header at the end, which grow with the files.
+const WRITER_MEMORY: u64 = 1 << 20;
+
+/// The smallest dictionary of the header's encoder: as large as the header,
+/// from this to 64 MiB.
+const HEADER_DICT_MIN: u32 = 1 << 16;
+
+/// What Deflate's compressor takes at most, with a window of 32 KiB and
+/// zlib's `memLevel` 8, as `make_compressor` makes it: 256 KiB of tables
+/// and buffers, and its state.
+const DEFLATE_MEMORY: u64 = 512 << 10;
+
+/// The most an LZMA2 stream of `size` bytes, without its end, can be: a
+/// chunk at most every 64 KiB of compressed data, each with a header of 6
+/// bytes at most, and a few bytes more.
+fn lzma2_bound(size: u64) -> u64 {
+    size + size.div_ceil(1 << 16) * 6 + 16
+}
+
+impl WriteOptions {
+    /// The options [`Writer::with_options`] refuses, with
+    /// [`Error::Param`].
+    fn check(&self) -> Result<()> {
+        let lzma = matches!(self.method, Method::Lzma { .. } | Method::Lzma2 { .. });
+        if (self.filter != Filter::None && !lzma)
+            || (self.encrypt_headers && self.password.is_none())
+            || self.key_cycles > MAX_KEY_CYCLES
+        {
+            return Err(Error::Param);
+        }
+        Ok(())
+    }
+
+    /// The most bytes a [`Writer`] with these options takes to compress,
+    /// with LZMA2's blocks in `threads` threads (0 is taken for 1): an
+    /// upper bound, of what it allocates, whatever the data. Methods other
+    /// than LZMA2 in blocks use one thread, whatever `threads` is. Options
+    /// [`Writer::with_options`] refuses are [`Error::Param`].
+    ///
+    /// LZMA2 in blocks takes, for each thread, an encoder
+    /// ([`raw_encoder_memusage`](crate::xz::raw_encoder_memusage), 94 MiB
+    /// for preset 6, 674 MiB for preset 9), a block and room for what it
+    /// compresses to; and room for one more block compressed, waiting to
+    /// be written. Preset 6 with [`Lzma2Blocks::Auto`], blocks of 32 MiB:
+    /// 157 MiB a thread, and 33 MiB more. The list of files is beside it,
+    /// and so is a header of more than 64 KiB (of a few thousand files),
+    /// whose encoder, made at the end once the coders are let go, takes
+    /// about 12 times its size. See `docs/memory.md`.
+    pub fn memory_usage(&self, threads: u32) -> Result<u64> {
+        self.check()?;
+        let encoder = |chain: &[XzFilter]| match crate::xz::raw_encoder_memusage(chain) {
+            u64::MAX => Err(Error::Param),
+            bytes => Ok(bytes),
+        };
+        let preset = |p| LzmaOptions::preset(p).ok_or(Error::Param);
+        let coder = match self.method {
+            Method::Copy => 0,
+            Method::Lzma { preset: p } => encoder(&xz_chain(self, XzFilter::lzma1(preset(p)?))?)?,
+            Method::Lzma2 { preset: p } => match lzma2_options(self, p)? {
+                (lzma, Some(size)) => {
+                    self.filter.coder()?;
+                    let threads = u64::from(threads.max(1));
+                    let block = size as u64;
+                    let out = lzma2_bound(block);
+                    let per_thread = encoder(&[XzFilter::lzma2(lzma)])? + block + out;
+                    threads.saturating_mul(per_thread).saturating_add(out)
+                }
+                (lzma, None) => encoder(&xz_chain(self, XzFilter::lzma2(lzma))?)?,
+            },
+            Method::Deflate { level } if (1..=9).contains(&level) => DEFLATE_MEMORY,
+            Method::BZip2 { level } if (1..=9).contains(&level) => {
+                crate::bzip2::compress_memory(level)
+            }
+            Method::Deflate { .. } | Method::BZip2 { .. } => return Err(Error::Param),
+        };
+        // The header's encoder comes once the coders are let go.
+        let header = if self.compress_headers || self.encrypt_headers {
+            let mut lzma = preset(6)?;
+            lzma.dict_size = HEADER_DICT_MIN;
+            encoder(&[XzFilter::lzma2(lzma)])?
+        } else {
+            0
+        };
+        Ok(coder
+            .max(header)
+            .saturating_add(OUT_BUF as u64 + WRITER_MEMORY))
+    }
+
+    /// The threads a [`Writer`] with these options compresses LZMA2's
+    /// blocks in: as many as [`threads`](WriteOptions::threads) says, fewer
+    /// while [`memory_usage`](WriteOptions::memory_usage) is over
+    /// [`memory_limit`](WriteOptions::memory_limit), and one at least. One
+    /// for the other methods, and for LZMA2 in one stream. Options
+    /// [`Writer::with_options`] refuses are [`Error::Param`].
+    pub fn threads_used(&self) -> Result<u32> {
+        let blocks =
+            matches!(self.method, Method::Lzma2 { .. }) && self.lzma2_blocks != Lzma2Blocks::None;
+        let mut threads = if blocks { self.threads.count() } else { 1 };
+        // Each thread takes the same: the most that fit, at least one.
+        let one = self.memory_usage(1)?;
+        if threads > 1 {
+            let per_thread = self.memory_usage(2)? - one;
+            let room = self.memory_limit.saturating_sub(one) / per_thread.max(1);
+            threads = threads.min(u32::try_from(room.saturating_add(1)).unwrap_or(u32::MAX));
+        }
+        Ok(threads.max(1))
     }
 }
 
@@ -435,7 +558,9 @@ fn compress_block(spare: &mut Option<Box<Stream>>, (lzma, data): BlockJob) -> Re
     }
     .map_err(|_| Error::Fail)?;
     let mut input = XzIn::new(&data);
-    let mut out = Vec::with_capacity(data.len() / 4 + OUT_BUF);
+    // Room for the most it can be, reserved once: never more, and no copy
+    // as it grows. What is not written to is not touched.
+    let mut out = Vec::with_capacity(lzma2_bound(data.len() as u64) as usize);
     loop {
         if out.len() == out.capacity() {
             out.reserve(out.len() / 4 + OUT_BUF);
@@ -495,6 +620,10 @@ impl Blocks {
         } = self;
         let mut add = |mut data: &[u8]| -> io::Result<()> {
             while !data.is_empty() {
+                if block.capacity() < *size {
+                    // The whole block, once, not to copy it as it grows.
+                    block.reserve_exact(*size - block.len());
+                }
                 let n = (*size - block.len()).min(data.len());
                 block.extend_from_slice(&data[..n]);
                 data = &data[n..];
@@ -681,21 +810,11 @@ impl<W: Write + Seek> Writer<W> {
     /// [`Error::Param`]: a filter with a method other than LZMA and LZMA2, headers
     /// encrypted without a password, more key cycles than 7-Zip takes.
     pub fn with_options(mut w: W, options: WriteOptions) -> Result<Writer<W>> {
-        let lzma = matches!(options.method, Method::Lzma { .. } | Method::Lzma2 { .. });
-        if (options.filter != Filter::None && !lzma)
-            || (options.encrypt_headers && options.password.is_none())
-            || options.key_cycles > MAX_KEY_CYCLES
-        {
-            return Err(Error::Param);
-        }
+        options.check()?;
         // Finds a bad preset, level, filter or block size before anything is
-        // written.
-        let compressor = make_compressor(&options, &mut None)?;
-        if let Method::Lzma2 { preset } = options.method {
-            lzma2_options(&options, preset)?;
-        }
-        let spare = match compressor {
-            Compressor::Xz(stream) => Some(stream),
+        // written. LZMA2 in blocks makes its encoders in its threads.
+        let spare = match check_method(&options)? {
+            Some(Compressor::Xz(stream)) => Some(stream),
             _ => None,
         };
 
@@ -771,10 +890,7 @@ impl<W: Write + Seek> Writer<W> {
         if options.filter != Filter::None && !lzma {
             return Err(Error::Param);
         }
-        make_compressor(&options, &mut None)?;
-        if let Method::Lzma2 { preset } = method {
-            lzma2_options(&options, preset)?;
-        }
+        check_method(&options)?;
         self.options.method = method;
         self.method_changed = true;
         Ok(())
@@ -845,12 +961,32 @@ impl<W: Write + Seek> Writer<W> {
     /// The compressor of a new folder: LZMA2 in blocks, with the threads of
     /// the folder before, or as [`make_compressor`] makes it.
     fn folder_compressor(&mut self) -> Result<Compressor> {
-        let Method::Lzma2 { preset } = self.options.method else {
+        let blocks = match self.options.method {
+            Method::Lzma2 { preset } => lzma2_options(&self.options, preset)?,
+            _ => (LzmaOptions::default(), None),
+        };
+        let (lzma, Some(size)) = blocks else {
+            if matches!(
+                self.options.method,
+                Method::Lzma { .. } | Method::Lzma2 { .. }
+            ) {
+                // The threads' encoders, no longer wanted, are let go
+                // before this one is made.
+                self.block_workers = None;
+            }
             return make_compressor(&self.options, &mut self.spare);
         };
-        let (lzma, Some(size)) = lzma2_options(&self.options, preset)? else {
-            return make_compressor(&self.options, &mut self.spare);
-        };
+        // An encoder of one stream is let go, and the threads of the folder
+        // before kept only if they are as many as this one may have.
+        self.spare = None;
+        let threads = self.options.threads_used()?;
+        if self
+            .block_workers
+            .as_ref()
+            .is_some_and(|workers| workers.most() != threads as usize)
+        {
+            self.block_workers = None;
+        }
         let filter = match self.options.filter.coder()? {
             Some((filter, ..)) => Some(Compressor::Xz(Box::new(
                 Stream::filter_encoder(&filter).map_err(|_| Error::Param)?,
@@ -859,11 +995,7 @@ impl<W: Write + Seek> Writer<W> {
         };
         let workers = match self.block_workers.take() {
             Some(workers) => workers,
-            None => Box::new(Workers::new(
-                self.options.threads.count(),
-                compress_block,
-                block_lost,
-            )),
+            None => Box::new(Workers::new(threads, compress_block, block_lost)),
         };
         Ok(Compressor::Blocks(Box::new(Blocks {
             filter,
@@ -1051,7 +1183,7 @@ impl<W: Write + Seek> Writer<W> {
             return Ok(raw);
         }
         let mut lzma = LzmaOptions::preset(6).ok_or_else(|| io::Error::other(Error::Fail))?;
-        lzma.dict_size = (raw.len() as u32).clamp(1 << 16, 1 << 26);
+        lzma.dict_size = (raw.len() as u32).clamp(HEADER_DICT_MIN, 1 << 26);
         let lzma2 = (vec![0x21], vec![lzma2_dict_prop(lzma.dict_size)]);
         let mut stream = Compressor::Xz(Box::new(
             Stream::raw_encoder(&[XzFilter::lzma2(lzma)])
@@ -1109,6 +1241,9 @@ impl<W: Write + Seek> Writer<W> {
 
     fn finish_inner(&mut self) -> io::Result<()> {
         self.close_folder()?;
+        // The encoders kept for a next folder, let go before the header's.
+        self.spare = None;
+        self.block_workers = None;
         let next_header = if self.entries.is_empty() {
             Vec::new()
         } else {
@@ -1172,6 +1307,20 @@ fn xz_chain(options: &WriteOptions, last: XzFilter) -> Result<Vec<XzFilter>> {
     }
     chain.push(last);
     Ok(chain)
+}
+
+/// Checks the method's options as [`make_compressor`] does, and gives the
+/// compressor it made: none for LZMA2 in blocks, whose encoders are made in
+/// its threads, as an encoder of one stream would take as much memory as
+/// one of them for nothing.
+fn check_method(options: &WriteOptions) -> Result<Option<Compressor>> {
+    if let Method::Lzma2 { preset } = options.method
+        && lzma2_options(options, preset)?.1.is_some()
+    {
+        options.memory_usage(1)?;
+        return Ok(None);
+    }
+    make_compressor(options, &mut None).map(Some)
 }
 
 /// The compressor of a new folder. `spare`: the encoder of the last one, whose

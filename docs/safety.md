@@ -14,6 +14,8 @@ The exceptions are all opt-in: the `unsafe-fast` feature of `hivepack::zstd`, `h
 4. Record it in [unsafe.md](unsafe.md): where it is, why, the numbers, and how it is checked.
 5. HivePaaS approves it before it merges. Only that module then moves from `forbid` to the crate's `deny`, with `#[allow(unsafe_code)]` on that one module. Where it can be, it is a feature that is off by default, and the crate forbids unsafe code without it.
 
+Outside the library, one test has `unsafe` code: `tests/memory_limits.rs` counts what the coders allocate with a global allocator of its own, which Rust only takes through an `unsafe impl GlobalAlloc`. It hands every call to the system's allocator as it is, and is never built into the library ([memory.md](memory.md#how-it-is-shown)).
+
 These are the places in libzstd where safe Rust is known to fall short. Each one is measured first, while the safe code is tried; two are exceptions so far, behind a feature.
 
 | In libzstd | Why safe Rust cannot do the same (Rust 1.99) | Safe approach first |

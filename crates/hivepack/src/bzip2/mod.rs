@@ -57,6 +57,9 @@ pub(crate) mod mt;
 mod private;
 mod randtable;
 
+pub(crate) use bzlib::compress_memory;
+#[cfg(feature = "open")]
+pub(crate) use bzlib::decompress_memory;
 pub use bzlib::{
     Action, Compress, Decompress, Error, InBuffer, OutBuffer, Result, Status,
     buff_to_buff_compress, buff_to_buff_decompress, version,

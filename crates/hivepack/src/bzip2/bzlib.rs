@@ -340,6 +340,27 @@ fn reserved<T>(n: usize) -> Option<Vec<T>> {
     Some(v)
 }
 
+/// The bytes a [`Compress`] of blocks of `block_size_100k` × 100,000 bytes
+/// takes: what [`EState::new`] reserves, and the state itself. Not
+/// libbzip2's: [`CompressMt`](crate::bzip2::CompressMt) counts its threads'
+/// memory with it.
+pub(crate) fn compress_memory(block_size_100k: i32) -> u64 {
+    let n = 100_000 * u64::from(block_size_100k.clamp(1, 9).unsigned_abs());
+    let overshoot = u64::from(BZ_N_OVERSHOOT.unsigned_abs());
+    // ptr and eclass, block, quadrant, mtfv, ftab and zbits, as below.
+    let vectors = 4 * n * 2 + (n + overshoot) + 2 * (n + overshoot) + 2 * n + 4 * 65537;
+    let zbits = n / 8 * 17 + 32768;
+    vectors + zbits + size_of::<EState>() as u64
+}
+
+/// The most bytes a [`Decompress`] that is not small takes: a `u32` for
+/// each byte of the largest block, and the state. Not libbzip2's: the
+/// threads of `hivepack::open` count their memory with it.
+#[cfg(feature = "open")]
+pub(crate) fn decompress_memory() -> u64 {
+    4 * 900_000 + size_of::<DState>() as u64
+}
+
 impl EState {
     /// The state `BZ2_bzCompressInit` sets up, with its parameters
     /// checked, or `None` without the memory.
