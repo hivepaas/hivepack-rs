@@ -3,6 +3,8 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, UNIX_EPOCH};
 
 use crate::zip::{Archive, Flags, ReadAt, opsys, stat};
@@ -274,10 +276,17 @@ fn links<'a, R: ReadAt>(
 /// and what was written before stays. [`Options::progress`] is told how
 /// far it is.
 ///
+/// With [`Options::threads`], files are written that many at once, each
+/// read and decompressed in a thread of its own, once the directories are
+/// made: the archive is read from each, so its source is `Sync`. What is
+/// written is the same, and so is the summary. The first error stops the
+/// other threads, which remove the files they were writing, and is the one
+/// returned; files after it in the archive may have been written.
+///
 /// Open the archive with
 /// [`OpenFlags::CHECKCONS`](crate::zip::OpenFlags::CHECKCONS), so that
 /// local headers that disagree with the central directory are refused.
-pub fn extract_zip<R: ReadAt>(
+pub fn extract_zip<R: ReadAt + Sync>(
     archive: &Archive<R>,
     destination: &Path,
     options: &Options,
@@ -288,11 +297,25 @@ pub fn extract_zip<R: ReadAt>(
             .map_err(|e| Error::global(ErrorKind::Origin(e)))?;
     }
     let options = &options.for_folder(destination);
-    extract_into(archive, || open_destination(destination, options), options)
+    let threads = options.threads.count();
+    extract_into(
+        archive,
+        || open_destination(destination, options),
+        options,
+        |destination, kept, run, summary| {
+            if threads > 1 {
+                write_at_once(archive, destination, kept, run, options, summary, threads)
+            } else {
+                write_entries(archive, destination, kept, run, options, summary)
+            }
+        },
+    )
 }
 
 /// Extracts `archive` into `sink`, with the checks and in the order of
 /// [`extract_zip`], whose limits count what is given to it: see [`Sink`].
+/// The sink is given one entry at a time, on the caller's thread, whatever
+/// [`Options::threads`] says.
 pub fn extract_zip_to<R: ReadAt>(
     archive: &Archive<R>,
     sink: &mut dyn Sink,
@@ -300,7 +323,12 @@ pub fn extract_zip_to<R: ReadAt>(
 ) -> Result<Summary, Error> {
     let state = SinkState::new(sink);
     let options = &options.for_sink();
-    extract_into(archive, || Ok(state.target(options)), options)
+    extract_into(
+        archive,
+        || Ok(state.target(options)),
+        options,
+        |target, kept, run, summary| write_entries(archive, target, kept, run, options, summary),
+    )
 }
 
 /// The folder at `destination`, created if it is not there, for an extraction to
@@ -313,11 +341,18 @@ pub(crate) fn open_destination<'a>(
         .map_err(|e| Error::global(ErrorKind::Io(e)))
 }
 
-/// [`extract_zip`] into the target `make` makes, once the archive is checked.
+/// Whether `item` is a link created after every other entry.
+fn created_later(item: &Item, options: &Options) -> bool {
+    item.kind == Kind::Link && options.links == Links::Inside
+}
+
+/// [`extract_zip`] into the target `make` makes, once the archive is checked,
+/// its directories and files written by `write`.
 fn extract_into<R: ReadAt, T: Target>(
     archive: &Archive<R>,
     make: impl FnOnce() -> Result<T, Error>,
     options: &Options,
+    write: impl FnOnce(&T, &[&Item], &Run<'_>, &mut Summary) -> Result<(), Error>,
 ) -> Result<Summary, Error> {
     let limits = &options.limits;
     let run = Run::new(options);
@@ -338,11 +373,11 @@ fn extract_into<R: ReadAt, T: Target>(
         _ => Vec::new(),
     };
     // Links to create are written after the rest; the others are files.
-    let created_later = |item: &Item| item.kind == Kind::Link && options.links == Links::Inside;
+    let later = |item: &Item| created_later(item, options);
     run.start(
-        kept.iter().filter(|item| !created_later(item)).count() as u64 + links.len() as u64,
+        kept.iter().filter(|item| !later(item)).count() as u64 + links.len() as u64,
         kept.iter()
-            .filter(|item| item.kind != Kind::Dir && !created_later(item))
+            .filter(|item| item.kind != Kind::Dir && !later(item))
             .map(|item| item.size)
             .fold(0, u64::saturating_add),
     );
@@ -353,32 +388,7 @@ fn extract_into<R: ReadAt, T: Target>(
         renamed: settled.renamed,
         ..Summary::default()
     };
-    for &item in &kept {
-        let Ok(name) = &item.name else {
-            continue;
-        };
-        let error = |kind| item.error(kind);
-        let components = &name.components;
-        if created_later(item) {
-            continue;
-        }
-        run.check().map_err(error)?;
-        if item.kind == Kind::Dir {
-            destination.directory(item, components).map_err(error)?;
-            summary.directories += 1;
-            run.entry_done();
-            continue;
-        }
-        let remaining = limits.max_total_size.saturating_sub(summary.bytes);
-        let written = write_with(item, Some(item.size), &destination, &run, options, |file| {
-            write_file(archive, item, file, remaining, &run, options)
-        })?;
-        if let Some(written) = written {
-            summary.files += 1;
-            summary.bytes += written;
-        }
-        run.entry_done();
-    }
+    write(&destination, &kept, &run, &mut summary)?;
 
     for link in &links {
         let error = |kind| link.item.error(kind);
@@ -395,7 +405,144 @@ fn extract_into<R: ReadAt, T: Target>(
 
     set_dir_times(&destination, &kept, &run)?;
     summary.damaged = run.take_damaged();
+    // In the archive's order, as one thread meets them, whatever the threads.
+    summary.damaged.sort_by_key(|damaged| damaged.error.index);
     Ok(summary)
+}
+
+/// Writes the directories and files of `kept` into `destination`, one at a
+/// time, in order; the links created later are left.
+fn write_entries<R: ReadAt, T: Target>(
+    archive: &Archive<R>,
+    destination: &T,
+    kept: &[&Item],
+    run: &Run<'_>,
+    options: &Options,
+    summary: &mut Summary,
+) -> Result<(), Error> {
+    let limits = &options.limits;
+    for &item in kept {
+        let Ok(name) = &item.name else {
+            continue;
+        };
+        let error = |kind| item.error(kind);
+        let components = &name.components;
+        if created_later(item, options) {
+            continue;
+        }
+        run.check().map_err(error)?;
+        if item.kind == Kind::Dir {
+            destination.directory(item, components).map_err(error)?;
+            summary.directories += 1;
+            run.entry_done();
+            continue;
+        }
+        let remaining = limits.max_total_size.saturating_sub(summary.bytes);
+        let written = write_with(item, Some(item.size), destination, run, options, |file| {
+            write_file(archive, item, file, Room::Left(remaining), run, options)
+        })?;
+        if let Some(written) = written {
+            summary.files += 1;
+            summary.bytes += written;
+        }
+        run.entry_done();
+    }
+    Ok(())
+}
+
+/// [`write_entries`] in `threads` threads at most: the directories first, on
+/// this thread, in order; then the files, each taken by the next thread that is
+/// free and written by it whole, straight from the archive into the file. As
+/// many files are open, and as many pieces of data held, as there are threads.
+///
+/// The threads share `run`, which tells [`Options::progress`] and asks
+/// [`Options::on_damaged`] one at a time, and what all files have written,
+/// held to the limit on it. The first to fail keeps its error and halts the
+/// others, which stop as if cancelled and remove the file they were writing.
+#[allow(clippy::too_many_arguments)]
+fn write_at_once<R: ReadAt + Sync, T: Target + Sync>(
+    archive: &Archive<R>,
+    destination: &T,
+    kept: &[&Item],
+    run: &Run<'_>,
+    options: &Options,
+    summary: &mut Summary,
+    threads: u32,
+) -> Result<(), Error> {
+    let mut files = Vec::new();
+    for &item in kept {
+        let Ok(name) = &item.name else {
+            continue;
+        };
+        if created_later(item, options) {
+            continue;
+        }
+        if item.kind != Kind::Dir {
+            files.push(item);
+            continue;
+        }
+        let error = |kind| item.error(kind);
+        run.check().map_err(error)?;
+        destination
+            .directory(item, &name.components)
+            .map_err(error)?;
+        summary.directories += 1;
+        run.entry_done();
+    }
+
+    let next = AtomicUsize::new(0);
+    let total = AtomicU64::new(0);
+    let failed: Mutex<Option<Error>> = Mutex::new(None);
+    // Files and bytes written by one thread.
+    let worker = || {
+        let mut tally = (0u64, 0u64);
+        while let Some(&item) = files.get(next.fetch_add(1, Ordering::Relaxed)) {
+            let written = run.check().map_err(|kind| item.error(kind)).and_then(|()| {
+                write_with(item, Some(item.size), destination, run, options, |file| {
+                    write_file(archive, item, file, Room::Shared(&total), run, options)
+                })
+            });
+            match written {
+                Ok(Some(written)) => {
+                    tally.0 += 1;
+                    tally.1 += written;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    // Kept before the others are halted: their errors come
+                    // after it.
+                    failed
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .get_or_insert(e);
+                    run.halt();
+                    break;
+                }
+            }
+            run.entry_done();
+        }
+        tally
+    };
+    let workers = usize::try_from(threads)
+        .unwrap_or(usize::MAX)
+        .min(files.len());
+    let tallies = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers).map(|_| scope.spawn(worker)).collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join())
+            .collect::<Vec<_>>()
+    });
+    for tally in tallies {
+        // A thread that panicked: its panic goes on to the caller.
+        let (files, bytes) = tally.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        summary.files += files;
+        summary.bytes += bytes;
+    }
+    match failed.into_inner().unwrap_or_else(PoisonError::into_inner) {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 /// The directories' times, the deepest first, once nothing more is
@@ -425,24 +572,42 @@ pub(crate) fn set_dir_times<T: Target>(
     Ok(())
 }
 
-/// Writes the data of `item` into `file`, at most `remaining` bytes in
-/// all: the bytes written.
+/// What a file may write of [`Limits::max_total_size`](crate::extract::Limits::max_total_size).
+#[derive(Clone, Copy)]
+enum Room<'a> {
+    /// These many bytes, for one file written at a time.
+    Left(u64),
+    /// What the files written at once have written in all, shared by their
+    /// threads. A file left out for its damage stays counted: the sizes the
+    /// archive says, checked first, bound what is written anyway.
+    Shared(&'a AtomicU64),
+}
+
+/// Writes the data of `item` into `file`, at most as many bytes as `room`
+/// leaves: the bytes written.
 fn write_file<R: ReadAt>(
     archive: &Archive<R>,
     item: &Item,
     file: &mut impl Write,
-    remaining: u64,
+    room: Room<'_>,
     run: &Run<'_>,
     options: &Options,
 ) -> Result<u64, ErrorKind> {
     let limits = &options.limits;
     let mut written: u64 = 0;
     read_entry(archive, item, run, options, |piece| {
-        written += piece.len() as u64;
+        let n = piece.len() as u64;
+        written += n;
         if written > limits.max_entry_size {
             return Err(ErrorKind::EntryTooLarge);
         }
-        if written > remaining {
+        let fits = match room {
+            Room::Left(remaining) => written <= remaining,
+            Room::Shared(total) => {
+                total.fetch_add(n, Ordering::Relaxed).saturating_add(n) <= limits.max_total_size
+            }
+        };
+        if !fits {
             return Err(ErrorKind::TotalTooLarge);
         }
         if written > item.size {

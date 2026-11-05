@@ -300,6 +300,11 @@ path = "tests/extract_xar.rs"
 required-features = ["deflate", "extract", "xz", "zip"]
 
 [[test]]
+name = "extract_zip_threads"
+path = "tests/extract_zip_threads.rs"
+required-features = ["extract", "xz", "zip"]
+
+[[test]]
 name = "iso_oracle"
 path = "tests/iso_oracle.rs"
 required-features = ["deflate", "iso", "xz"]

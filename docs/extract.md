@@ -92,7 +92,7 @@ Linux and the other systems have no mark (`Origin::of` gives `None`). macOS's at
 
 The limits bound what an archive writes, not how long it takes: a disk that is slow, or many small entries, take their time within them. `Options::time_limit` (none by default) stops an extraction once past it, from when it starts (`ErrorKind::TimeLimit`), and `Cancel`, a token whose clones share one flag, stops it from another thread (`ErrorKind::Cancelled`). Both are checked between entries and before each read of data, which gives at most 64 KiB; a read of compressed data that gives nothing, such as empty Deflate blocks, runs to the end of that entry's data, which the archive's size bounds. A file cut off is removed, as one whose data fails; what was written before stays.
 
-`Options::progress` is told the entries and bytes to write once the entries are checked, as the archive says them (the data is checked against them, so what is written does not pass them), then the entries and bytes written after each piece of data and each entry. It is called on the extracting thread, and should hand on what it is told, not wait. Calling `Cancel::cancel` from it stops the extraction.
+`Options::progress` is told the entries and bytes to write once the entries are checked, as the archive says them (the data is checked against them, so what is written does not pass them), then the entries and bytes written after each piece of data and each entry. It is called on the extracting thread (with [threads](#threads), on the one that wrote, one call at a time), and should hand on what it is told, not wait. Calling `Cancel::cancel` from it stops the extraction.
 
 The research behind this plan found neither in any Rust ZIP crate, so the design is this crate's own: a token and a function, rather than an asynchronous interface, as the writing blocks anyway.
 
@@ -120,10 +120,11 @@ Each rule that is not about writing outside the destination can be relaxed, by n
 | `time_limit` | none | how long the extraction may take (see [Time, cancelling and progress](#time-cancelling-and-progress)) |
 | `cancel` | none | a `Cancel` token that stops it |
 | `progress` | none | a function told how far it is |
+| `threads` | `Threads::One` | how many files are written at once, each in a thread of its own, where the archive's entries are apart (see [Threads](#threads)) |
 
 ## Damaged data
 
-By default an entry whose data is damaged stops the extraction, the entry removed, as any error does. `Options::on_damaged` is asked instead, on the extracting thread, for each such entry, and answers `OnDamaged::Stop`, `Skip` (left out, and on to the next) or `Keep` (what was read of it kept, as it came, and on to the next). The entries gone on from are in `Summary::damaged`, each with its error and the bytes kept.
+By default an entry whose data is damaged stops the extraction, the entry removed, as any error does. `Options::on_damaged` is asked instead, on the extracting thread (with [threads](#threads), on the one writing the entry, about one entry at a time), for each such entry, and answers `OnDamaged::Stop`, `Skip` (left out, and on to the next) or `Keep` (what was read of it kept, as it came, and on to the next). The entries gone on from are in `Summary::damaged`, each with its error and the bytes kept.
 
 Only damage is asked about (`ErrorKind::is_damage`): data that fails its check (a CRC-32, RAR's hash, WinZip AES's authentication code), cannot be decompressed, ends before the size the archive says, or cannot be read from the archive. Everything else stops whatever the answer: names, the same path twice, links, devices, the limits, overlapping data, an archive that changed between its readings, the destination, a cancel or the time limit, and a wrong or missing password, which is for the caller to ask for again. A kept file holds no more than its entry says, and counts against the limits as any file.
 
@@ -138,6 +139,15 @@ What can be gone on to depends on the format:
 | tar, cpio, ISO 9660 | the stream is read in order: one cut short, or that cannot be read on from a place, is extracted up to there. The first reading stops there too, rather than stopping the extraction, so the entry the stream ends in is asked about when the second reading gets to it; a stream that ends between entries is asked about once, with no entry's name |
 
 A `Sink` is told with `Sink::damaged`, before `finish_file` (kept) or `discard_file` (left out).
+
+## Threads
+
+An extraction writes one file at a time, on the caller's thread, by default. `Options::threads` (`hivepack::Threads`: `One`, `Auto` for as many as the machine runs at once, or `Exactly(n)`) lets it write that many at once, each read and decompressed in a thread of its own, where the archive's entries are apart:
+
+- **ZIP**: each entry's data is read on its own, by position, from where the central directory says. Once every entry is checked, and the directories are made on the caller's thread in the archive's order, each thread takes the next file and writes it whole, straight from the archive into the file: as many files are open, and as many pieces of data held, as there are threads, and nothing more is kept. Links are created after every file, and the directories get their times last, as with one thread. Every thread reads the archive at once, so `extract_zip` asks its source to be `Sync`, as a `File`, `Volumes` or a slice are. On a machine of 32 threads, 20,000 text files of 400 MB in all, deflated to 130 MB, extract onto ext4 in 1.16 s on one thread, 0.61 s on two, 0.34 s on four, 0.19 s on eight and 0.08 s on all.
+- **Into a `Sink`**, entries are given one at a time, in order, on the caller's thread, whatever this says.
+
+What is written is the same whatever the threads: the files, their bytes, modes and times, and the `Summary`, with `Summary::damaged` in the archive's order. The threads share what is counted and told: the limits count what they all write, `Options::progress` is told by the thread that wrote, one call at a time, so that what it is told never goes back, and `Options::on_damaged` is asked about one entry at a time. A cancel or the time limit stops every thread between pieces of data, and so does the first error, which is the one returned: the others remove the files they were writing, as a file cut off is removed. What is left after an error is what differs: with one thread, nothing after the entry that failed; with more, files after it in the archive may have been written.
 
 ## Into something other than a folder
 
