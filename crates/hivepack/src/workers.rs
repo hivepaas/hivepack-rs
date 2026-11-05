@@ -1,11 +1,14 @@
 //! Jobs done in threads, their results taken in the order the jobs were
-//! given: LZMA2's blocks, compressed by the writer and decompressed by a
-//! folder's decoder. Not from the LZMA SDK, which has no threads in its 7z
-//! decoder.
+//! given: 7z's LZMA2 blocks, compressed by the writer and decompressed by a
+//! folder's decoder, and ZIP entries compressed ahead of the one written.
+//! Not from the LZMA SDK, which has no threads in its 7z decoder, nor from
+//! libzip, which has none.
 //!
 //! Threads are made as jobs wait for them, up to the most allowed, so that
 //! what has one job only never makes one. With at most one, each job is done
 //! on the caller's thread when it is given.
+
+#![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -23,6 +26,8 @@ type Numbered<T> = (u64, T);
 /// Jobs, done in up to `most` threads, their results taken in order.
 pub(crate) struct Workers<S, J, O> {
     work: Work<S, J, O>,
+    /// What the threads are named.
+    name: &'static str,
     /// The result of a job whose thread panicked.
     lost: fn() -> O,
     most: usize,
@@ -47,12 +52,13 @@ where
     J: Send + 'static,
     O: Send + 'static,
 {
-    /// Jobs done by `work`, in up to `most` threads.
-    pub(crate) fn new(most: u32, work: Work<S, J, O>, lost: fn() -> O) -> Self {
+    /// Jobs done by `work`, in up to `most` threads named `name`.
+    pub(crate) fn new(most: u32, name: &'static str, work: Work<S, J, O>, lost: fn() -> O) -> Self {
         let (jobs, queue) = channel();
         let (done_tx, done) = channel();
         Workers {
             work,
+            name,
             lost,
             most: most.max(1) as usize,
             own: S::default(),
@@ -69,6 +75,7 @@ where
     }
 
     /// The most threads.
+    #[cfg_attr(not(feature = "sevenz"), allow(dead_code))]
     pub(crate) fn most(&self) -> usize {
         self.most
     }
@@ -123,7 +130,7 @@ where
         let stop = Arc::clone(&self.stop);
         let work = self.work;
         let made = std::thread::Builder::new()
-            .name("sevenz-lzma2".into())
+            .name(self.name.into())
             .spawn(move || serve::<S, J, O>(&queue, &done, &stop, work));
         if made.is_ok() {
             self.threads += 1;
@@ -219,7 +226,7 @@ mod tests {
     #[test]
     fn in_order_whatever_the_threads() {
         for most in [1, 2, 8] {
-            let mut workers = Workers::new(most, square, lost);
+            let mut workers = Workers::new(most, "test", square, lost);
             let mut got = Vec::new();
             for n in 0..40u64 {
                 workers.give(n);
@@ -240,7 +247,7 @@ mod tests {
 
     #[test]
     fn one_job_makes_no_thread() {
-        let mut workers = Workers::new(8, square, lost);
+        let mut workers = Workers::new(8, "test", square, lost);
         workers.do_here(3);
         assert_eq!(workers.take(), Some((9, 1)));
         assert_eq!(workers.take(), None);

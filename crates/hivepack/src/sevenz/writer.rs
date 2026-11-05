@@ -35,8 +35,8 @@ use crate::sevenz::aes7z::{AesEncoder, K_AES_ID, MAX_KEY_CYCLES};
 use crate::sevenz::arc_in::SIGNATURE;
 use crate::sevenz::crc;
 use crate::sevenz::error::{Error, Result};
-use crate::sevenz::workers::Workers;
 use crate::threads::Threads;
+use crate::workers::Workers;
 
 /// How much a compressor gives at a time.
 const OUT_BUF: usize = 1 << 16;
@@ -861,6 +861,7 @@ impl<W: Write + Seek> Writer<W> {
             Some(workers) => workers,
             None => Box::new(Workers::new(
                 self.options.threads.count(),
+                "sevenz-lzma2",
                 compress_block,
                 block_lost,
             )),

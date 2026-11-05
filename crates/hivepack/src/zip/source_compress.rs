@@ -435,6 +435,12 @@ impl Compress {
         })
     }
 
+    /// Whether the stream ended, and whether it was stored: what changes the
+    /// stat and the attributes. Not in libzip.
+    pub(crate) fn ended(&self) -> (bool, bool) {
+        (self.end_of_stream, self.is_stored)
+    }
+
     /// Whatever the data comes to, it is not stored instead.
     pub(crate) fn keep_compressing(&mut self) {
         self.can_store = false;

@@ -7,6 +7,7 @@
 
 use crate::deflate::crc32;
 
+use crate::threads::Threads;
 use crate::zip::buffer::Buffer;
 use crate::zip::dirent::{Dirent, check_consistency};
 use crate::zip::error::{
@@ -51,6 +52,9 @@ pub struct Archive<R> {
     pub(crate) default_password: Option<Password>,
     /// where encrypting takes its random bytes from, if not the system
     pub(crate) random: Option<RandomSource>,
+    /// how many threads compress new data when the archive is written: not
+    /// in libzip
+    pub(crate) threads: Threads,
 }
 
 /// What `_zip_read_eocd64` found.
@@ -176,6 +180,7 @@ impl<R: ReadAt> Archive<R> {
             names: Names::default(),
             default_password: None,
             random: None,
+            threads: Threads::One,
         };
         if flags.intersects(OpenFlags::RDONLY) {
             za.flags = za.flags | ArchiveFlags::RDONLY;
