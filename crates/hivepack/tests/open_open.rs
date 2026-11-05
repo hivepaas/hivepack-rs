@@ -11,6 +11,7 @@ mod support;
 
 use std::io::{self, Cursor, Read};
 
+use hivepack::Threads;
 use hivepack::open::{Container, DecodeError, Error, Layer, Limits, Opener};
 use support::{
     Scratch, bzip2, gzip, lz4, lz4_legacy, lzip, lzma, newc, pbzx, pbzx_chunk, pbzx_of, rpm,
@@ -1063,4 +1064,94 @@ fn a_damaged_stream_stops_before_anything_is_written() {
         other => panic!("{other:?}"),
     }
     assert!(!out.exists());
+}
+
+/// `data` in an xz Stream of Blocks of `block` bytes, their sizes in their
+/// headers, as `xz -T` writes them: by hivepack's threaded encoder, whose
+/// Streams are liblzma's, byte for byte (`tests/xz_oracle.rs`).
+fn xz_blocks(data: &[u8], block: u64) -> Vec<u8> {
+    use hivepack::xz::{Action, InBuffer, MtOptions, OutBuffer, Status, Stream};
+    let options = MtOptions {
+        threads: 2,
+        block_size: block,
+        preset: 1,
+        ..MtOptions::default()
+    };
+    let mut stream = Stream::stream_encoder_mt(&options).unwrap();
+    let mut input = InBuffer::new(data);
+    let mut file = Vec::new();
+    loop {
+        let mut room = vec![0; 1 << 16];
+        let mut output = OutBuffer::new(&mut room);
+        let status = stream
+            .code(&mut output, &mut input, Action::Finish)
+            .unwrap();
+        let made = output.pos;
+        file.extend(&room[..made]);
+        if status == Status::StreamEnd {
+            return file;
+        }
+    }
+}
+
+/// What `file` reads to with `threads` and `limits`, a piece at a time up
+/// to an error, and the error's message.
+fn read_with(file: &[u8], threads: Threads, limits: Limits) -> (Vec<u8>, Option<String>) {
+    let mut opener = Opener::new(|| Ok(Cursor::new(file)))
+        .limits(limits)
+        .threads(threads);
+    let mut opened = match opener.open() {
+        Ok(opened) => opened,
+        Err(e) => return (Vec::new(), Some(e.to_string())),
+    };
+    let mut data = Vec::new();
+    let mut piece = vec![0; 3000];
+    loop {
+        match opened.read(&mut piece) {
+            Ok(0) => return (data, None),
+            Ok(n) => data.extend(&piece[..n]),
+            Err(e) => return (data, Some(e.to_string())),
+        }
+    }
+}
+
+#[test]
+fn xz_blocks_decode_in_threads_as_in_one() {
+    let tar = sample_tar();
+    let blocks = xz_blocks(&tar, 8 << 10);
+    let (a, b) = tar.split_at(30_000);
+    let mut streams = xz_blocks(a, 4 << 10);
+    streams.extend([0; 4]);
+    streams.extend(xz_blocks(b, 4 << 10));
+    let mut cut = blocks.clone();
+    cut.truncate(blocks.len() * 2 / 3);
+    // A byte of the data of a Block in the middle: its check fails.
+    let mut damaged = blocks.clone();
+    let at = damaged.len() / 2;
+    damaged[at] ^= 0x40;
+    let mut tight = Limits::default();
+    tight.xz_memlimit = 1 << 20;
+    let cases: [(&str, &[u8], Limits); 6] = [
+        ("Blocks with their sizes", &blocks, Limits::default()),
+        ("one Block, liblzma's", &xz(&tar), Limits::default()),
+        ("two Streams, padding between", &streams, Limits::default()),
+        ("cut short", &cut, Limits::default()),
+        ("damaged", &damaged, Limits::default()),
+        ("past the memory limit", &xz_preset(&tar, 9), tight),
+    ];
+    for (what, file, limits) in cases {
+        let alone = read_with(file, Threads::One, limits);
+        for threads in [Threads::of(2), Threads::of(8), Threads::Auto] {
+            assert!(
+                read_with(file, threads, limits) == alone,
+                "{what}, {threads:?}: not as with one thread"
+            );
+        }
+        match what {
+            "Blocks with their sizes" | "one Block, liblzma's" | "two Streams, padding between" => {
+                assert!(alone == (tar.clone(), None), "{what}")
+            }
+            _ => assert!(alone.1.is_some(), "{what} read through"),
+        }
+    }
 }
