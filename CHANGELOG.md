@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `extract`: `Options::threads` lets `extract_zip` write that many files at once, each read and decompressed in a thread of its own, `Threads::One` by default; what is written, and the `Summary`, are the same. `extract_zip` now asks the archive's source to be `Sync`, as every `ReadAt` here is; a `Sink` is still given one entry at a time. See [docs/extract.md](docs/extract.md#threads).
+
 ## 0.5.0
 
 - `Threads`: how many threads of its own a coder may use, `One` by default; the same output whatever it is.

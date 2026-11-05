@@ -32,6 +32,9 @@
 //! - **Time**: an extraction can be given a time limit
 //!   ([`Options::time_limit`]), stopped from another thread ([`Cancel`]),
 //!   and followed ([`Options::progress`]).
+//! - **Threads**: a ZIP archive's files can be written several at once, each
+//!   in a thread of its own ([`Options::threads`]); what is written is the
+//!   same.
 //! - **Marks of origin**: the archive's Mark of the Web on Windows, or its
 //!   quarantine on macOS ([`Origin`]), is carried to every file written.
 //!
