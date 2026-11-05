@@ -11,6 +11,7 @@ use std::cmp::Ordering;
 use std::io::{Seek, Write};
 
 use crate::zip::buffer::Buffer;
+use crate::zip::close_threads::{Encrypting, Taken};
 use crate::zip::dirent::{Dirent, DosTime, cm_actual, u2d_time};
 use crate::zip::error::{Error, ErrorCode, Result};
 use crate::zip::extra_field::read_local_ef;
@@ -26,7 +27,7 @@ use crate::zip::source_crc::Crc;
 use crate::zip::source_data::time_now;
 use crate::zip::source_stack::{Base, Layer, WriteStack};
 use crate::zip::source_write::{Forward, Output};
-use crate::zip::zip::{ArchiveFlags, Flags, OpenFlags, cm, em, stat};
+use crate::zip::zip::{ArchiveFlags, Flags, OpenFlags, Stat, cm, em, stat};
 use crate::zip::zipint::{
     BUFSIZE, DATADES_MAGIC, Entry, FL_DATA_FOLLOWS, FL_FORCE_ZIP64, GPBF_DATA_DESCRIPTOR,
     MAX_DATA_DESCRIPTOR_LENGTH, changed,
@@ -231,16 +232,29 @@ impl<R: ReadAt> Archive<R> {
         // allocation for each.
         let mut ahead = None;
         let mut buf = Vec::new();
-        for &i in &filelist {
-            if self.entry[i]
+        let cloned = |entry: &Entry| {
+            entry
                 .orig
                 .as_ref()
                 .is_some_and(|orig| orig.offset < unchanged_offset)
-            {
+        };
+        // Not in libzip: new data compressed in threads, ahead of the entry
+        // written, if the archive is given threads.
+        let written: Vec<usize> = filelist
+            .iter()
+            .copied()
+            .filter(|&i| !cloned(&self.entry[i]))
+            .collect();
+        let mut threads = self.compress_ahead(&written, stream);
+        for &i in &filelist {
+            if cloned(&self.entry[i]) {
                 // already implicitly copied by cloning
                 continue;
             }
-            self.write_entry(i, &mut out, &mut ahead, &mut buf)?;
+            let taken = threads
+                .as_mut()
+                .map_or_else(Taken::default, |threads| threads.take(i));
+            self.write_entry(i, &mut out, &mut ahead, &mut buf, taken)?;
         }
 
         write_cdir(self, &filelist, &mut out)?;
@@ -248,21 +262,30 @@ impl<R: ReadAt> Archive<R> {
         Ok(Closed::Written)
     }
 
+    /// Whether entry `i` is written from its data, through `add_data`, not
+    /// copied as it is.
+    pub(crate) fn new_data(&self, i: usize) -> bool {
+        let entry = &self.entry[i];
+        entry.data_changed()
+            || entry.changed(changed::COMP_METHOD)
+            || entry.changed(changed::ENCRYPTION_METHOD)
+            || (self.want_torrentzip() && !self.is_torrentzip())
+    }
+
     /// The loop body of `zip_close`: writes entry `i`, its local header and
-    /// its data, and keeps where in its dirent of changes.
+    /// its data, and keeps where in its dirent of changes. `taken` is what
+    /// threads made of its new data, taken if it fits, and the random bytes
+    /// drawn for it ahead.
     pub(crate) fn write_entry<W: Write + Seek>(
         &mut self,
         i: usize,
         out: &mut Output<W>,
         ahead: &mut Option<ReadAhead>,
         buf: &mut Vec<u8>,
+        taken: Taken,
     ) -> Result<()> {
         let want_torrentzip = self.want_torrentzip();
-        let entry = &self.entry[i];
-        let new_data = entry.data_changed()
-            || entry.changed(changed::COMP_METHOD)
-            || entry.changed(changed::ENCRYPTION_METHOD)
-            || (want_torrentzip && !self.is_torrentzip());
+        let new_data = self.new_data(i);
 
         // create new local directory entry
         let entry = &mut self.entry[i];
@@ -310,6 +333,7 @@ impl<R: ReadAt> Archive<R> {
                 check_consistency,
                 self.default_password.as_deref(),
                 self.random.as_ref(),
+                taken,
             );
             if let Some(changes) = self.entry[i].changes.as_deref_mut() {
                 *changes = de;
@@ -380,6 +404,7 @@ impl<R: ReadAt> Archive<R> {
             self.open_flags.intersects(OpenFlags::CHECKCONS),
             self.default_password.as_deref(),
             self.random.as_ref(),
+            Taken::default(),
         );
         if let Some(changes) = self.entry[i].changes.as_deref_mut() {
             *changes = de;
@@ -437,6 +462,13 @@ fn torrentzip_compare_names(a: &Option<Vec<u8>>, b: &Option<Vec<u8>>) -> Orderin
 /// if it has one, and fills in what the data tells: port of `add_data`.
 /// The header is written again once the sizes are known, if they changed
 /// it.
+///
+/// Differs from libzip: `taken.made`, what a thread made of new data (see
+/// `close_threads.rs`), stands for the data and the layers that compute the
+/// CRC and compress it, and encrypt it if it was encrypted there, if it was
+/// made for the entry as it is written here; `taken.drawn`, the random bytes
+/// drawn for it ahead, are what encrypting it takes in place of `random`'s.
+#[allow(clippy::too_many_arguments)]
 fn add_data<R: ReadAt + ?Sized, W: Write + Seek>(
     src: Base<'_, R>,
     de: &mut Dirent,
@@ -445,30 +477,13 @@ fn add_data<R: ReadAt + ?Sized, W: Write + Seek>(
     check_consistency: bool,
     default_password: Option<&[u8]>,
     random: Option<&RandomSource>,
+    taken: Taken,
 ) -> Result<()> {
     let mut st = src.stat()?;
 
     de.bitflags &= !GPBF_DATA_DESCRIPTOR;
 
-    if st.valid & stat::COMP_METHOD == 0 {
-        st.valid |= stat::COMP_METHOD;
-        st.comp_method = cm::STORE;
-    }
-
-    if de.changed & changed::COMP_METHOD == 0 && st.comp_method != cm::STORE {
-        de.comp_method = i32::from(st.comp_method);
-    } else if de.comp_method == i32::from(cm::STORE) && st.valid & stat::SIZE != 0 {
-        st.valid |= stat::COMP_SIZE;
-        st.comp_size = st.size;
-    } else {
-        // we'll recompress
-        st.valid &= !stat::COMP_SIZE;
-    }
-
-    if st.valid & stat::ENCRYPTION_METHOD == 0 {
-        st.valid |= stat::ENCRYPTION_METHOD;
-        st.encryption_method = em::NONE;
-    }
+    settle_methods(&mut st, de);
 
     let mut flags = Flags::LOCAL;
 
@@ -519,17 +534,13 @@ fn add_data<R: ReadAt + ?Sized, W: Write + Seek>(
 
     let offstart = out.tell_write()?;
 
-    let needs_recompress = want_torrentzip || st.comp_method != cm_actual(de.comp_method);
-    let needs_decompress = needs_recompress && st.comp_method != cm::STORE;
-    // in these cases we can compute the CRC ourselves, so we do
-    let needs_crc = st.comp_method == cm::STORE || needs_decompress;
-    let needs_compress = needs_recompress && de.comp_method != i32::from(cm::STORE);
-
-    let needs_reencrypt = needs_recompress
-        || de.changed & changed::PASSWORD != 0
-        || de.encryption_method != st.encryption_method;
-    let needs_decrypt = needs_reencrypt && st.encryption_method != em::NONE;
-    let needs_encrypt = needs_reencrypt && de.encryption_method != em::NONE;
+    let Needs {
+        decompress: needs_decompress,
+        crc: needs_crc,
+        compress: needs_compress,
+        decrypt: needs_decrypt,
+        encrypt: needs_encrypt,
+    } = needs(&st, de, want_torrentzip);
 
     if !needs_decrypt
         && st.encryption_method == em::TRAD_PKWARE
@@ -541,6 +552,30 @@ fn add_data<R: ReadAt + ?Sized, W: Write + Seek>(
         // seems more sensible than failing to close the archive.
         de.changed &= !changed::LAST_MOD;
     }
+
+    let password = de.password.as_deref().or(default_password);
+    let Taken { made, drawn } = taken;
+    let precompressed = made.filter(|made| {
+        let encrypting = needs_encrypt.then(|| Encrypting {
+            method: de.encryption_method,
+            password,
+            dostime: pkware_time(de, &st),
+            drawn: drawn.as_ref(),
+        });
+        !needs_decrypt
+            && !needs_decompress
+            && needs_crc
+            && needs_compress
+            && matches!(&src, Base::Data { source, .. } if made.fits(
+                source,
+                de.comp_method,
+                de.compression_level,
+                encrypting,
+                out.stream,
+            ))
+    });
+    let needs_crc = needs_crc && precompressed.is_none();
+    let needs_compress = needs_compress && precompressed.is_none();
 
     let decrypt = match needs_decrypt {
         true => Some(Layer::new(Decrypt::new(
@@ -571,11 +606,11 @@ fn add_data<R: ReadAt + ?Sized, W: Write + Seek>(
         decompress,
         crc,
         compress,
+        precompressed: precompressed.map(|made| Layer::new(*made)),
         encrypt: None,
     };
 
     if needs_encrypt {
-        let password = de.password.as_deref().or(default_password);
         if !encryption_method_supported(de.encryption_method, true) {
             return Err(Error::new(ErrorCode::EncrNotSupp, 0));
         }
@@ -601,7 +636,10 @@ fn add_data<R: ReadAt + ?Sized, W: Write + Seek>(
             password,
             dostime,
             || src_final.stat_below_encrypt(),
-            random.cloned(),
+            match &drawn {
+                Some(drawn) => Some(drawn.source(random)),
+                None => random.cloned(),
+            },
         )?;
         src_final.encrypt = Some(Layer::new(encrypt));
     }
@@ -692,6 +730,82 @@ fn add_data<R: ReadAt + ?Sized, W: Write + Seek>(
     }
 
     Ok(())
+}
+
+/// What `add_data` takes of the stat of its source, `st`, and of `de`
+/// before it decides what to do with the data: the method, store if the
+/// stat does not tell it; the entry's method, that of the data if it is
+/// compressed and the entry's was not changed; the compressed size, known
+/// if the data is to be stored; and the encryption, none if not told.
+pub(crate) fn settle_methods(st: &mut Stat<'_>, de: &mut Dirent) {
+    if st.valid & stat::COMP_METHOD == 0 {
+        st.valid |= stat::COMP_METHOD;
+        st.comp_method = cm::STORE;
+    }
+
+    if de.changed & changed::COMP_METHOD == 0 && st.comp_method != cm::STORE {
+        de.comp_method = i32::from(st.comp_method);
+    } else if de.comp_method == i32::from(cm::STORE) && st.valid & stat::SIZE != 0 {
+        st.valid |= stat::COMP_SIZE;
+        st.comp_size = st.size;
+    } else {
+        // we'll recompress
+        st.valid &= !stat::COMP_SIZE;
+    }
+
+    if st.valid & stat::ENCRYPTION_METHOD == 0 {
+        st.valid |= stat::ENCRYPTION_METHOD;
+        st.encryption_method = em::NONE;
+    }
+}
+
+/// The layers `add_data` stacks on the data.
+pub(crate) struct Needs {
+    pub(crate) decompress: bool,
+    pub(crate) crc: bool,
+    pub(crate) compress: bool,
+    pub(crate) decrypt: bool,
+    pub(crate) encrypt: bool,
+}
+
+/// The layers `add_data` stacks on data whose stat is `st` for `de`, both
+/// settled ([`settle_methods`]).
+pub(crate) fn needs(st: &Stat<'_>, de: &Dirent, want_torrentzip: bool) -> Needs {
+    let needs_recompress = want_torrentzip || st.comp_method != cm_actual(de.comp_method);
+    let needs_decompress = needs_recompress && st.comp_method != cm::STORE;
+    // in these cases we can compute the CRC ourselves, so we do
+    let needs_crc = st.comp_method == cm::STORE || needs_decompress;
+    let needs_compress = needs_recompress && de.comp_method != i32::from(cm::STORE);
+
+    let needs_reencrypt = needs_recompress
+        || de.changed & changed::PASSWORD != 0
+        || de.encryption_method != st.encryption_method;
+    let needs_decrypt = needs_reencrypt && st.encryption_method != em::NONE;
+    let needs_encrypt = needs_reencrypt && de.encryption_method != em::NONE;
+    Needs {
+        decompress: needs_decompress,
+        crc: needs_crc,
+        compress: needs_compress,
+        decrypt: needs_decrypt,
+        encrypt: needs_encrypt,
+    }
+}
+
+/// The time ZipCrypto's header ends with, for `de` whose data, under a
+/// compressing layer, has the stat `st`: the entry's time if it was set,
+/// else that of the stat; `None` for another method, or where it would be
+/// the time now, or cannot be told.
+pub(crate) fn pkware_time(de: &Dirent, st: &Stat<'_>) -> Option<DosTime> {
+    if de.encryption_method != em::TRAD_PKWARE {
+        return None;
+    }
+    if de.changed & changed::LAST_MOD != 0 {
+        return Some(de.last_mod);
+    }
+    if st.valid & stat::MTIME == 0 {
+        return None;
+    }
+    u2d_time(st.mtime).ok()
 }
 
 /// The rest of [`add_data`] where `out` goes only forwards: the local header cannot

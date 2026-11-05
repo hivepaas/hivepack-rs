@@ -50,7 +50,7 @@ use crate::xz::{Action, Filter, InBuffer, LzmaOptions, OutBuffer, Status, Stream
 
 use crate::sevenz::dec::PackReader;
 use crate::sevenz::error::{Error, Result};
-use crate::sevenz::workers::Workers;
+use crate::workers::Workers;
 
 /// Blocks are gathered into a job until it has this many bytes, so that a
 /// thread is not given too little to do.
@@ -255,7 +255,7 @@ impl Lzma2Mt {
             dict,
             serial_dict,
             budget: *limit,
-            workers: Workers::new(threads, decode_job, job_lost),
+            workers: Workers::new(threads, "sevenz-lzma2", decode_job, job_lost),
             costs: VecDeque::new(),
             head: None,
             held: None,

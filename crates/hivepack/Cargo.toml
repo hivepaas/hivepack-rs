@@ -465,6 +465,11 @@ path = "tests/zip_split.rs"
 required-features = ["deflate", "zip"]
 
 [[test]]
+name = "zip_threads"
+path = "tests/zip_threads.rs"
+required-features = ["zip"]
+
+[[test]]
 name = "zip_writer"
 path = "tests/zip_writer.rs"
 required-features = ["deflate", "zip"]

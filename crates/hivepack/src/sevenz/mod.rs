@@ -63,7 +63,6 @@ mod error;
 mod lzma2_mt;
 mod lzma_dec;
 mod ppmd7;
-mod workers;
 mod writer;
 
 use std::io::{self, Read, Seek};
