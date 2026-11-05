@@ -337,3 +337,73 @@ fn names_one_where_extracted_are_asked_about() {
     assert_eq!(*asked.lock().unwrap(), [["readme"]]);
     assert_eq!(summary.renamed[0].to, ["readme (2)"]);
 }
+
+/// Into a sink, by this system's rules, any name its archive holds is taken, on
+/// every system, Windows too: only what leads outside, on any system, and
+/// control characters are refused.
+#[test]
+fn a_sink_takes_any_name_but_one_that_climbs() {
+    let long = format!("{}.txt", "a".repeat(300));
+    let names: [&[u8]; 6] = [
+        b"ab:c.txt",
+        b"aux.txt",
+        b"what?.txt",
+        b"ends. ",
+        b"back\\slash",
+        long.as_bytes(),
+    ];
+    let entries: Vec<Entry> = names.iter().map(|n| Entry::File(n, b"x")).collect();
+    let data = zip(&entries);
+    let archive = Archive::open(&data[..], OpenFlags::CHECKCONS).unwrap();
+    let (options, asked) = asking(OnUnnamable::Stop);
+    let mut options = options;
+    options.name_rules = NameRules::Native;
+    let mut sink = Names::default();
+    extract_zip_to(&archive, &mut sink, &options).unwrap();
+    let taken: Vec<String> = names
+        .iter()
+        .map(|n| String::from_utf8_lossy(n).into_owned())
+        .collect();
+    assert_eq!(sink.0, taken);
+    assert!(asked.lock().unwrap().is_empty());
+    // What leads outside where the archive made is extracted stops it.
+    for name in [
+        &b"a\\..\\x"[..],
+        b"a.txt:..",
+        b"C:x",
+        b"a:b.txt",
+        b"\\x",
+        b"../x",
+        b"/x",
+    ] {
+        let data = zip(&[Entry::File(name, b"x")]);
+        let archive = Archive::open(&data[..], OpenFlags::CHECKCONS).unwrap();
+        let error =
+            extract_zip_to(&archive, &mut Names::default(), &Options::default()).unwrap_err();
+        assert!(
+            matches!(
+                error.kind,
+                ErrorKind::Name(NameError::Dot | NameError::Absolute)
+            ),
+            "{}: {error}",
+            String::from_utf8_lossy(name)
+        );
+    }
+    let data = zip(&[Entry::File(b"a\nb", b"x")]);
+    let archive = Archive::open(&data[..], OpenFlags::CHECKCONS).unwrap();
+    let error = extract_zip_to(&archive, &mut Names::default(), &Options::default()).unwrap_err();
+    assert!(
+        matches!(error.kind, ErrorKind::Name(NameError::Control)),
+        "{error}"
+    );
+    // By every system's rules, a sink refuses what Windows can't name, as asked.
+    let data = zip(&[Entry::File(b"a:b.txt", b"x")]);
+    let archive = Archive::open(&data[..], OpenFlags::CHECKCONS).unwrap();
+    let mut portable = Options::default();
+    portable.name_rules = NameRules::Portable;
+    let error = extract_zip_to(&archive, &mut Names::default(), &portable).unwrap_err();
+    assert!(
+        matches!(error.kind, ErrorKind::Name(NameError::Colon)),
+        "{error}"
+    );
+}

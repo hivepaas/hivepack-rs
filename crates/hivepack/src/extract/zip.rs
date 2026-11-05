@@ -224,7 +224,7 @@ fn links<'a, R: ReadAt>(
         let parent = &name.components[..name.components.len().saturating_sub(1)];
         let checked = read_target(archive, item, run, options).and_then(|target| {
             let resolved =
-                link_target(&target, parent, options.name_rules).map_err(ErrorKind::LinkTarget)?;
+                link_target(&target, parent, options.checks()).map_err(ErrorKind::LinkTarget)?;
             // A link on the way, which the system would follow.
             let link_at = |walked: &[String]| paths.get(&fold(walked)).copied();
             if let Some(other) = link_on_the_way(&target, parent, link_at) {

@@ -307,7 +307,7 @@ pub(crate) fn plan_links<S>(
                 Links::AsFile => Ok(LinkPlan::SymlinkAsFile),
                 _ => {
                     let parent = &name.components[..name.components.len().saturating_sub(1)];
-                    link_target(&entry.target, parent, options.name_rules)
+                    link_target(&entry.target, parent, options.checks())
                         .map_err(ErrorKind::LinkTarget)
                         .and_then(|resolved| {
                             // A link on the way, which the system would follow.

@@ -64,7 +64,11 @@ pub enum NameRules {
     /// composed, are the same path only where the destination's file system takes
     /// them for one, as it is found to before anything is written: on Windows and
     /// macOS by default, a USB stick in exFAT on Linux too, and never in a
-    /// [`Sink`](crate::extract::Sink), whose archive can hold both.
+    /// [`Sink`](crate::extract::Sink), whose archive can hold both. Into a
+    /// sink, only what leads outside on any system (`..`, `\\` and `:` taken to
+    /// split a name as Windows takes them, `/`, `\\` or a drive at its start) and
+    /// control characters are refused: the archive it makes holds any other
+    /// name, on every system.
     #[default]
     Native,
     /// Every system's, wherever it runs, as [`check_name`] has them: what extracts
@@ -76,6 +80,32 @@ impl NameRules {
     /// Whether Windows' rules apply.
     pub(crate) fn windows(self) -> bool {
         cfg!(windows) || self == NameRules::Portable
+    }
+}
+
+/// What a name is checked for: by [`NameRules`], for a folder; or, for an
+/// archive a [`Sink`](crate::extract::Sink) makes, only for what leads outside
+/// on any system and for control characters, as the archive holds any other
+/// name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Checks {
+    Folder(NameRules),
+    Archive,
+}
+
+impl Checks {
+    /// Whether what Windows cannot name is refused.
+    fn windows(self) -> bool {
+        matches!(self, Checks::Folder(rules) if rules.windows())
+    }
+
+    /// Whether `\` and `:` split a name, as Windows takes them, to find what
+    /// climbs.
+    fn splits(self) -> bool {
+        match self {
+            Checks::Folder(rules) => rules.windows(),
+            Checks::Archive => true,
+        }
     }
 }
 
@@ -146,6 +176,11 @@ pub fn check_name(raw: &[u8]) -> Result<Name, NameError> {
 /// outside the destination, or names nothing, is said before what a system
 /// cannot name: a name refused as [`NameError::is_unnamable`] has neither.
 pub fn check_name_for(raw: &[u8], rules: NameRules) -> Result<Name, NameError> {
+    check(raw, Checks::Folder(rules))
+}
+
+/// Checks `raw` for what `checks` say.
+pub(crate) fn check(raw: &[u8], checks: Checks) -> Result<Name, NameError> {
     if raw.is_empty() {
         return Err(NameError::Empty);
     }
@@ -153,7 +188,12 @@ pub fn check_name_for(raw: &[u8], rules: NameRules) -> Result<Name, NameError> {
     if name.starts_with('/') {
         return Err(NameError::Absolute);
     }
-    let windows = rules.windows();
+    // Where Windows extracts the archive made, `\x` and `C:x` lead outside.
+    if checks == Checks::Archive && (name.starts_with('\\') || has_drive(name)) {
+        return Err(NameError::Absolute);
+    }
+    let windows = checks.windows();
+    let splits = checks.splits();
     let (path, is_dir) = match name.strip_suffix('/') {
         Some(path) => (path, true),
         None => (name, false),
@@ -161,7 +201,7 @@ pub fn check_name_for(raw: &[u8], rules: NameRules) -> Result<Name, NameError> {
     let parts: Vec<&str> = path.split('/').collect();
     // On Windows a `\` separates too, and a drive leads outside: `..\x`, `C:x`.
     let pieces = |part: &&str| -> Vec<String> {
-        if windows {
+        if splits {
             part.split(['\\', ':']).map(str::to_owned).collect()
         } else {
             vec![(*part).to_owned()]
@@ -189,7 +229,7 @@ pub fn check_name_for(raw: &[u8], rules: NameRules) -> Result<Name, NameError> {
     }
     let mut components = Vec::new();
     for component in parts {
-        if component.len() > MAX_COMPONENT {
+        if checks != Checks::Archive && component.len() > MAX_COMPONENT {
             return Err(NameError::TooLong);
         }
         if windows && (component.ends_with(' ') || component.ends_with('.')) {
@@ -208,8 +248,8 @@ pub fn check_name_for(raw: &[u8], rules: NameRules) -> Result<Name, NameError> {
 /// Windows' rules `\ : < > " | ? *` and a space or dot at a name's end), a device
 /// name given a `_` before it, and a part too long cut down, its extension kept.
 /// It is checked again: none if it still does not pass.
-pub(crate) fn renamed(text: &str, rules: NameRules) -> Option<Name> {
-    let windows = rules.windows();
+pub(crate) fn renamed(text: &str, checks: Checks) -> Option<Name> {
+    let windows = checks.windows();
     let (path, is_dir) = match text.strip_suffix('/') {
         Some(path) => (path, true),
         None => (text, false),
@@ -250,7 +290,13 @@ pub(crate) fn renamed(text: &str, rules: NameRules) -> Option<Name> {
     if is_dir {
         joined.push('/');
     }
-    check_name_for(joined.as_bytes(), rules).ok()
+    check(joined.as_bytes(), checks).ok()
+}
+
+/// Whether `name` starts with a drive, a letter and a colon.
+fn has_drive(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
 /// `part`, cut down to [`MAX_COMPONENT`] bytes if it is longer: its extension (a
@@ -312,7 +358,7 @@ pub(crate) fn prepare(name: &str, backslash: bool, sanitize: bool) -> String {
 pub(crate) fn link_target(
     target: &[u8],
     parent: &[String],
-    rules: NameRules,
+    checks: Checks,
 ) -> Result<Vec<String>, NameError> {
     if target.is_empty() {
         return Err(NameError::Empty);
@@ -328,10 +374,10 @@ pub(crate) fn link_target(
     if text.starts_with('/') {
         return Err(NameError::Absolute);
     }
-    if rules.windows() && text.contains(':') {
+    if checks.windows() && text.contains(':') {
         return Err(NameError::Colon);
     }
-    if rules.windows() && text.contains(RESERVED) {
+    if checks.windows() && text.contains(RESERVED) {
         return Err(NameError::Reserved);
     }
     let mut resolved = parent.to_vec();
@@ -344,7 +390,7 @@ pub(crate) fn link_target(
                 }
             }
             _ => {
-                let name = check_name_for(component.as_bytes(), rules)?;
+                let name = check(component.as_bytes(), checks)?;
                 resolved.extend(name.components);
             }
         }
@@ -487,43 +533,43 @@ mod tests {
     fn link_targets_stay_inside() {
         let parent = vec!["a".to_string(), "b".to_string()];
         assert_eq!(
-            link_target(b"c", &parent, NameRules::Portable),
+            link_target(b"c", &parent, Checks::Folder(NameRules::Portable)),
             Ok(vec!["a".into(), "b".into(), "c".into()])
         );
         assert_eq!(
-            link_target(b"../c", &parent, NameRules::Portable),
+            link_target(b"../c", &parent, Checks::Folder(NameRules::Portable)),
             Ok(vec!["a".into(), "c".into()])
         );
         assert_eq!(
-            link_target(b"../../c/./d", &parent, NameRules::Portable),
+            link_target(b"../../c/./d", &parent, Checks::Folder(NameRules::Portable)),
             Ok(vec!["c".into(), "d".into()])
         );
         assert_eq!(
-            link_target(b"../..", &parent, NameRules::Portable),
+            link_target(b"../..", &parent, Checks::Folder(NameRules::Portable)),
             Ok(vec![])
         );
         assert_eq!(
-            link_target(b"../../../c", &parent, NameRules::Portable),
+            link_target(b"../../../c", &parent, Checks::Folder(NameRules::Portable)),
             Err(NameError::Dot)
         );
         assert_eq!(
-            link_target(b"/etc/passwd", &parent, NameRules::Portable),
+            link_target(b"/etc/passwd", &parent, Checks::Folder(NameRules::Portable)),
             Err(NameError::Absolute)
         );
         assert_eq!(
-            link_target(b"C:/x", &parent, NameRules::Portable),
+            link_target(b"C:/x", &parent, Checks::Folder(NameRules::Portable)),
             Err(NameError::Colon)
         );
         assert_eq!(
-            link_target(b"..\\x", &parent, NameRules::Portable),
+            link_target(b"..\\x", &parent, Checks::Folder(NameRules::Portable)),
             Err(NameError::Backslash)
         );
         assert_eq!(
-            link_target(b"nul", &parent, NameRules::Portable),
+            link_target(b"nul", &parent, Checks::Folder(NameRules::Portable)),
             Err(NameError::Device)
         );
         assert_eq!(
-            link_target(b"", &parent, NameRules::Portable),
+            link_target(b"", &parent, Checks::Folder(NameRules::Portable)),
             Err(NameError::Empty)
         );
     }
@@ -547,7 +593,7 @@ mod tests {
     /// Names are the archive's: any bytes are checked without panicking.
     #[test]
     fn a_name_renamed_is_one_the_rules_take() {
-        let portable = NameRules::Portable;
+        let portable = Checks::Folder(NameRules::Portable);
         let renamed_as = |text: &str| renamed(text, portable).map(|n| n.components.join("/"));
         assert_eq!(renamed_as("dir/a:b?.txt").as_deref(), Some("dir/a_b_.txt"));
         assert_eq!(renamed_as("con.txt").as_deref(), Some("_con.txt"));
