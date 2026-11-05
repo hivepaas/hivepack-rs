@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
 
 - `extract`: `Options::threads` lets `extract_zip` write that many files at once, each read and decompressed in a thread of its own, `Threads::One` by default; what is written, and the `Summary`, are the same. `extract_zip` now asks the archive's source to be `Sync`, as every `ReadAt` here is; a `Sink` is still given one entry at a time. See [docs/extract.md](docs/extract.md#threads).
 - `bzip2`: `CompressMt` compresses in threads, as pbzip2 does: the input in pieces of a fixed size (`piece_size`, 95% of a block), each a bzip2 stream of its own, the streams one after the other, which `bzip2 -d` reads as one. It is called as `Compress` is, and its output is the same whatever the threads, one too. See [docs/bzip2.md](docs/bzip2.md#threads-beside-the-port).
@@ -8,6 +8,7 @@
 - `sevenz`: `WriteOptions::lzma2_blocks` cuts LZMA2 in blocks that each reset the dictionary, as 7-Zip does in threads (`Lzma2Blocks::Auto`, 4 times the dictionary: 32 MiB for preset 6), and `WriteOptions::threads` compresses them in threads, the filter before them on the caller's thread. What is written is the same whatever the threads, and any 7z reader reads it; the default is one stream, as before. See [docs/7z.md](docs/7z.md#lzma2-in-blocks-in-threads).
 - `sevenz`: `Archive::set_threads` decodes LZMA2 whose stream resets its dictionary on the way, a block in each thread, under `Options::decoder_memory_limit`: what 7-Zip writes in threads, and `Lzma2Blocks`. Other folders are decoded as before.
 - `extract`: `Options::threads`, one by default, decodes 7z's LZMA2 blocks in threads too (`extract_7z`, `extract_7z_to`).
+- Breaking: `extract_zip` asks its archive's source to be `Sync`, as every `ReadAt` here is; `sevenz::WriteOptions` has two fields more (`lzma2_blocks`, `threads`), so one written out in full takes `..WriteOptions::default()`.
 
 ## 0.5.0
 
