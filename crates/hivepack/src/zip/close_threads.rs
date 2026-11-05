@@ -1,36 +1,57 @@
-//! New data compressed in threads ahead of the entry being written, each
-//! entry's data then written in order as if it had been compressed there.
-//! Not in libzip, which compresses each entry as it writes it.
+//! New data compressed and encrypted in threads ahead of the entry being
+//! written, each entry's data then written in order as if it had been
+//! compressed and encrypted there. Not in libzip, which compresses and
+//! encrypts each entry as it writes it.
 //!
 //! When the archive is written ([`Archive::close_to`] and the others), each
 //! entry of new data that is to be compressed, and whose source tells its
 //! size, is given to a thread, in the order the entries are written. The
-//! thread reads its source and runs the layers `add_data` stacks under the
-//! encrypting one (the CRC and the compressing layer), in reads of the sizes
-//! `add_data` reads them in, and keeps what they give: the compressed bytes,
-//! the error that ended them if one did, and what their stat and attributes
-//! said from each read on that changed them. The thread writing the archive
-//! then takes it in place of those layers ([`Precompressed`]), under the
-//! encrypting layer if there is one, so that the random bytes are drawn in
-//! the same order: everything it writes, and every error, is what it would
-//! have been with the layers there.
+//! thread reads its source and runs the layers `add_data` stacks on it (the
+//! CRC, the compressing layer, and the encrypting one if it has its random
+//! bytes), in reads of the sizes `add_data` reads them in, and keeps what
+//! they give: the bytes, the error that ended them if one did, and what the
+//! stat and attributes under the encrypting layer said from each read on
+//! that changed them. The thread writing the archive then takes it in place
+//! of those layers ([`Precompressed`]): everything it writes, and every
+//! error, is what it would have been with the layers there.
+//!
+//! Encrypting draws random bytes when it starts, a salt for WinZip AES and
+//! 11 bytes of header for ZipCrypto, and with one thread each entry draws
+//! them as it is written, one after the other. With more, the thread writing
+//! draws them ahead, in the same order and as many: before an entry is given
+//! to a thread to encrypt, those of every entry before it are drawn, and
+//! those of the entries the threads do not encrypt (too large for them, not
+//! compressed, or not taken) are kept for them, to be taken in place of
+//! drawing when each is written ([`Drawn`]). What each entry draws is told
+//! before the archive is written ([`Draw`]), but for one written again from
+//! an entry of the archive: none is drawn past one of those until it is
+//! written, and drawing itself then, it keeps the order; the entries given
+//! to threads meanwhile are encrypted on the thread writing. Nothing else
+//! draws. If writing fails, the entries after the one that failed may have
+//! drawn theirs, which one thread would not have: never in another order.
 //!
 //! What waits to be written is bounded: an entry is charged the most its
-//! data can compress to, from when it is given to a thread until it is
-//! written, and no more is given while that would pass
+//! data can come to, encrypted, from when it is given to a thread until it
+//! is written, and no more is given while that would pass
 //! [`MEMORY_PER_THREAD`] for each thread. An entry that could take more than
 //! all of it is compressed by the thread writing, as with one thread, while
 //! the others go on with the entries after it.
 
 use std::collections::VecDeque;
+use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::crypto::system_random;
 use crate::threads::Threads;
 use crate::workers::Workers;
-use crate::zip::dirent::{Dirent, cm_actual};
-use crate::zip::error::Result;
+use crate::zip::close::{needs, pkware_time, settle_methods};
+use crate::zip::dirent::{Dirent, DosTime, cm_actual};
+use crate::zip::error::{Error, ErrorCode, Result};
+use crate::zip::get_encryption_implementation::Encrypt;
+use crate::zip::hash::c_string;
 use crate::zip::open::Archive;
+use crate::zip::random::{RandomSource, secure_random};
 use crate::zip::source::ReadAt;
 use crate::zip::source_compress::{Compress, maximum_compressed_size};
 use crate::zip::source_crc::Crc;
@@ -38,11 +59,12 @@ use crate::zip::source_data::{DataSource, FileAttributes};
 use crate::zip::source_stack::{Base, Layer, WriteStack};
 use crate::zip::zip::{Stat, cm, em, stat};
 use crate::zip::zipint::{
-    BUFSIZE, CRYPTO_PKWARE_HEADERLEN, WINZIP_AES_PASSWORD_VERIFY_LENGTH, salt_length,
+    BUFSIZE, CRYPTO_PKWARE_HEADERLEN, HMAC_LENGTH, Password, WINZIP_AES_PASSWORD_VERIFY_LENGTH,
+    salt_length,
 };
 
 /// What may wait to be written, for each thread: the most the entries given
-/// to threads and not yet written can compress to.
+/// to threads and not yet written can come to.
 pub(crate) const MEMORY_PER_THREAD: u64 = 32 << 20;
 
 /// What an entry is charged besides its data, for what is kept of it.
@@ -54,6 +76,8 @@ thread_local! {
     static TEST_MEMORY: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     /// How many entries were written from what a thread made.
     static TAKEN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How many of those a thread encrypted.
+    static ENCRYPTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// What may wait to be written, for each thread.
@@ -66,44 +90,72 @@ fn memory_per_thread() -> u64 {
 }
 
 impl<R> Archive<R> {
-    /// Sets how many threads compress new data when the archive is written
-    /// ([`Archive::close_to`], [`Archive::close_to_stream`] and
+    /// Sets how many threads compress and encrypt new data when the archive
+    /// is written ([`Archive::close_to`], [`Archive::close_to_stream`] and
     /// [`Archive::close_to_cloning`]): [`Threads::One`], the caller's, by
     /// default. libzip has no threads.
     ///
     /// With more, the entries added with
     /// [`file_add`](Archive::file_add) or [`file_replace`](Archive::file_replace)
     /// that are compressed are compressed in threads, each reading its
-    /// source, ahead of the entry being written, while the caller's thread
-    /// writes the entries in order, encrypting those that are encrypted.
-    /// The archive is the same, byte for byte, whatever this says, and so is
-    /// an error and what was written before it. Each thread keeps its own
+    /// source, and encrypted there if they are encrypted, ahead of the entry
+    /// being written, while the caller's thread writes the entries in order.
+    /// The random bytes encrypting takes (see
+    /// [`set_random_source`](Archive::set_random_source)) are drawn on the
+    /// caller's thread, in the order and the sizes one thread draws them, so
+    /// the archive is the same, byte for byte, whatever this says, and so is
+    /// an error and what was written before it; after an error, though, the
+    /// entries after it may have drawn theirs. Each thread keeps its own
     /// compressor (deflate takes about 300 KiB, bzip2 7 MiB, LZMA and XZ at
     /// preset 6 94 MiB), and up to 32 MiB for each thread waits to be
-    /// written, counted as the most each entry can compress to. An entry
-    /// that could take more than all of it, or whose source does not tell
-    /// its size, is compressed on the caller's thread when it is written,
-    /// while the threads go on with the entries after it. Everything else
-    /// is written as with one thread: entries stored, copied as they are,
-    /// or compressed again from an entry of the archive.
+    /// written, counted as the most each entry can come to. An entry that
+    /// could take more than all of it, or whose source does not tell its
+    /// size, is compressed and encrypted on the caller's thread when it is
+    /// written, while the threads go on with the entries after it.
+    /// Everything else is written as with one thread: entries stored,
+    /// copied as they are, or compressed again from an entry of the archive.
     pub fn set_threads(&mut self, threads: Threads) {
         self.threads = threads;
     }
 }
 
+/// How a thread encrypts an entry.
+struct Encryption {
+    method: u16,
+    password: Password,
+    /// the time ZipCrypto's header ends with; none for WinZip AES
+    dostime: Option<DosTime>,
+    /// the random bytes drawn for it
+    random: Arc<[u8]>,
+}
+
+/// How the entry is encrypted where it is written, to tell whether a thread
+/// encrypted it so.
+pub(crate) struct Encrypting<'a> {
+    pub(crate) method: u16,
+    pub(crate) password: Option<&'a [u8]>,
+    /// the time ZipCrypto's header ends with ([`pkware_time`])
+    pub(crate) dostime: Option<DosTime>,
+    /// the random bytes drawn for it ahead
+    pub(crate) drawn: Option<&'a Drawn>,
+}
+
 /// What a thread's work on an entry is for: it is taken only if the entry
-/// is still to be compressed so when it is written.
+/// is still to be compressed, and encrypted, so when it is written.
 pub(crate) struct Key {
     source: Arc<dyn DataSource>,
     /// the method and level the compressing layer is made with
     method: i32,
     level: u32,
-    /// the size of the first read, which the encrypting layer makes smaller
-    /// by its header: with `ZIP_CM_DEFAULT`, it decides whether the data is
+    /// the size of the first read of the compressing layer, which the
+    /// encrypting layer, if the thread does not stack it, makes smaller by
+    /// its header: with `ZIP_CM_DEFAULT`, it decides whether the data is
     /// stored
     first_read: usize,
     /// whether the compressing layer may not give way to storing
     keep_compressing: bool,
+    /// how the thread encrypts it, if it does
+    encryption: Option<Encryption>,
 }
 
 impl Key {
@@ -129,6 +181,16 @@ fn encryption_header_length(encryption_method: u16) -> Option<usize> {
     }
 }
 
+/// What the encrypting layer adds to the data: its header, and WinZip AES's
+/// authentication code after it.
+fn encryption_overhead(encryption_method: u16) -> Option<u64> {
+    let header = encryption_header_length(encryption_method)? as u64;
+    Some(match encryption_method {
+        em::AES_128 | em::AES_192 | em::AES_256 => header + HMAC_LENGTH as u64,
+        _ => header,
+    })
+}
+
 /// What the stat and attributes under the encrypting layer said.
 #[derive(Clone, Copy)]
 pub(crate) struct Shown {
@@ -136,8 +198,8 @@ pub(crate) struct Shown {
     pub(crate) attributes: Result<FileAttributes>,
 }
 
-/// What a thread made of an entry's data: what reading the layers under the
-/// encrypting one gave, read again in the same order.
+/// What a thread made of an entry's data: what reading the layers gave,
+/// read again in the same order.
 pub(crate) struct Precompressed {
     key: Key,
     /// what opening the layers gave
@@ -147,39 +209,69 @@ pub(crate) struct Precompressed {
     position: usize,
     /// how the reading ended: at the end, or with an error
     end: Result<()>,
-    /// what the stat and attributes said, from the read they changed in on
+    /// what the stat and attributes under the encrypting layer said, from
+    /// the read they changed in on
     shown: Vec<(u64, Shown)>,
     /// the reads made of the top of the layers
     reads: u64,
 }
 
 impl Precompressed {
-    /// Whether this was made for the entry as `key` would compress it.
+    /// Whether this was made for the entry as it is compressed, with
+    /// `method` and `level`, and encrypted, as `encrypting` says.
     pub(crate) fn fits(
         &self,
         source: &Arc<dyn DataSource>,
         method: i32,
         level: u32,
-        encryption_method: u16,
+        encrypting: Option<Encrypting<'_>>,
         stream: bool,
     ) -> bool {
-        let Some(header) = encryption_header_length(encryption_method) else {
-            return false;
+        let first_read = match (&self.key.encryption, &encrypting) {
+            (None, _) => {
+                let method = encrypting.as_ref().map_or(em::NONE, |e| e.method);
+                let Some(header) = encryption_header_length(method) else {
+                    return false;
+                };
+                BUFSIZE - header
+            }
+            (Some(mine), Some(theirs)) => {
+                let same = mine.method == theirs.method
+                    && theirs.password.map(c_string) == Some(&*mine.password)
+                    && mine.dostime == theirs.dostime
+                    && theirs.drawn.and_then(Drawn::bytes) == Some(&*mine.random);
+                if !same {
+                    return false;
+                }
+                BUFSIZE
+            }
+            (Some(_), None) => return false,
         };
-        let encrypt = encryption_method != em::NONE;
         self.key.fits(&Key {
             source: Arc::clone(source),
             method,
             level,
-            first_read: BUFSIZE - header,
-            keep_compressing: stream && encrypt,
+            first_read,
+            keep_compressing: stream && encrypting.is_some(),
+            encryption: None,
         })
+    }
+
+    /// Whether the thread encrypted it: then it stands for the encrypting
+    /// layer too.
+    pub(crate) fn encrypted(&self) -> bool {
+        self.key.encryption.is_some()
     }
 
     /// `ZIP_SOURCE_OPEN`.
     pub(crate) fn open(&mut self) -> Result<()> {
         #[cfg(test)]
-        TAKEN.with(|taken| taken.set(taken.get() + 1));
+        {
+            TAKEN.with(|taken| taken.set(taken.get() + 1));
+            if self.encrypted() {
+                ENCRYPTED.with(|n| n.set(n.get() + 1));
+            }
+        }
         self.position = 0;
         self.reads = 0;
         self.open
@@ -210,10 +302,55 @@ impl Precompressed {
     }
 }
 
-/// An entry for a thread to compress.
+/// The random bytes drawn ahead for an entry, as many as encrypting it
+/// draws when it is written: none if drawing them failed.
+pub(crate) struct Drawn {
+    len: usize,
+    bytes: Option<Arc<[u8]>>,
+}
+
+impl Drawn {
+    fn bytes(&self) -> Option<&[u8]> {
+        self.bytes.as_deref()
+    }
+
+    /// What encrypting the entry draws from: these bytes, or their failure,
+    /// for as many as were drawn; `random`, or the system without one, for
+    /// another size, which a source that tells another stat when it is
+    /// written than before would ask.
+    pub(crate) fn source(&self, random: Option<&RandomSource>) -> RandomSource {
+        let len = self.len;
+        let bytes = self.bytes.clone();
+        let random = random.cloned();
+        Arc::new(move |buf: &mut [u8]| {
+            if buf.len() != len {
+                return match &random {
+                    Some(random) => random(buf),
+                    None => system_random(buf),
+                };
+            }
+            match &bytes {
+                Some(bytes) => {
+                    buf.copy_from_slice(bytes);
+                    Ok(())
+                }
+                None => Err(io::Error::other("the random bytes could not be drawn")),
+            }
+        })
+    }
+}
+
+/// What threads made of an entry, and the random bytes drawn for it.
+#[derive(Default)]
+pub(crate) struct Taken {
+    pub(crate) made: Option<Box<Precompressed>>,
+    pub(crate) drawn: Option<Drawn>,
+}
+
+/// An entry for a thread to compress, and encrypt.
 struct Job {
     key: Key,
-    /// the most the data can compress to: more, and the thread gives up
+    /// the most the data can come to: more, and the thread gives up
     most: u64,
     stop: Arc<AtomicBool>,
 }
@@ -233,17 +370,43 @@ fn shown<R: ReadAt + ?Sized>(stack: &WriteStack<'_, R>) -> Shown {
     }
 }
 
-/// Reads the job's source through the layers `add_data` stacks under the
-/// encrypting one, as it reads them, and keeps what they give. Gives up,
-/// for the entry to be compressed where it is written, if the compressing
-/// layer cannot be made, the data comes to more than it could, or the
-/// archive is no longer written.
+/// The encrypting layer of `encryption`, whose random bytes are those drawn
+/// for it.
+fn encrypt_layer(encryption: &Encryption) -> Option<Layer<Encrypt>> {
+    let random = Arc::clone(&encryption.random);
+    let random: RandomSource = Arc::new(move |buf: &mut [u8]| {
+        if buf.len() != random.len() {
+            return Err(io::Error::other("not the random bytes drawn"));
+        }
+        buf.copy_from_slice(&random);
+        Ok(())
+    });
+    // The time is told, so the stat is not asked.
+    let encrypt = Encrypt::new(
+        encryption.method,
+        Some(&encryption.password),
+        encryption.dostime,
+        || Err(Error::new(ErrorCode::Internal, 0)),
+        Some(random),
+    )
+    .ok()?;
+    Some(Layer::new(encrypt))
+}
+
+/// Reads the job's source through the layers `add_data` stacks, as it reads
+/// them, and keeps what they give. Gives up, for the entry to be compressed
+/// where it is written, if a layer cannot be made, the data comes to more
+/// than it could, or the archive is no longer written.
 fn compress(_: &mut (), job: Job) -> Made {
     let Job { key, most, stop } = job;
     let mut compress = Compress::new(key.method, key.level).ok()?;
     if key.keep_compressing {
         compress.keep_compressing();
     }
+    let encrypt = match &key.encryption {
+        Some(encryption) => Some(encrypt_layer(encryption)?),
+        None => None,
+    };
     let mut stack: WriteStack<'_, [u8]> = WriteStack {
         base: Base::data(Arc::clone(&key.source)),
         decrypt: None,
@@ -251,7 +414,7 @@ fn compress(_: &mut (), job: Job) -> Made {
         crc: Some(Layer::new(Crc::new(false))),
         compress: Some(Layer::new(compress)),
         precompressed: None,
-        encrypt: None,
+        encrypt,
     };
     let mut seen = stack.shown_key();
     let mut shows = vec![(0, shown(&stack))];
@@ -311,12 +474,49 @@ fn compress(_: &mut (), job: Job) -> Made {
     }))
 }
 
+/// The random bytes an entry draws when it is written, to encrypt it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Draw {
+    Nothing,
+    Bytes(usize),
+    /// what it draws is told only when it is written
+    Unknown,
+}
+
+/// An entry to write, as planned before the archive is written.
+struct Planned {
+    i: usize,
+    draw: Draw,
+    /// what a thread does with it, if one can
+    job: Option<PlannedJob>,
+}
+
+struct PlannedJob {
+    /// what a thread compresses, not encrypting it
+    key: Key,
+    /// the most it can come to, encrypted
+    most: u64,
+    /// how a thread can encrypt it, given its random bytes: the method, the
+    /// password and the time ZipCrypto's header ends with
+    encrypt: Option<(u16, Password, Option<DosTime>)>,
+}
+
 /// The entries given to threads, and those to give, in the order they are
-/// written.
+/// written, and the random bytes drawn for them.
 pub(crate) struct Ahead {
     workers: Workers<(), Job, Made>,
-    /// entries to give: the index, what for, and the most each can take
-    planned: VecDeque<(usize, Key, u64)>,
+    random: Option<RandomSource>,
+    /// the entries written, in order
+    entries: Vec<Planned>,
+    /// the next of `entries` to give a thread, to write, and to draw for:
+    /// those before it drew theirs, or are written
+    next_give: usize,
+    next_write: usize,
+    next_draw: usize,
+    /// a draw failed: no more are drawn ahead
+    failed: bool,
+    /// the bytes drawn for entries not yet written, in order
+    drawn: VecDeque<(usize, Drawn)>,
     /// entries given, with what each is charged
     given: VecDeque<(usize, u64)>,
     /// what the entries given are charged
@@ -326,16 +526,74 @@ pub(crate) struct Ahead {
 }
 
 impl Ahead {
-    /// Gives threads the entries planned, in order, while they fit.
+    /// Draws the random bytes of the entries up to the `to`th of `entries`,
+    /// in order, as far as what they draw is known, and stops after one
+    /// fails: whether those of that one were drawn.
+    fn draw_to(&mut self, to: usize) -> bool {
+        while self.next_draw <= to && !self.failed {
+            let Some(entry) = self.entries.get(self.next_draw) else {
+                break;
+            };
+            match entry.draw {
+                Draw::Nothing => {}
+                // It draws its own when it is written.
+                Draw::Unknown => break,
+                Draw::Bytes(len) => {
+                    let mut bytes = vec![0; len];
+                    let drew = secure_random(self.random.as_ref(), &mut bytes);
+                    self.failed = !drew;
+                    let bytes = drew.then(|| Arc::from(bytes));
+                    self.drawn.push_back((entry.i, Drawn { len, bytes }));
+                }
+            }
+            self.next_draw += 1;
+        }
+        self.next_draw > to
+    }
+
+    /// Gives threads the entries planned, in order, while they fit, each
+    /// to be encrypted there if its random bytes can be drawn.
     fn give(&mut self) {
-        while let Some(&(_, _, most)) = self.planned.front() {
-            let cost = most + ENTRY_COST;
+        while let Some(entry) = self.entries.get(self.next_give) {
+            let at = self.next_give;
+            let i = entry.i;
+            let Some(job) = &entry.job else {
+                self.next_give += 1;
+                continue;
+            };
+            let cost = job.most + ENTRY_COST;
             if self.held + cost > self.budget {
                 break;
             }
-            let Some((i, key, most)) = self.planned.pop_front() else {
+            let random = match job.encrypt.is_some() && self.draw_to(at) {
+                true => self
+                    .drawn
+                    .iter()
+                    .rev()
+                    .find(|(j, _)| *j == i)
+                    .and_then(|(_, drawn)| drawn.bytes.clone()),
+                false => None,
+            };
+            let Some(PlannedJob {
+                mut key,
+                most,
+                encrypt,
+            }) = self.entries[at].job.take()
+            else {
                 break;
             };
+            if let (Some(random), Some((method, password, dostime))) = (random, encrypt) {
+                // The thread reads the encrypting layer, which reads under
+                // it what it reads with one thread.
+                key.first_read = BUFSIZE;
+                key.encryption = Some(Encryption {
+                    method,
+                    password,
+                    dostime,
+                    random,
+                });
+            }
+            self.next_give += 1;
             self.held += cost;
             self.given.push_back((i, cost));
             self.workers.give(Job {
@@ -346,9 +604,18 @@ impl Ahead {
         }
     }
 
-    /// What a thread made of entry `i`, the next written, if it was given
-    /// one: waited for. The entries after it are given as they fit.
-    pub(crate) fn take(&mut self, i: usize) -> Option<Box<Precompressed>> {
+    /// What threads made of entry `i`, the next written, if it was given
+    /// one, waited for, and the random bytes drawn for it. The entries
+    /// after it are given as they fit.
+    pub(crate) fn take(&mut self, i: usize) -> Taken {
+        let at = self.next_write;
+        if self.entries.get(at).is_none_or(|entry| entry.i != i) {
+            return Taken::default();
+        }
+        self.next_write = at + 1;
+        // Those before it are written: one that drew its own is passed.
+        self.next_draw = self.next_draw.max(at);
+        self.draw_to(at);
         self.give();
         let made = match self.given.front() {
             Some(&(j, cost)) if j == i => {
@@ -359,8 +626,12 @@ impl Ahead {
             }
             _ => None,
         };
+        let drawn = match self.drawn.front() {
+            Some(&(j, _)) if j == i => self.drawn.pop_front().map(|(_, drawn)| drawn),
+            _ => None,
+        };
         self.give();
-        made
+        Taken { made, drawn }
     }
 }
 
@@ -384,19 +655,32 @@ impl<R: ReadAt> Archive<R> {
             return None;
         }
         let budget = memory_per_thread().saturating_mul(u64::from(threads));
-        let planned: VecDeque<(usize, Key, u64)> = written
+        let entries: Vec<Planned> = written
             .iter()
-            .filter_map(|&i| {
-                let (key, most) = self.plan(i, stream)?;
-                (most + ENTRY_COST <= budget).then_some((i, key, most))
+            .map(|&i| {
+                let mut planned = self.plan(i, stream);
+                if planned
+                    .job
+                    .as_ref()
+                    .is_some_and(|job| job.most + ENTRY_COST > budget)
+                {
+                    planned.job = None;
+                }
+                planned
             })
             .collect();
-        if planned.is_empty() {
+        if entries.iter().all(|planned| planned.job.is_none()) {
             return None;
         }
         Some(Ahead {
             workers: Workers::new(threads, "zip-compress", compress, lost),
-            planned,
+            random: self.random.clone(),
+            entries,
+            next_give: 0,
+            next_write: 0,
+            next_draw: 0,
+            failed: false,
+            drawn: VecDeque::new(),
             given: VecDeque::new(),
             held: 0,
             budget,
@@ -404,13 +688,20 @@ impl<R: ReadAt> Archive<R> {
         })
     }
 
-    /// How entry `i` is compressed when it is written, and the most it can
-    /// compress to, if it is new data that a thread can compress: what
-    /// `write_entry` and `add_data` will decide, from the same dirent and
-    /// stat. It is checked again then ([`Precompressed::fits`]).
-    fn plan(&self, i: usize, stream: bool) -> Option<(Key, u64)> {
+    /// What writing entry `i` draws, and how a thread can compress and
+    /// encrypt it, if it is new data that one can: what `write_entry` and
+    /// `add_data` will decide, from the same dirent and stat. A thread's
+    /// work is checked again then ([`Precompressed::fits`]).
+    fn plan(&self, i: usize, stream: bool) -> Planned {
         let entry = &self.entry[i];
-        let source = entry.source.as_ref()?;
+        let Some(source) = entry.source.as_ref() else {
+            // Written again from the archive, or copied as it is.
+            let draw = match self.new_data(i) {
+                true => Draw::Unknown,
+                false => Draw::Nothing,
+            };
+            return Planned { i, draw, job: None };
+        };
         let mut de = match (entry.changes.as_deref(), entry.orig.as_deref()) {
             (None, orig) => Dirent::clone_changes(orig),
             (Some(changes), Some(orig)) => {
@@ -423,27 +714,63 @@ impl<R: ReadAt> Archive<R> {
         if self.want_torrentzip() {
             de.torrentzip_normalize();
         }
-        let st = source.stat().ok()?;
-        if st.valid & stat::COMP_METHOD != 0 && st.comp_method != cm::STORE
-            || st.valid & stat::ENCRYPTION_METHOD != 0 && st.encryption_method != em::NONE
-            || st.valid & stat::SIZE == 0
-        {
-            return None;
-        }
-        let method = cm_actual(de.comp_method);
-        if method == cm::STORE {
-            return None;
-        }
-        let most = maximum_compressed_size(method, st.size)?;
-        let header = encryption_header_length(de.encryption_method)?;
-        let key = Key {
-            source: Arc::clone(source),
-            method: de.comp_method,
-            level: de.compression_level,
-            first_read: BUFSIZE - header,
-            keep_compressing: stream && de.encryption_method != em::NONE,
+        let Ok(mut st) = source.stat() else {
+            // Writing it fails before it draws.
+            return Planned {
+                i,
+                draw: Draw::Unknown,
+                job: None,
+            };
         };
-        Some((key, most))
+        settle_methods(&mut st, &mut de);
+        let encrypts = needs(&st, &de, self.want_torrentzip()).encrypt;
+        let password = de.password.as_deref().or(self.default_password.as_deref());
+        // Without a password, or a method it has, it fails before it draws.
+        let draw = match (encrypts, de.encryption_method, password) {
+            (true, em::TRAD_PKWARE, Some(_)) => Draw::Bytes(CRYPTO_PKWARE_HEADERLEN - 1),
+            (true, method @ (em::AES_128 | em::AES_192 | em::AES_256), Some(_)) => {
+                Draw::Bytes(salt_length(method))
+            }
+            _ => Draw::Nothing,
+        };
+        let job = (|| {
+            if st.comp_method != cm::STORE
+                || st.encryption_method != em::NONE
+                || st.valid & stat::SIZE == 0
+            {
+                return None;
+            }
+            let method = cm_actual(de.comp_method);
+            if method == cm::STORE {
+                return None;
+            }
+            let encryption_method = match encrypts {
+                true => de.encryption_method,
+                false => em::NONE,
+            };
+            let header = encryption_header_length(encryption_method)?;
+            let most = maximum_compressed_size(method, st.size)?
+                .checked_add(encryption_overhead(encryption_method)?)?;
+            let encrypt = match (draw, password) {
+                (Draw::Bytes(_), Some(password)) => match encryption_method {
+                    // Its header ends with a time, which must not be now.
+                    em::TRAD_PKWARE => pkware_time(&de, &st)
+                        .map(|time| (encryption_method, Password::new(password), Some(time))),
+                    _ => Some((encryption_method, Password::new(password), None)),
+                },
+                _ => None,
+            };
+            let key = Key {
+                source: Arc::clone(source),
+                method: de.comp_method,
+                level: de.compression_level,
+                first_read: BUFSIZE - header,
+                keep_compressing: stream && encrypts,
+                encryption: None,
+            };
+            Some(PlannedJob { key, most, encrypt })
+        })();
+        Planned { i, draw, job }
     }
 }
 
@@ -472,10 +799,29 @@ mod tests {
     /// and `memory` for each: its bytes, and how many entries were taken
     /// from a thread.
     fn write(sizes: &[usize], threads: Threads, memory: u64, stream: bool) -> (Vec<u8>, usize) {
+        let (bytes, taken, _) = write_encrypted(sizes, threads, memory, stream, em::NONE);
+        (bytes, taken)
+    }
+
+    /// As [`write`], each entry encrypted with `encryption`: also how many
+    /// a thread encrypted.
+    fn write_encrypted(
+        sizes: &[usize],
+        threads: Threads,
+        memory: u64,
+        stream: bool,
+        encryption: u16,
+    ) -> (Vec<u8>, usize, usize) {
         TEST_MEMORY.with(|m| m.set(Some(memory)));
         TAKEN.with(|taken| taken.set(0));
+        ENCRYPTED.with(|n| n.set(0));
         let mut archive = Archive::open(&[][..], OpenFlags(0)).unwrap();
         archive.set_threads(threads);
+        let next = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        archive.set_random_source(Some(Arc::new(move |buf: &mut [u8]| {
+            buf.fill(next.fetch_add(1, Ordering::Relaxed));
+            Ok(())
+        })));
         for (i, &n) in sizes.iter().enumerate() {
             let data = text(i as u64, n);
             archive
@@ -485,6 +831,11 @@ mod tests {
                     Flags::NONE,
                 )
                 .unwrap();
+            if encryption != em::NONE {
+                archive
+                    .file_set_encryption(i as u64, encryption, Some(b"pw"))
+                    .unwrap();
+            }
         }
         let mut out = Cursor::new(Vec::new());
         if stream {
@@ -493,7 +844,49 @@ mod tests {
             archive.close_to(&mut out).unwrap();
         }
         TEST_MEMORY.with(|m| m.set(None));
-        (out.into_inner(), TAKEN.with(std::cell::Cell::get))
+        (
+            out.into_inner(),
+            TAKEN.with(std::cell::Cell::get),
+            ENCRYPTED.with(std::cell::Cell::get),
+        )
+    }
+
+    /// Encrypted entries larger than the threads may hold, charged with what
+    /// encrypting adds, are encrypted where they are written, with the bytes
+    /// drawn for them ahead; the threads encrypt every other one, and the
+    /// archive is the same.
+    #[test]
+    fn encrypted_larger_than_the_budget() {
+        let mut sizes = vec![300_000, 0, 1];
+        sizes.extend((0..30).map(|i| 1000 + i * 1500));
+        sizes.push(250_000);
+        sizes.extend((0..10).map(|i| 30_000 + i));
+        sizes.push(140_000);
+        let two = Threads::Exactly(NonZeroU32::new(2).unwrap());
+        for encryption in [em::AES_128, em::AES_256, em::TRAD_PKWARE] {
+            let overhead = encryption_overhead(encryption).unwrap();
+            for stream in [false, true] {
+                let (one, taken, _) =
+                    write_encrypted(&sizes, Threads::One, 64 << 10, stream, encryption);
+                assert_eq!(taken, 0);
+                for memory in [64 << 10, 36 << 10, 1 << 30] {
+                    let (got, taken, encrypted) =
+                        write_encrypted(&sizes, two, memory, stream, encryption);
+                    assert!(got == one, "{encryption}, {memory}: bytes differ");
+                    let large = sizes
+                        .iter()
+                        .filter(|&&n| {
+                            maximum_compressed_size(cm::DEFLATE, n as u64).unwrap()
+                                + overhead
+                                + ENTRY_COST
+                                > 2 * memory
+                        })
+                        .count();
+                    assert_eq!(taken, sizes.len() - large, "{encryption}, {memory}");
+                    assert_eq!(encrypted, taken, "{encryption}, {memory}");
+                }
+            }
+        }
     }
 
     /// Entries larger than the threads may hold are compressed where they
@@ -546,6 +939,7 @@ mod tests {
                 level: 0,
                 first_read: BUFSIZE,
                 keep_compressing: false,
+                encryption: None,
             },
             open: Ok(()),
             data: b"abc".to_vec(),

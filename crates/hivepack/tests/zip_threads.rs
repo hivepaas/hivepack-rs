@@ -8,8 +8,8 @@
 use std::io::{self, Cursor, Write};
 use std::num::NonZeroU32;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use hivepack::Threads;
 use hivepack::zip::{
@@ -76,6 +76,41 @@ fn noise(seed: u64, n: usize) -> Vec<u8> {
 fn counting() -> RandomSource {
     let next = Arc::new(AtomicU64::new(1));
     Arc::new(move |buf: &mut [u8]| {
+        for b in buf {
+            *b = next.fetch_add(1, Ordering::Relaxed) as u8;
+        }
+        Ok(())
+    })
+}
+
+/// The size of each draw of a random source, in order.
+#[derive(Clone, Default)]
+struct Draws(Arc<Mutex<Vec<usize>>>);
+
+impl Draws {
+    fn get(&self) -> Vec<usize> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+/// Random bytes as [`counting`] gives them, each draw kept in `draws`; the
+/// draw numbered `fail_at` (from 0) fails, and those after it. Each must be
+/// drawn on the thread writing, not one of those compressing.
+fn recording(draws: &Draws, fail_at: Option<usize>) -> RandomSource {
+    let draws = draws.clone();
+    let next = Arc::new(AtomicU64::new(1));
+    Arc::new(move |buf: &mut [u8]| {
+        assert_ne!(
+            std::thread::current().name(),
+            Some("zip-compress"),
+            "drawn in a thread compressing"
+        );
+        let mut draws = draws.0.lock().unwrap();
+        let n = draws.len();
+        draws.push(buf.len());
+        if fail_at.is_some_and(|at| n >= at) {
+            return Err(io::Error::other("no more"));
+        }
         for b in buf {
             *b = next.fetch_add(1, Ordering::Relaxed) as u8;
         }
@@ -166,7 +201,31 @@ struct Spec {
     /// the method and level; none leaves libzip's default
     method: Option<(i32, u32)>,
     encryption: Option<u16>,
+    /// the entry's own password, or the archive's default
+    password: Password,
+    /// the time set for the entry, which ZipCrypto's header then ends with
+    mtime: Option<i64>,
     source: SourceKind,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Password {
+    Own(&'static [u8]),
+    Default,
+}
+
+impl Spec {
+    fn password(&self) -> &'static [u8] {
+        match self.password {
+            Password::Own(password) => password,
+            Password::Default => DEFAULT_PASSWORD,
+        }
+    }
+
+    fn encrypted(mut self, method: u16) -> Spec {
+        self.encryption = Some(method);
+        self
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -182,11 +241,14 @@ fn spec(name: impl Into<String>, data: Vec<u8>, method: Option<(i32, u32)>) -> S
         data: data.into(),
         method,
         encryption: None,
+        password: Password::Own(PASSWORD),
+        mtime: None,
         source: SourceKind::Buffer,
     }
 }
 
 const PASSWORD: &[u8] = b"secret";
+const DEFAULT_PASSWORD: &[u8] = b"the default";
 
 fn deflate(level: u32) -> Option<(i32, u32)> {
     Some((i32::from(cm::DEFLATE), level))
@@ -194,8 +256,18 @@ fn deflate(level: u32) -> Option<(i32, u32)> {
 
 /// The archive of `specs`, from nothing, to be written with `threads`.
 fn archive(specs: &[Spec], threads: Threads) -> Archive<&'static [u8]> {
+    archive_drawing(specs, threads, counting())
+}
+
+/// The archive of `specs`, its random bytes from `random`.
+fn archive_drawing(
+    specs: &[Spec],
+    threads: Threads,
+    random: RandomSource,
+) -> Archive<&'static [u8]> {
     let mut archive = Archive::open(&[][..], OpenFlags(0)).unwrap();
-    archive.set_random_source(Some(counting()));
+    archive.set_random_source(Some(random));
+    archive.set_default_password(Some(DEFAULT_PASSWORD));
     archive.set_threads(threads);
     add(&mut archive, specs);
     archive
@@ -225,9 +297,16 @@ fn add<R: hivepack::zip::ReadAt>(archive: &mut Archive<R>, specs: &[Spec]) {
             archive.set_file_compression(index, method, level).unwrap();
         }
         if let Some(method) = s.encryption {
+            let password = match s.password {
+                Password::Own(password) => Some(password),
+                Password::Default => None,
+            };
             archive
-                .file_set_encryption(index, method, Some(PASSWORD))
+                .file_set_encryption(index, method, password)
                 .unwrap();
+        }
+        if let Some(mtime) = s.mtime {
+            archive.file_set_mtime(index, mtime, Flags::NONE).unwrap();
         }
     }
 }
@@ -277,8 +356,11 @@ fn reads_back(bytes: &[u8], specs: &[Spec]) {
             s.name.as_bytes()
         );
         let mut body = Vec::new();
+        let password = s.encryption.map(|_| s.password());
         io::copy(
-            &mut archive.fopen_index(i as u64, Flags::NONE).unwrap(),
+            &mut archive
+                .fopen_index_encrypted(i as u64, Flags::NONE, password)
+                .unwrap(),
             &mut body,
         )
         .unwrap();
@@ -644,4 +726,312 @@ fn files_on_disk() {
     info_zip_agrees(&one.0, "disk", true);
     info_zip_agrees(&one.1, "disk-stream", true);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `specs` written as [`same_bytes`] writes them, drawing from a source
+/// that keeps each draw (`fail_at` failing): the same draws, in the same
+/// order and sizes, as with one thread, as well as the same bytes. That of
+/// one thread is returned, for a file then a stream.
+fn same_draws(what: &str, specs: &[Spec], fail_at: Option<usize>) -> (Written, Written) {
+    let write = |threads: Threads, stream: bool| {
+        let draws = Draws::default();
+        let mut archive = archive_drawing(specs, threads, recording(&draws, fail_at));
+        let written = match stream {
+            true => streamed(&mut archive),
+            false => seekable(&mut archive),
+        };
+        (written, draws.get())
+    };
+    let mut ones = Vec::new();
+    for stream in [false, true] {
+        let (one, one_draws) = write(Threads::One, stream);
+        for threads in many() {
+            let (got, draws) = write(threads, stream);
+            assert!(got.1 == one.1, "{what}, {threads:?}, {stream}: {:?}", got.1);
+            assert!(
+                got.0 == one.0,
+                "{what}, {threads:?}, {stream}: bytes differ"
+            );
+            assert_eq!(draws, one_draws, "{what}, {threads:?}, {stream}: draws");
+        }
+        ones.push(one);
+    }
+    let stream = ones.pop().unwrap();
+    (ones.pop().unwrap(), stream)
+}
+
+/// Many small files, encrypted in threads with each method, among others
+/// not encrypted: the same bytes and draws as with one thread, and `unzip`
+/// reads what it can of them.
+#[test]
+fn encrypted_in_threads() {
+    let methods = [
+        Some(em::AES_128),
+        Some(em::AES_192),
+        Some(em::AES_256),
+        Some(em::TRAD_PKWARE),
+        None,
+    ];
+    let specs: Vec<Spec> = (0..500u64)
+        .map(|i| {
+            let n = ((i * 53) % 9000) as usize;
+            let data = if i % 7 == 0 { noise(i, n) } else { text(i, n) };
+            let method = match i % 3 {
+                0 => None,
+                1 => deflate(6),
+                _ => Some((i32::from(cm::ZSTD), 3)),
+            };
+            let mut s = spec(format!("enc/{i}"), data, method);
+            s.encryption = methods[(i % 5) as usize];
+            s
+        })
+        .collect();
+    let (seek, stream) = same_draws("encrypted in threads", &specs, None);
+    reads_back(&seek.0, &specs);
+    reads_back(&stream.0, &specs);
+    info_zip_agrees(&seek.0, "enc-threads", true);
+    info_zip_agrees(&stream.0, "enc-threads-stream", true);
+}
+
+/// A password up to its first NUL byte, as libzip takes it.
+fn c_str(password: &'static [u8]) -> &'static [u8] {
+    let end = password
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(password.len());
+    &password[..end]
+}
+
+/// Each entry with its own password, or the archive's default; ZipCrypto
+/// whose header ends with the time set for the entry, or with the source's.
+#[test]
+fn passwords_and_times() {
+    const OWN: [&[u8]; 3] = [b"one", b"two\0after the end", PASSWORD];
+    let specs: Vec<Spec> = (0..240u64)
+        .map(|i| {
+            let mut s = spec(format!("p{i}"), text(i, 100 + i as usize * 37), deflate(9));
+            s.encryption = Some(if i % 2 == 0 {
+                em::TRAD_PKWARE
+            } else {
+                em::AES_256
+            });
+            s.password = match i % 4 {
+                0 | 1 => Password::Default,
+                _ => Password::Own(OWN[(i / 4 % 3) as usize]),
+            };
+            if i % 3 == 0 {
+                s.mtime = Some(1_600_000_000 + i as i64 * 1000);
+            }
+            s
+        })
+        .collect();
+    let (seek, stream) = same_draws("passwords", &specs, None);
+    let specs: Vec<Spec> = specs
+        .iter()
+        .map(|s| {
+            let mut s = s.clone();
+            s.password = Password::Own(c_str(s.password()));
+            s
+        })
+        .collect();
+    reads_back(&seek.0, &specs);
+    reads_back(&stream.0, &specs);
+}
+
+/// Encrypted entries the threads do not encrypt, among those they do: too
+/// large for what the threads hold (the bytes of those after them are drawn
+/// before they are written), stored, not telling their size; and some of
+/// the default method that are stored as they do not compress.
+#[test]
+fn encrypted_on_the_thread_writing() {
+    let methods = [em::AES_256, em::TRAD_PKWARE, em::AES_128];
+    let mut specs = Vec::new();
+    let mut i = 0u64;
+    let mut next = |data: Vec<u8>, method: Option<(i32, u32)>| {
+        i += 1;
+        spec(format!("w{i}"), data, method).encrypted(methods[(i % 3) as usize])
+    };
+    for round in 0..2u64 {
+        for j in 0..20 {
+            specs.push(next(text(round * 100 + j, 3000), deflate(6)));
+        }
+        // Two threads hold 64 MiB: this is written on the thread writing.
+        specs.push(next(text(round, 66 << 20), deflate(1)));
+        for j in 0..10 {
+            specs.push(next(noise(round * 10 + j, 9000), None));
+            specs.push(next(
+                text(round * 10 + j, 5000),
+                Some((i32::from(cm::STORE), 0)),
+            ));
+            let mut no_size = next(text(round * 10 + j, 4000), deflate(6));
+            no_size.source = SourceKind::Unsized;
+            specs.push(no_size);
+            specs.push(spec(format!("plain{round}-{j}"), text(j, 2000), deflate(6)));
+        }
+    }
+    let two = Threads::Exactly(NonZeroU32::new(2).unwrap());
+    for stream in [false, true] {
+        let write = |threads: Threads| {
+            let draws = Draws::default();
+            let mut archive = archive_drawing(&specs, threads, recording(&draws, None));
+            let written = match stream {
+                true => streamed(&mut archive),
+                false => seekable(&mut archive),
+            };
+            (written, draws.get())
+        };
+        let one = write(Threads::One);
+        assert!(one.0.1.is_ok());
+        for threads in [two, Threads::Auto] {
+            let got = write(threads);
+            assert!(got.0.1 == one.0.1, "{threads:?}, {stream}");
+            assert!(got.0.0 == one.0.0, "{threads:?}, {stream}: bytes differ");
+            assert_eq!(got.1, one.1, "{threads:?}, {stream}: draws");
+        }
+        reads_back(&one.0.0, &specs);
+    }
+}
+
+/// An archive opened and edited, entries of it encrypted again or
+/// compressed again among new ones encrypted in threads: what those draw is
+/// told only when they are written, so none is drawn past them before.
+#[test]
+fn encrypted_again_from_the_archive() {
+    let first: Vec<Spec> = (0..40u64)
+        .map(|i| {
+            let s = spec(
+                format!("old{i}"),
+                text(i, 3000 + i as usize * 100),
+                deflate(6),
+            );
+            if i % 3 == 0 {
+                s.encrypted(em::TRAD_PKWARE)
+            } else {
+                s
+            }
+        })
+        .collect();
+    let (base, _) = same_bytes("base", &first);
+    let base: &'static [u8] = Vec::leak(base.0);
+    let edit = |threads: Threads, stream: bool| {
+        let draws = Draws::default();
+        let mut archive = Archive::open(base, OpenFlags::CHECKCONS).unwrap();
+        archive.set_random_source(Some(recording(&draws, None)));
+        archive.set_default_password(Some(PASSWORD));
+        archive.set_threads(threads);
+        for i in 0..40u64 {
+            match i % 5 {
+                0 => archive.file_set_encryption(i, em::AES_192, Some(b"new")),
+                1 => archive.set_file_compression(i, i32::from(cm::BZIP2), 3),
+                2 => archive.file_set_encryption(i, em::NONE, None),
+                _ => Ok(()),
+            }
+            .unwrap();
+        }
+        let more: Vec<Spec> = (0..60u64)
+            .map(|i| {
+                spec(format!("new{i}"), text(600 + i, 7000), deflate(9)).encrypted(if i % 2 == 0 {
+                    em::AES_256
+                } else {
+                    em::TRAD_PKWARE
+                })
+            })
+            .collect();
+        add(&mut archive, &more);
+        // New ones replacing old ones, among them.
+        for i in (3..40u64).step_by(6) {
+            archive
+                .file_replace(
+                    i,
+                    BufferSource::with_mtime(text(900 + i, 6000), 1_700_000_000),
+                    Flags::NONE,
+                )
+                .unwrap();
+            archive
+                .file_set_encryption(i, em::AES_128, Some(b"replaced"))
+                .unwrap();
+        }
+        let written = match stream {
+            true => streamed(&mut archive),
+            false => seekable(&mut archive),
+        };
+        (written, draws.get())
+    };
+    for stream in [false, true] {
+        let one = edit(Threads::One, stream);
+        assert!(one.0.1.is_ok(), "{:?}", one.0.1);
+        assert!(!one.1.is_empty());
+        for threads in many() {
+            let got = edit(threads, stream);
+            assert!(got.0.1 == one.0.1, "{threads:?}, {stream}");
+            assert!(got.0.0 == one.0.0, "{threads:?}, {stream}: bytes differ");
+            assert_eq!(got.1, one.1, "{threads:?}, {stream}: draws");
+        }
+    }
+}
+
+/// The random source failing at a draw: the same error, after the same
+/// bytes, and no draw after it.
+#[test]
+fn random_source_fails() {
+    let specs: Vec<Spec> = (0..120u64)
+        .map(|i| {
+            let s = spec(format!("r{i}"), text(i, 2000 + i as usize * 50), deflate(6));
+            match i % 3 {
+                0 => s.encrypted(em::AES_256),
+                1 => s.encrypted(em::TRAD_PKWARE),
+                _ => s,
+            }
+        })
+        .collect();
+    for at in [0, 1, 17, 60] {
+        let (seek, stream) = same_draws(&format!("fails at {at}"), &specs, Some(at));
+        for written in [seek, stream] {
+            let err = written.1.unwrap_err();
+            assert_eq!(err.code(), ErrorCode::Internal, "{at}");
+        }
+    }
+}
+
+/// An entry that fails, encrypted: the same error and bytes as one thread.
+/// What one thread draws is drawn first, in order; only the entries after
+/// the one that failed may have drawn more.
+#[test]
+fn encrypted_entry_fails() {
+    let mut specs: Vec<Spec> = (0..60u64)
+        .map(|i| spec(format!("e{i}"), text(i, 30_000), deflate(6)).encrypted(em::AES_256))
+        .collect();
+    specs[20].source = SourceKind::FailingAt(10_000);
+    // WinZip AES refuses an empty password, once it drew the salt.
+    specs[40].password = Password::Own(b"");
+    for (what, specs) in [
+        ("source", specs.clone()),
+        ("password", specs[21..].to_vec()),
+    ] {
+        for stream in [false, true] {
+            let write = |threads: Threads| {
+                let draws = Draws::default();
+                let mut archive = archive_drawing(&specs, threads, recording(&draws, None));
+                let written = match stream {
+                    true => streamed(&mut archive),
+                    false => seekable(&mut archive),
+                };
+                (written, draws.get())
+            };
+            let one = write(Threads::One);
+            assert!(one.0.1.is_err(), "{what}");
+            for threads in many() {
+                let got = write(threads);
+                assert!(got.0.1 == one.0.1, "{what}, {threads:?}, {stream}");
+                assert!(
+                    got.0.0 == one.0.0,
+                    "{what}, {threads:?}, {stream}: bytes differ"
+                );
+                assert!(
+                    got.1.starts_with(&one.1),
+                    "{what}, {threads:?}, {stream}: draws"
+                );
+            }
+        }
+    }
 }

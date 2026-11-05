@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- `zip`: `Archive::set_threads` compresses new data in threads, ahead of the entry being written, the entries still written in order on the caller's thread, encrypted there; the archive is the same, byte for byte, as with one thread, and so is an error and what was written before it. Up to 32 MiB per thread waits to be written; a larger entry is compressed as it is written. See [docs/zip.md](docs/zip.md#compressing-in-threads).
+- `zip`: `Archive::set_threads` compresses and encrypts new data in threads, ahead of the entry being written, the entries still written in order on the caller's thread, which draws the random bytes of salts and headers ahead in the order one thread draws them; the archive is the same, byte for byte, as with one thread, and so is an error and what was written before it. Up to 32 MiB per thread waits to be written; a larger entry is compressed and encrypted as it is written. See [docs/zip.md](docs/zip.md#compressing-in-threads).
 
 ## 0.6.0
 

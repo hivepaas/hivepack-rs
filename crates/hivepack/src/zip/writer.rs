@@ -11,6 +11,7 @@
 
 use std::io::{Read, Seek, Write};
 
+use crate::zip::close_threads::Taken;
 use crate::zip::error::{Error, ErrorCode, Result};
 use crate::zip::open::Archive;
 use crate::zip::random::RandomSource;
@@ -208,8 +209,13 @@ impl<W: Write + Seek> Writer<W> {
 
     /// Writes the entry `i`, whose data its source holds.
     fn write(&mut self, i: usize) -> Result<()> {
-        self.archive
-            .write_entry(i, &mut self.out, &mut None, &mut Vec::new(), None)?;
+        self.archive.write_entry(
+            i,
+            &mut self.out,
+            &mut None,
+            &mut Vec::new(),
+            Taken::default(),
+        )?;
         self.written.push(i);
         Ok(())
     }

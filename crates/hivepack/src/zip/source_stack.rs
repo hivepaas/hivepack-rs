@@ -559,7 +559,9 @@ pub(crate) struct WriteStack<'a, R: ?Sized> {
     pub(crate) compress: Option<Layer<Compress>>,
     /// Not in libzip: what a thread read and compressed of the base, which
     /// stands for the base and the layers up to the compressing one, the
-    /// others then none. The base still answers what is asked of the data.
+    /// others then none, and for the encrypting one too if the thread
+    /// encrypted it, which then only answers its stat and attributes. The
+    /// base still answers what is asked of the data.
     pub(crate) precompressed: Option<Layer<Precompressed>>,
     pub(crate) encrypt: Option<Layer<Encrypt>>,
 }
@@ -651,6 +653,13 @@ impl<R: ReadAt + ?Sized> WriteStack<'_, R> {
                     return Err(e);
                 }
                 layer.opened();
+                if layer.ctx.encrypted() {
+                    // The thread opened the encrypting layer too.
+                    if let Some(encrypt) = self.encrypt.as_mut() {
+                        encrypt.opened();
+                    }
+                    return Ok(());
+                }
             }
             None => self.open_below_encrypt()?,
         }
@@ -722,6 +731,13 @@ impl<R: ReadAt + ?Sized> WriteStack<'_, R> {
             precompressed,
             encrypt,
         } = self;
+        if let Some(layer) = precompressed.as_mut()
+            && layer.ctx.encrypted()
+        {
+            // What the thread read of the encrypting layer.
+            layer.ctx.count_read();
+            return layer.read(data, &mut |ctx, buf| ctx.read(buf));
+        }
         let mut read_below_encrypt =
             |data: &mut [u8]| match (precompressed.as_mut(), compress.as_mut()) {
                 (Some(layer), _) => {
