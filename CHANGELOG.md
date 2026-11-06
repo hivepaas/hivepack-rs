@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.0
 
 - `extract`: `Links::Any` creates every symbolic link, its target as the archive has it, absolute or leading outside the destination too, as tar does, for archives that are trusted (a backup of one's own files). Links are still created after every other entry, so nothing is written through them, and a path under a link is still the link's; a target that is no path (empty, not UTF-8, a control character) is refused, and on Windows, into a folder, one from a root or a drive.
 - `extract`: `Options::on_links_outside`, with `Links::Inside`, is asked once, before anything is written, about the links whose targets lead outside or through another link, each with its target (`LinkOutside`): stop, leave them out, or create them (`OnLinksOutside`), so that an application can show them and let its user choose. See [docs/extract.md](docs/extract.md#options).
