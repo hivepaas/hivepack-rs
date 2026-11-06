@@ -30,6 +30,12 @@ dbg_macro = "deny"
 # Each format's module keeps the file names of the crate it was: `zip::zip`.
 module_inception = "allow"
 
+# docs.rs builds the default features unless told: memory, off by default for
+# its unsafe calls to the system, is documented there too. Not rar, which takes
+# UnRAR's license.
+[package.metadata.docs.rs]
+features = ["full", "memory"]
+
 [features]
 # Every format but RAR, whose code is under UnRAR's license: see LICENSE.md.
 default = ["full"]
