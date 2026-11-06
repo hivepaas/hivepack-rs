@@ -722,8 +722,9 @@ pub(crate) fn link_to(
         })
         .map(|other| ErrorKind::LinkChain { other }),
     };
-    if rooted(&text) {
-        // Not to be created here, whatever the options, nor asked about.
+    if rooted(&text) && !options.into_archive {
+        // Not to be created here, whatever the options, nor asked about; an
+        // archive a Sink makes holds it.
         return LinkChecked::unread(refused.unwrap_or(ErrorKind::LinkTarget(NameError::Absolute)));
     }
     LinkChecked {
@@ -735,8 +736,8 @@ pub(crate) fn link_to(
     }
 }
 
-/// Whether a link to `target` cannot be created on this system, wherever it
-/// leads: on Windows, one from a root or a drive (`\\x`, `C:x`), which cap-std
+/// Whether a link to `target` cannot be created in a folder on this system,
+/// wherever it leads: on Windows, one from a root or a drive (`\\x`, `C:x`), which cap-std
 /// refuses to create.
 fn rooted(target: &str) -> bool {
     cfg!(windows) && (target.starts_with(['/', '\\']) || target.get(1..2) == Some(":"))
