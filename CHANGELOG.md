@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `memory`, a new module behind a feature of the same name, off by default: `memory::available()` measures how much memory the program may still take, the least of what the system has free and what its limits leave it, and says which bound applied (`Bound::System`, `ControlGroup`, `Ulimit`, `JobObject`). On Linux, `MemAvailable`, each control group from the program's own up to the root (version 2, and version 1's memory controller), and `ulimit -v` and `-d`; on Windows, the available physical memory and the job object's limits; on macOS, the pages free, of files and purgeable. `memory::Budget` shares memory between jobs at once: `hold_threads(wanted, need)` gives the most threads whose estimate fits what is left, one at least, and holds it until the `Held` is dropped. Nothing in hivepack calls it: [docs/memory.md](docs/memory.md#wiring-it-to-the-coders) shows how an application hands the threads and bytes to each coder. It calls the system through `unsafe` code on Windows and macOS ([docs/unsafe.md](docs/unsafe.md#system-calls)), with windows-sys and libc, and rustix on Linux.
+
 ## 0.7.0
 
 - `zip`: `Archive::set_threads` compresses and encrypts new data in threads, ahead of the entry being written, the entries still written in order on the caller's thread, which draws the random bytes of salts and headers ahead in the order one thread draws them; the archive is the same, byte for byte, as with one thread, and so is an error and what was written before it. Up to 32 MiB per thread waits to be written; a larger entry is compressed and encrypted as it is written. See [docs/zip.md](docs/zip.md#compressing-in-threads).

@@ -51,7 +51,14 @@ cap-std = { version = "4.0.3", default-features = false }
 cap-fs-ext = { version = "4.0.3", default-features = false, features = ["std"] }
 # Extended attributes by file descriptor, for macOS's quarantine attribute,
 # which the standard library does not wrap. cap-std already depends on it.
+# hivepack::memory takes its `getrlimit` on Linux.
 rustix = { version = "1.1.6", default-features = false, features = ["fs", "std"] }
+# What the system says of its memory, for hivepack::memory, where neither the
+# standard library nor rustix has it: macOS's page counts (libc), and
+# Windows' free memory and job objects (windows-sys). Both are already in the
+# tree, under rustix and cap-std.
+libc = { version = "0.2.172", default-features = false }
+windows-sys = { version = "0.61", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

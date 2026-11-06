@@ -416,6 +416,7 @@ dependencies = [
  "hkdf",
  "hmac",
  "hpke",
+ "libc",
  "liblzma",
  "libz-sys",
  "lz4",
@@ -431,6 +432,7 @@ dependencies = [
  "sha1",
  "sha2",
  "subtle",
+ "windows-sys 0.61.2",
  "zstd",
 ]
 
