@@ -349,13 +349,28 @@ pub struct Options {
     /// depend on, in a solid block or stream, is still read.
     pub select: Option<Select>,
     /// How many threads extraction may use, at most; one by default. Where the
-    /// archive's entries are apart (ZIP), that many files are written at once,
-    /// each read and decompressed in a thread of its own. In 7z, a folder whose
-    /// LZMA2 stream resets its dictionary on the way (7-Zip's in threads,
-    /// [`Lzma2Blocks`](crate::sevenz::Lzma2Blocks)) is decompressed a block in
-    /// each thread, its files still written one after another. What is written
-    /// is the same.
+    /// archive's entries are apart (ZIP, and RAR that is not solid), that many
+    /// files are written at once, each read and decompressed in a thread of
+    /// its own. In 7z, a folder whose LZMA2 stream resets its dictionary on the
+    /// way (7-Zip's in threads, [`Lzma2Blocks`](crate::sevenz::Lzma2Blocks)) is
+    /// decompressed a block in each thread, its files still written one after
+    /// another. What is written is the same.
     pub threads: Threads,
+    /// The memory the threads may take, where each holds what it decompresses
+    /// with: RAR's ([`extract_rar`](crate::extract::extract_rar)), whose every
+    /// thread has a window as large as the archive's dictionary asks, and
+    /// PPMd's model in RAR 4. The threads are lowered until what they take,
+    /// counted for the most each may hold, fits; one is always allowed, as it
+    /// takes what extracting without threads does. None by default. See
+    /// [docs/memory.md](https://github.com/hivepaas/hivepack-rs/blob/main/docs/memory.md#readers).
+    pub memory_limit: Option<u64>,
+    /// Where the memory of the threads is held from, once what they need is
+    /// known, after the first reading: the most threads that fit what is left
+    /// of it ([`Budget::hold_threads`](crate::memory::Budget::hold_threads)),
+    /// held until the extraction is done, and no more than
+    /// [`Options::memory_limit`] lets. None by default.
+    #[cfg(feature = "memory")]
+    pub memory_budget: Option<crate::memory::Budget>,
     /// Whether the destination takes two names that differ only in case, or in
     /// how their Unicode is composed, for one, as found there; the system's
     /// default if it could not be.
@@ -368,8 +383,8 @@ pub struct Options {
 /// Shows the options, not the password or the progress function.
 impl std::fmt::Debug for Options {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Options")
-            .field("limits", &self.limits)
+        let mut f = f.debug_struct("Options");
+        f.field("limits", &self.limits)
             .field("password", &self.password.as_ref().map(|_| ".."))
             .field("links", &self.links)
             .field("links_outside", &self.links_outside)
@@ -392,7 +407,10 @@ impl std::fmt::Debug for Options {
             .field("origin", &self.origin)
             .field("select", &self.select.as_ref().map(|_| ".."))
             .field("threads", &self.threads)
-            .field("folds", &self.folds)
+            .field("memory_limit", &self.memory_limit);
+        #[cfg(feature = "memory")]
+        f.field("memory_budget", &self.memory_budget);
+        f.field("folds", &self.folds)
             .field("into_archive", &self.into_archive)
             .finish()
     }

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- `extract`: `extract_rar` with `Options::threads` writes the files of an archive that is not solid at once, each by a thread that opens the archive itself and goes through its headers: files larger than a share of the whole first, largest first, then the rest in the archive's order; the directories before, and hard links, file copies and links written as files after, in order. What is written, and the summary, are the same as with one thread. 22,540 files of 343 MB extract in 1.18 s on one thread, 0.28 s on eight and 0.22 s on sixteen. A solid archive is read on one thread, as before. See [docs/extract.md](docs/extract.md#threads).
+- `extract`: `Options::memory_limit` lowers those threads until each one's window, as large as the archive's dictionary asks, and PPMd's model in RAR 4, fit; and with the feature `memory`, `Options::memory_budget` holds them from a `memory::Budget` once the first reading knows what they need. See [docs/memory.md](docs/memory.md#readers).
+- `extract`: outside a solid stream, RAR entries that are not written (left out, or not picked by `Options::select`) are passed over, not decompressed: the data a picked file needs is its own.
+- Breaking: `extract_rar`'s `open` is `Fn` and `Sync`, as each thread calls it. `extract_rar_to` takes an `FnMut`, as before.
+- `extract`: a RAR header that is no link no longer counts the target of a link before it, which a header keeps, when the two readings are compared.
+
 ## 0.9.0
 
 - `extract`: `Links::Any` creates every symbolic link, its target as the archive has it, absolute or leading outside the destination too, as tar does, for archives that are trusted (a backup of one's own files). Links are still created after every other entry, so nothing is written through them, and a path under a link is still the link's; a target that is no path (empty, not UTF-8, a control character) is refused, and on Windows, into a folder, one from a root or a drive.
