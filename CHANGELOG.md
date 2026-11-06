@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `zip`: an archive that is Zip64 for its count of entries alone (more than 65,535), with data descriptors of 4-byte sizes, as Info-ZIP's zip, libarchive and File Roller write them for entries that need no more, opens with its local headers checked (`OpenFlags::CHECKCONS`). It was refused with "local and central headers do not match", as libzip refuses it: it read every descriptor's sizes as 8 bytes. A descriptor's sizes are now 4 bytes when that much is the compressed size of the central directory and a header follows, and 8 otherwise, as before.
+
 ## 0.9.0
 
 - `extract`: `Links::Any` creates every symbolic link, its target as the archive has it, absolute or leading outside the destination too, as tar does, for archives that are trusted (a backup of one's own files). Links are still created after every other entry, so nothing is written through them, and a path under a link is still the link's; a target that is no path (empty, not UTF-8, a control character) is refused, and on Windows, into a folder, one from a root or a drive.

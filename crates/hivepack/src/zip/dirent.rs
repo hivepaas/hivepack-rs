@@ -280,6 +280,30 @@ fn read_fixed(fixed: &mut Buffer<'_>, local: bool) -> Result<(Box<Dirent>, u16, 
     Ok((zde, filename_len, ef_len, comment_len))
 }
 
+/// Whether the data descriptor `dd` is at, past its signature, has 4-byte
+/// sizes: its compressed size, so read, is `central_compressed_size`, and
+/// what follows is the next local header, the central directory, or the
+/// archive extra data record before it.
+fn narrow_data_descriptor(dd: &Buffer<'_>, central_compressed_size: u64) -> bool {
+    let at = dd.offset() as usize;
+    let Some(rest) = dd.data().get(at..) else {
+        return false;
+    };
+    let Some(comp_size) = rest.get(4..8) else {
+        return false;
+    };
+    u64::from(u32::from_le_bytes([
+        comp_size[0],
+        comp_size[1],
+        comp_size[2],
+        comp_size[3],
+    ])) == central_compressed_size
+        && matches!(
+            rest.get(12..16),
+            Some(b"PK\x03\x04" | b"PK\x01\x02" | b"PK\x06\x08")
+        )
+}
+
 /// The file name, the extra fields and the comment of a directory entry, what
 /// they say, and the data descriptor of a local one.
 #[allow(clippy::too_many_arguments)]
@@ -436,13 +460,22 @@ fn read_variable<R: ReadAt + ?Sized>(
         if dd.peek(MAGIC_LEN) == Some(&DATADES_MAGIC[..]) {
             dd.skip(MAGIC_LEN);
         }
+        // Differs from libzip, which takes a data descriptor's sizes as 8
+        // bytes each in every archive with a Zip64 end of central directory. The appnote has them
+        // so only for an entry in Zip64 format, and writers (Info-ZIP's zip,
+        // libarchive, and so File Roller) give 4-byte ones to the entries
+        // that need no more, in an archive Zip64 for its count of entries
+        // alone: read as 8 bytes, those sizes are wrong, and the archive was
+        // refused. They are 4 bytes when that much is the compressed size the
+        // central directory says and a header follows.
+        let wide = is_zip64 && !narrow_data_descriptor(&dd, central_compressed_size);
         let df_crc = dd.get_32();
-        let df_comp_size = if is_zip64 {
+        let df_comp_size = if wide {
             dd.get_64()
         } else {
             u64::from(dd.get_32())
         };
-        let df_uncomp_size = if is_zip64 {
+        let df_uncomp_size = if wide {
             dd.get_64()
         } else {
             u64::from(dd.get_32())
