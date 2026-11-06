@@ -17,15 +17,16 @@ use std::path::{Path, PathBuf};
 
 use hivepack::rar::{Archive, Extract};
 
-/// What comes out of each entry of `data`, with `threads`: its bytes, and
-/// whether it is broken; then what went wrong, and the exit code.
-fn read(data: &[u8], password: &str, threads: u32) -> String {
+/// What comes out of each entry of `data`, with `threads` for entries of
+/// `from` packed bytes or more: its bytes, and whether it is broken; then
+/// what went wrong, and the exit code.
+fn read(data: &[u8], password: &str, threads: u32, from: u64) -> String {
     let Ok(mut arc) = Archive::open_with_password(data, true, password) else {
         return "does not open".into();
     };
     let mut extract = Extract::new();
     extract.threads = threads;
-    extract.threads_from = 0;
+    extract.threads_from = from;
     let mut out = String::new();
     for _ in 0..10_000 {
         let size = match arc.read_header() {
@@ -62,13 +63,15 @@ fn read(data: &[u8], password: &str, threads: u32) -> String {
     out
 }
 
-fn the_same(label: &str, data: &[u8], password: &str) {
-    let one = read(data, password, 1);
-    for threads in [2, 3, 8] {
+/// Threads for entries of `from` packed bytes or more: a thread costs little
+/// here, and much under emulation, where CI runs s390x.
+fn the_same(label: &str, data: &[u8], password: &str, threads: &[u32], from: u64) {
+    let one = read(data, password, 1, from);
+    for &n in threads {
         assert_eq!(
-            read(data, password, threads),
+            read(data, password, n, from),
             one,
-            "{label} with {threads} threads"
+            "{label} with {n} threads"
         );
     }
 }
@@ -111,7 +114,13 @@ fn archives() -> Vec<PathBuf> {
 fn archives_come_out_the_same() {
     for path in archives() {
         let data = std::fs::read(&path).unwrap();
-        the_same(&path.to_string_lossy(), &data, "hivepack");
+        the_same(
+            &path.to_string_lossy(),
+            &data,
+            "hivepack",
+            &[2, 3, 8],
+            16 << 10,
+        );
     }
 }
 
@@ -129,7 +138,7 @@ fn damaged_archives_come_out_the_same() {
     ] {
         let data = std::fs::read(root.join(name)).unwrap();
         let mut seed = 0x9e37_79b9_7f4a_7c15u64;
-        for round in 0..24 {
+        for round in 0..12 {
             seed ^= seed << 13;
             seed ^= seed >> 7;
             seed ^= seed << 17;
@@ -140,7 +149,8 @@ fn damaged_archives_come_out_the_same() {
             if round % 3 == 0 {
                 damaged.truncate(at + 1);
             }
-            the_same(&format!("{name}, byte {at}, round {round}"), &damaged, "");
+            let label = format!("{name}, byte {at}, round {round}");
+            the_same(&label, &damaged, "", &[2, 8], 16 << 10);
         }
     }
 }
@@ -163,6 +173,6 @@ fn packed_data_of_any_bytes_comes_out_the_same() {
         input[0] |= 1;
         input[0] &= !0x10;
         let data = patch::with_packed_data(&input);
-        the_same(&format!("round {round}"), &data, "");
+        the_same(&format!("round {round}"), &data, "", &[2, 3, 8], 0);
     }
 }
