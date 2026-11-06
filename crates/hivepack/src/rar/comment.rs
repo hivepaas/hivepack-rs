@@ -126,6 +126,7 @@ impl<R: ReadAt> Archive<R> {
                 decrypt,
                 unp_volume: false,
                 next_volume_missing: false,
+                ahead: None,
             };
             unpack.do_unpack(unp_ver, false, &mut io)?;
             if self.format != Format::Rar14
@@ -258,6 +259,7 @@ impl<R: ReadAt> Archive<R> {
                 decrypt,
                 unp_volume: split_after,
                 next_volume_missing: false,
+                ahead: None,
             };
             if method == 0 {
                 unstore_file(&mut io, unp_size as u64)?;

@@ -149,7 +149,7 @@ jobs:
           for group in ${HIVEPACK_TESTDATA_REQUIRED//,/ }; do args+=(--group "$group"); done
           python scripts/testdata.py fetch "${args[@]}"
       - run: cargo test --workspace --locked
-      - run: cargo test -p hivepack --locked --features rar,memory --test extract_rar --test extract_rar_threads --test rar_oracle --test memory_limits
+      - run: cargo test -p hivepack --locked --features rar,memory --test extract_rar --test extract_rar_threads --test rar_oracle --test rar_threads --test memory_limits
       # hivepack::memory, off by default: its tests on each system (on
       # Windows, its own process in a job object), and the example that
       # wires it to the coders.

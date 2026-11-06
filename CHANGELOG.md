@@ -7,6 +7,7 @@
 - `extract`: outside a solid stream, RAR entries that are not written (left out, or not picked by `Options::select`) are passed over, not decompressed: the data a picked file needs is its own.
 - Breaking: `extract_rar`'s `open` is `Fn` and `Sync`, as each thread calls it. `extract_rar_to` takes an `FnMut`, as before.
 - `extract`: a RAR header that is no link no longer counts the target of a link before it, which a header keeps, when the two readings are compared.
+- `rar`: `Extract::threads` decodes an entry of RAR 5 or 7 in threads, as UnRAR's `-mt` does: each Huffman block decoded ahead in a thread of its own, and written into the window in order on the caller's thread. Not UnRAR's code, which differs from its own single thread on damaged data: `Unpack5`'s loop runs as it is and takes, at each block, what a thread decoded only where that is what it would decode itself, so what comes out is the same as with one thread, byte for byte, damaged data and errors too. Silesia's 211 MB as one entry, `-m3`: 0.46 s on one thread, 0.32 s on four or more, as UnRAR takes on eight. `Extract::threads_from`, 1 MiB by default, is the packed size from which an entry takes threads. Not for an entry going on in another volume, nor the older algorithms. See [docs/rar.md](docs/rar.md).
 
 ## 0.9.0
 

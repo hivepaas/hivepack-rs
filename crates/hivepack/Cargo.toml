@@ -418,6 +418,11 @@ path = "tests/rar_oracle.rs"
 required-features = ["deflate", "rar"]
 
 [[test]]
+name = "rar_threads"
+path = "tests/rar_threads.rs"
+required-features = ["deflate", "rar"]
+
+[[test]]
 name = "sevenz_methods"
 path = "tests/sevenz_methods.rs"
 required-features = ["crypto", "deflate", "sevenz", "zstd"]
