@@ -120,10 +120,13 @@ impl<'a> Destination<'a> {
                 dir.symlink_file(target, name)
             }
         };
+        // The target as it is, which the checks before took (Links::Inside
+        // keeps it inside, Links::Any anywhere): cap-std's `symlink` would
+        // refuse an absolute one. `name` is one name in `dir`, by its handle.
         #[cfg(not(windows))]
         let created = {
             let _ = to_dir;
-            dir.symlink(target, name)
+            dir.symlink_contents(target, name)
         };
         created.map_err(|e| match e.kind() {
             io::ErrorKind::AlreadyExists => ErrorKind::Exists,

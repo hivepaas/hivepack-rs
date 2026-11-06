@@ -101,8 +101,9 @@ pub use iso::{extract_iso, extract_iso_to};
 pub use name::{MAX_COMPONENT, Name, NameError, NameRules, check_name, check_name_for};
 pub use origin::Origin;
 pub use plan::{
-    Limits, Links, NameDecoder, Names, OnDamaged, OnDamagedFn, OnRefused, OnUnnamable,
-    OnUnnamableFn, Options, Packages, Permissions, Renamed, Select,
+    Limits, LinkOutside, Links, NameDecoder, Names, OnDamaged, OnDamagedFn, OnLinksOutside,
+    OnLinksOutsideFn, OnRefused, OnUnnamable, OnUnnamableFn, Options, Packages, Permissions,
+    Renamed, Select,
 };
 pub use progress::{Cancel, Progress, ProgressFn};
 #[cfg(feature = "rar")]

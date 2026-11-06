@@ -349,6 +349,19 @@ pub(crate) fn prepare(name: &str, backslash: bool, sanitize: bool) -> String {
     cleaned
 }
 
+/// A symbolic link's target as text, if it is a path at all, wherever it leads:
+/// not empty, UTF-8, and without a control character.
+pub(crate) fn link_text(target: &[u8]) -> Result<String, NameError> {
+    if target.is_empty() {
+        return Err(NameError::Empty);
+    }
+    let text = std::str::from_utf8(target).map_err(|_| NameError::NotUtf8)?;
+    if text.chars().any(|c| c.is_ascii_control()) {
+        return Err(NameError::Control);
+    }
+    Ok(text.to_owned())
+}
+
 /// Where a symbolic link at `parent` (its directory, under the
 /// destination) leads, as components under the destination: its target
 /// must be relative, with `/` its only separator, components that pass
@@ -360,13 +373,8 @@ pub(crate) fn link_target(
     parent: &[String],
     checks: Checks,
 ) -> Result<Vec<String>, NameError> {
-    if target.is_empty() {
-        return Err(NameError::Empty);
-    }
-    let text = std::str::from_utf8(target).map_err(|_| NameError::NotUtf8)?;
-    if text.chars().any(|c| c.is_ascii_control()) {
-        return Err(NameError::Control);
-    }
+    let text = link_text(target)?;
+    let text = text.as_str();
     // Windows' separator and drive, wherever the link is followed from.
     if text.contains('\\') {
         return Err(NameError::Backslash);

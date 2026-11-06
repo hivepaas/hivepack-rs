@@ -21,9 +21,9 @@ use crate::tar::{
 
 use crate::extract::destination::{Counted, Target, TargetFile};
 use crate::extract::error::{Error, ErrorKind};
-use crate::extract::name::{Name, NameError, link_on_the_way, link_target};
+use crate::extract::name::{Name, NameError};
 use crate::extract::plan::{Item, Kind, Links, OnDamaged, OnRefused, Options, check, fold};
-use crate::extract::plan::{named, settle, skips_links};
+use crate::extract::plan::{LinkTo, link_to, named, settle, settle_links, skips_links};
 use crate::extract::progress::Run;
 use crate::extract::sink::{Sink, SinkState};
 use crate::extract::zip::{Summary, open_destination, set_dir_times};
@@ -264,8 +264,8 @@ pub(crate) enum LinkPlan {
     Hard(Vec<String>),
 }
 
-/// The links' plans, checked: a symbolic link's target must stay inside
-/// and not pass through another link (with [`Links::Inside`]); a hard
+/// The links' plans, checked: a symbolic link's target as [`link_to`] and
+/// [`settle_links`] take it (with [`Links::Inside`] or [`Links::Any`]); a hard
 /// link's must name a file extracted before it. Those refused and skipped
 /// go to `skipped`.
 pub(crate) fn plan_links<S>(
@@ -291,6 +291,9 @@ pub(crate) fn plan_links<S>(
     let kept_indexes: std::collections::HashSet<u64> = kept.iter().map(|item| item.index).collect();
 
     let mut plans = HashMap::new();
+    let mut symlinks_checked = Vec::new();
+    // Those left out here, in the archive's order once the symbolic links are.
+    let mut left = Vec::new();
     for entry in entries {
         let Some(at) = entry.item else {
             continue;
@@ -307,20 +310,11 @@ pub(crate) fn plan_links<S>(
                 Links::AsFile => Ok(LinkPlan::SymlinkAsFile),
                 _ => {
                     let parent = &name.components[..name.components.len().saturating_sub(1)];
-                    link_target(&entry.target, parent, options.checks())
-                        .map_err(ErrorKind::LinkTarget)
-                        .and_then(|resolved| {
-                            // A link on the way, which the system would follow.
-                            let link_at = |walked: &[String]| symlinks.get(&fold(walked)).copied();
-                            if let Some(other) = link_on_the_way(&entry.target, parent, link_at) {
-                                return Err(ErrorKind::LinkChain { other });
-                            }
-                            let to_dir = dirs.contains_key(&fold(&resolved));
-                            Ok(LinkPlan::Symlink(
-                                String::from_utf8_lossy(&entry.target).into_owned(),
-                                to_dir,
-                            ))
-                        })
+                    symlinks_checked.push((
+                        item,
+                        link_to(&entry.target, parent, options, &symlinks, &dirs),
+                    ));
+                    continue;
                 }
             },
             Kind::HardLink => match name_of(&entry.target, options) {
@@ -341,10 +335,15 @@ pub(crate) fn plan_links<S>(
             Ok(plan) => {
                 plans.insert(item.index, plan);
             }
-            Err(kind) if skip(&kind) == OnRefused::Skip => skipped.push(item.error(kind)),
+            Err(kind) if skip(&kind) == OnRefused::Skip => left.push(item.error(kind)),
             Err(kind) => return Err(item.error(kind)),
         }
     }
+    for (item, LinkTo { target, to_dir }) in settle_links(symlinks_checked, options, &mut left)? {
+        plans.insert(item.index, LinkPlan::Symlink(target, to_dir));
+    }
+    left.sort_by_key(|error| error.index);
+    skipped.extend(left);
     Ok(plans)
 }
 

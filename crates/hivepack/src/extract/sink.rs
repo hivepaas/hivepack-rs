@@ -65,7 +65,10 @@ pub trait Sink {
     fn discard_file(&mut self);
 
     /// A symbolic link to `target`, relative to the link's directory, with `/` for
-    /// separator, which stays inside what is extracted.
+    /// separator, which stays inside what is extracted; with
+    /// [`Links::Any`](crate::extract::Links::Any), or created as
+    /// [`Options::on_links_outside`] answered, as the archive has it, which may
+    /// be absolute or lead outside.
     fn symlink(&mut self, entry: &Entry<'_>, target: &str) -> io::Result<()>;
 
     /// A hard link to the file at `target`, given before it.
