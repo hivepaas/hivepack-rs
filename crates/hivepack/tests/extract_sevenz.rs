@@ -18,7 +18,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
 use hivepack::extract::{
-    ErrorKind, Links, NameError, OnRefused, Options, Progress, Summary, extract_7z,
+    ErrorKind, LinkOutside, Links, NameError, OnLinksOutside, OnRefused, Options, Progress,
+    Summary, extract_7z,
 };
 use hivepack::sevenz::Archive;
 use support::{Scratch, listing, options};
@@ -239,6 +240,31 @@ fn links_are_refused_written_as_files_or_kept_inside() {
         );
         assert_eq!(std::fs::read(out.join("docs/link")).unwrap(), NOTES);
         assert!(!out.join("escape").exists());
+
+        // Anywhere, or asked about and created: both, as the archive has them.
+        let any = options(|o| o.links = Links::Any);
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let told = Arc::clone(&asked);
+        let create = options(|o| {
+            o.links = Links::Inside;
+            o.on_links_outside = Some(Arc::new(move |links: &[LinkOutside]| {
+                told.lock()
+                    .unwrap()
+                    .extend(links.iter().map(|l| l.target.clone()));
+                OnLinksOutside::Create
+            }));
+        });
+        for options in [any, create] {
+            let scratch = Scratch::new();
+            let out = scratch.out();
+            let summary = extract(&data, &out, &options).unwrap();
+            assert_eq!((summary.files, summary.links), (1, 2));
+            assert_eq!(
+                std::fs::read_link(out.join("escape")).unwrap(),
+                Path::new("../../etc/passwd")
+            );
+        }
+        assert_eq!(*asked.lock().unwrap(), ["../../etc/passwd"]);
     }
 }
 
@@ -393,7 +419,7 @@ fn damaged_archives_write_nothing_cut_off() {
             let Ok(mut opened) = Archive::open_with(Cursor::new(bad.clone()), &opening) else {
                 continue;
             };
-            let links = [Links::Refuse, Links::AsFile, Links::Inside][round % 3];
+            let links = [Links::Refuse, Links::AsFile, Links::Inside, Links::Any][(round / 2) % 4];
             let skip = if round % 2 == 0 {
                 OnRefused::Stop
             } else {

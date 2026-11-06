@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- `extract`: `Links::Any` creates every symbolic link, its target as the archive has it, absolute or leading outside the destination too, as tar does, for archives that are trusted (a backup of one's own files). Links are still created after every other entry, so nothing is written through them, and a path under a link is still the link's; a target that is no path (empty, not UTF-8, a control character) is refused, and on Windows one from a root or a drive.
+- `extract`: `Options::on_links_outside`, with `Links::Inside`, is asked once, before anything is written, about the links whose targets lead outside or through another link, each with its target (`LinkOutside`): stop, leave them out, or create them (`OnLinksOutside`), so that an application can show them and let its user choose. See [docs/extract.md](docs/extract.md#options).
+- `extract`: a `Sink` may be given a link's target as the archive has it, with `Links::Any` or `OnLinksOutside::Create`.
+
 ## 0.8.0
 
 - `memory`, a new module behind a feature of the same name, off by default: `memory::available()` measures how much memory the program may still take, the least of what the system has free and what its limits leave it, and says which bound applied (`Bound::System`, `ControlGroup`, `Ulimit`, `JobObject`). On Linux, `MemAvailable`, each control group from the program's own up to the root (version 2, and version 1's memory controller), and `ulimit -v` and `-d`; on Windows, the available physical memory and the job object's limits; on macOS, the pages free, of files and purgeable. `memory::Budget` shares memory between jobs at once: `hold_threads(wanted, need)` gives the most threads whose estimate fits what is left, one at least, and holds it until the `Held` is dropped. Nothing in hivepack calls it: [docs/memory.md](docs/memory.md#wiring-it-to-the-coders) shows how an application hands the threads and bytes to each coder. It calls the system through `unsafe` code on Windows and macOS ([docs/unsafe.md](docs/unsafe.md#system-calls)), with windows-sys and libc, and rustix on Linux.

@@ -16,9 +16,9 @@ use crate::sevenz::{Archive, Entry, Files};
 
 use crate::extract::destination::Target;
 use crate::extract::error::{Error, ErrorKind};
-use crate::extract::name::{NameError, link_on_the_way, link_target};
-use crate::extract::plan::{Item, Kind, Links, OnRefused, Options, check, fold};
-use crate::extract::plan::{named, settle, skips_links};
+use crate::extract::name::NameError;
+use crate::extract::plan::{Item, Kind, Links, Options, check, fold};
+use crate::extract::plan::{LinkChecked, LinkTo, link_to, named, settle, settle_links};
 use crate::extract::progress::Run;
 use crate::extract::sink::{Sink, SinkState};
 use crate::extract::tar::write_with;
@@ -148,10 +148,10 @@ fn read_target<R: Read + Seek>(
     }
 }
 
-/// The links to create, with [`Links::Inside`]: their targets read, which
-/// takes decoding the folders up to the last link, and checked to stay
-/// inside the destination and not to pass through another link of the
-/// archive. Those refused and skipped go to `skipped`.
+/// The links to create, with [`Links::Inside`] or [`Links::Any`]: their
+/// targets read, which takes decoding the folders up to the last link,
+/// checked ([`link_to`]) and settled ([`settle_links`]). Those refused and
+/// skipped go to `skipped`.
 fn links<'a, R: Read + Seek>(
     archive: &mut Archive<R>,
     kept: &[&'a Item],
@@ -196,39 +196,28 @@ fn links<'a, R: Read + Seek>(
     }
     drop(files);
 
-    let mut links = Vec::new();
-    for (item, read) in targets {
-        let Ok(name) = &item.name else {
-            continue;
-        };
-        let parent = &name.components[..name.components.len().saturating_sub(1)];
-        let checked = read.and_then(|target| {
-            let resolved =
-                link_target(&target, parent, options.checks()).map_err(ErrorKind::LinkTarget)?;
-            // A link on the way, which the system would follow.
-            let link_at = |walked: &[String]| paths.get(&fold(walked)).copied();
-            if let Some(other) = link_on_the_way(&target, parent, link_at) {
-                return Err(ErrorKind::LinkChain { other });
-            }
-            let to_dir = dirs.contains_key(&fold(&resolved));
-            // It was resolved, so it is UTF-8.
-            let target = String::from_utf8_lossy(&target).into_owned();
-            Ok((target, to_dir))
-        });
-        match (checked, skips_links(options)) {
-            (Ok((target, to_dir)), _) => links.push(Link {
+    let checked = targets
+        .into_iter()
+        .filter_map(|(item, read)| {
+            let name = item.name.as_ref().ok()?;
+            let parent = &name.components[..name.components.len().saturating_sub(1)];
+            Some((
                 item,
-                target,
-                to_dir,
-            }),
-            (
-                Err(kind @ (ErrorKind::LinkTarget(_) | ErrorKind::LinkChain { .. })),
-                OnRefused::Skip,
-            ) => skipped.push(item.error(kind)),
-            (Err(kind), _) => return Err(item.error(kind)),
-        }
-    }
-    Ok(links)
+                match read {
+                    Ok(target) => link_to(&target, parent, options, &paths, &dirs),
+                    Err(kind) => LinkChecked::unread(kind),
+                },
+            ))
+        })
+        .collect();
+    Ok(settle_links(checked, options, skipped)?
+        .into_iter()
+        .map(|(item, LinkTo { target, to_dir })| Link {
+            item,
+            target,
+            to_dir,
+        })
+        .collect())
 }
 
 /// Extracts the 7z archive `archive` into `destination`, which is created
@@ -333,12 +322,14 @@ fn extract_with<R: Read + Seek, T: Target>(
     let settled = settle(&mut items, options)?;
     let (kept, mut skipped) = check(&items, &settled, options)?;
     let links = match options.links {
-        Links::Inside => links(archive, &kept, &run, options, &mut skipped)?,
+        Links::Inside | Links::Any => links(archive, &kept, &run, options, &mut skipped)?,
         _ => Vec::new(),
     };
     // Links to create are written after the rest; with `AsFile` they are
     // files.
-    let created_later = |item: &Item| item.kind == Kind::Link && options.links == Links::Inside;
+    let created_later = |item: &Item| {
+        item.kind == Kind::Link && matches!(options.links, Links::Inside | Links::Any)
+    };
     let written_now: HashSet<u64> = kept
         .iter()
         .filter(|item| !created_later(item))

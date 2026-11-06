@@ -16,8 +16,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hivepack::extract::{
-    Cancel, ErrorKind, Limits, Links, NameError, Names, OnRefused, Options, Origin, Progress,
-    extract_zip,
+    Cancel, ErrorKind, Limits, LinkOutside, Links, NameError, Names, OnLinksOutside, OnRefused,
+    Options, Origin, Progress, extract_zip,
 };
 use hivepack::zip::{Archive, BufferSource, Flags, OpenFlags, em};
 use support::{
@@ -463,6 +463,161 @@ fn links_inside_the_destination_are_created() {
         "{error}"
     );
     assert!(listing(scratch.path()).is_empty());
+}
+
+/// With `Links::Any`, every link is created as the archive has it, last; a
+/// path under a link is still the link's, and a target that is no path is
+/// still refused.
+#[cfg(unix)]
+#[test]
+fn links_anywhere_are_created_with_links_any() {
+    let scratch = Scratch::new();
+    let data = zip(&[
+        Entry::Dir(b"lib/"),
+        Entry::File(b"lib/libfoo.so.1", b"elf"),
+        Entry::Mode(b"to-dir", b"lib", 0o120_777),
+        Entry::Mode(b"escape", b"../outside", 0o120_777),
+        Entry::Mode(b"absolute", b"/etc/passwd", 0o120_777),
+        Entry::Mode(b"through", b"to-dir/libfoo.so.1", 0o120_777),
+    ]);
+    let summary = extract(&data, &scratch.out(), &options(|o| o.links = Links::Any)).unwrap();
+    assert_eq!((summary.files, summary.links), (1, 4));
+    assert!(summary.skipped.is_empty());
+    let out = scratch.out();
+    for (link, target) in [
+        ("to-dir", "lib"),
+        ("escape", "../outside"),
+        ("absolute", "/etc/passwd"),
+        ("through", "to-dir/libfoo.so.1"),
+    ] {
+        assert_eq!(
+            std::fs::read_link(out.join(link)).unwrap(),
+            Path::new(target)
+        );
+    }
+    // Nothing beside the destination.
+    assert_eq!(listing(scratch.path()).len(), listing(&out).len() + 1);
+
+    // A file under a link that leads out: the same path as the link.
+    let scratch = Scratch::new();
+    let data = zip(&[
+        Entry::Mode(b"out", b"/tmp", 0o120_777),
+        Entry::File(b"out/x", b"through"),
+    ]);
+    let error = extract(&data, &scratch.out(), &options(|o| o.links = Links::Any)).unwrap_err();
+    assert!(matches!(error.kind, ErrorKind::Duplicate { .. }), "{error}");
+    assert!(listing(scratch.path()).is_empty());
+
+    // An empty target.
+    let scratch = Scratch::new();
+    let data = zip(&[Entry::Mode(b"empty", b"", 0o120_777)]);
+    let error = extract(&data, &scratch.out(), &options(|o| o.links = Links::Any)).unwrap_err();
+    assert!(
+        matches!(error.kind, ErrorKind::LinkTarget(NameError::Empty)),
+        "{error}"
+    );
+}
+
+/// With `Links::Inside`, the links that lead outside are asked about once,
+/// with their targets, before anything is written; as answered, they stop it,
+/// are left out, or are created.
+#[cfg(unix)]
+#[test]
+fn links_outside_are_asked_about_once() {
+    let data = zip(&[
+        Entry::Dir(b"lib/"),
+        Entry::File(b"lib/libfoo.so.1", b"elf"),
+        Entry::Mode(b"inside", b"lib/libfoo.so.1", 0o120_777),
+        Entry::Mode(b"escape", b"../outside", 0o120_777),
+        Entry::Mode(b"absolute", b"/etc/passwd", 0o120_777),
+        Entry::Mode(b"to-dir", b"lib", 0o120_777),
+        Entry::Mode(b"through", b"to-dir/libfoo.so.1", 0o120_777),
+    ]);
+    // Each question: the links told, by index, with their targets.
+    type Told = Arc<Mutex<Vec<Vec<(u64, String)>>>>;
+    let asking = |answer: OnLinksOutside, told: Told| {
+        options(move |o| {
+            o.links = Links::Inside;
+            o.on_links_outside = Some(Arc::new(move |links: &[LinkOutside]| {
+                told.lock().unwrap().push(
+                    links
+                        .iter()
+                        .map(|l| (l.error.index.unwrap(), l.target.clone()))
+                        .collect(),
+                );
+                answer
+            }));
+        })
+    };
+    let expected = vec![vec![
+        (3, "../outside".to_string()),
+        (4, "/etc/passwd".to_string()),
+        (6, "to-dir/libfoo.so.1".to_string()),
+    ]];
+
+    // Stop: nothing written.
+    let scratch = Scratch::new();
+    let told = Arc::new(Mutex::new(Vec::new()));
+    let error = extract(
+        &data,
+        &scratch.out(),
+        &asking(OnLinksOutside::Stop, told.clone()),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error.kind, ErrorKind::LinkTarget(NameError::Dot)),
+        "{error}"
+    );
+    assert_eq!(*told.lock().unwrap(), expected);
+    assert!(listing(scratch.path()).is_empty());
+
+    // Skip: left out, the rest created.
+    let scratch = Scratch::new();
+    let told = Arc::new(Mutex::new(Vec::new()));
+    let summary = extract(
+        &data,
+        &scratch.out(),
+        &asking(OnLinksOutside::Skip, told.clone()),
+    )
+    .unwrap();
+    assert_eq!(*told.lock().unwrap(), expected);
+    assert_eq!((summary.files, summary.links), (1, 2));
+    let skipped: Vec<_> = summary.skipped.iter().map(|e| e.index).collect();
+    assert_eq!(skipped, [Some(3), Some(4), Some(6)]);
+    assert!(scratch.out().join("absolute").symlink_metadata().is_err());
+
+    // Create: every one, as the archive has it.
+    let scratch = Scratch::new();
+    let told = Arc::new(Mutex::new(Vec::new()));
+    let summary = extract(
+        &data,
+        &scratch.out(),
+        &asking(OnLinksOutside::Create, told.clone()),
+    )
+    .unwrap();
+    assert_eq!(*told.lock().unwrap(), expected);
+    assert_eq!((summary.files, summary.links), (1, 5));
+    assert!(summary.skipped.is_empty());
+    assert_eq!(
+        std::fs::read_link(scratch.out().join("absolute")).unwrap(),
+        Path::new("/etc/passwd")
+    );
+    assert_eq!(
+        listing(scratch.path()).len(),
+        listing(&scratch.out()).len() + 1
+    );
+
+    // None leads outside: nothing is asked.
+    let scratch = Scratch::new();
+    let told = Arc::new(Mutex::new(Vec::new()));
+    let inside = zip(&[Entry::File(b"f", b"x"), Entry::Mode(b"l", b"f", 0o120_777)]);
+    extract(
+        &inside,
+        &scratch.out(),
+        &asking(OnLinksOutside::Stop, told.clone()),
+    )
+    .unwrap();
+    assert!(told.lock().unwrap().is_empty());
 }
 
 #[test]

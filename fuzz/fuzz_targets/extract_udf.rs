@@ -87,7 +87,7 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let mut options = Options::default();
-    options.links = [Links::Refuse, Links::AsFile, Links::Inside, Links::Inside][usize::from(choice >> 1 & 3)];
+    options.links = [Links::Refuse, Links::AsFile, Links::Inside, Links::Any][usize::from(choice >> 1 & 3)];
     options.names = if choice & 8 != 0 { Names::Sanitize } else { Names::Strict };
     options.backslash_separator = choice & 16 != 0;
     options.on_refused = if choice & 32 != 0 { OnRefused::Skip } else { OnRefused::Stop };
@@ -139,8 +139,12 @@ fuzz_target!(|data: &[u8]| {
     let (mut files, mut links) = (Vec::new(), Vec::new());
     walk(&out, &mut files, &mut links);
     for (link, target) in &links {
-        assert_eq!(options.links, Links::Inside, "a link created: {link:?}");
-        assert!(inside(&out, link, target), "{link:?} leads outside: {target:?}");
+        // Created only as asked; with Any, anywhere, but nothing written
+        // through it (nothing beside the destination, above).
+        assert!(matches!(options.links, Links::Inside | Links::Any), "a link created: {link:?}");
+        if options.links == Links::Inside {
+            assert!(inside(&out, link, target), "{link:?} leads outside: {target:?}");
+        }
     }
     // A hard link's file once.
     let mut inodes = HashSet::new();

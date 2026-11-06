@@ -9,7 +9,9 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use crate::extract::error::{Error, ErrorKind};
-use crate::extract::name::{Checks, Name, NameError, NameRules, renamed};
+use crate::extract::name::{
+    Checks, Name, NameError, NameRules, link_on_the_way, link_target, link_text, renamed,
+};
 use crate::extract::origin::Origin;
 use crate::extract::progress::{Cancel, ProgressFn};
 use crate::threads::Threads;
@@ -61,9 +63,20 @@ pub enum Links {
     AsFile,
     /// Create those whose target is relative and stays inside the
     /// destination, after every other entry, so that nothing is written
-    /// through them; refuse the others. On Windows, creating a link takes a
+    /// through them; refuse the others, or ask about them
+    /// ([`Options::on_links_outside`]). On Windows, creating a link takes a
     /// privilege that most accounts lack.
     Inside,
+    /// Create every one, its target as the archive has it, absolute or
+    /// leading outside the destination too, as tar does: after every other
+    /// entry, as with [`Links::Inside`], so that nothing is written through
+    /// them, and a name under a link is still the same path as the link
+    /// ([`ErrorKind::Duplicate`]). Only a target that is no path is refused
+    /// ([`ErrorKind::LinkTarget`]): empty, not UTF-8, or with a control
+    /// character; and on Windows one from a root or a drive, which cap-std
+    /// does not create. What is extracted can then lead elsewhere on the
+    /// system: for archives that are trusted, as a backup of one's own files.
+    Any,
 }
 
 /// How names are taken.
@@ -139,6 +152,40 @@ pub enum OnUnnamable {
 /// to do with them: called once, on the extracting thread, which waits for its
 /// answer.
 pub type OnUnnamableFn = Arc<dyn Fn(&[Error]) -> OnUnnamable + Send + Sync>;
+
+/// What to do with the symbolic links whose targets lead outside the destination,
+/// asked once, of all of them, before anything is written
+/// ([`Options::on_links_outside`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OnLinksOutside {
+    /// Stop, before anything is written (the default).
+    #[default]
+    Stop,
+    /// Leave them out, and extract the rest; they are in
+    /// [`Summary::skipped`](crate::extract::Summary::skipped).
+    Skip,
+    /// Create them, as [`Links::Any`] creates links: after every other entry,
+    /// their targets as the archive has them.
+    Create,
+}
+
+/// A symbolic link whose target leads outside the destination, as
+/// [`Options::on_links_outside`] is told it.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct LinkOutside {
+    /// The link, and why its target is refused ([`ErrorKind::LinkTarget`],
+    /// [`ErrorKind::LinkChain`]).
+    pub error: Error,
+    /// Its target, as the archive has it.
+    pub target: String,
+}
+
+/// Told the symbolic links whose targets lead outside the destination, and what
+/// to do with them: called once, on the extracting thread, which waits for its
+/// answer.
+pub type OnLinksOutsideFn = Arc<dyn Fn(&[LinkOutside]) -> OnLinksOutside + Send + Sync>;
 
 /// What permissions files get on Unix.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -233,7 +280,16 @@ pub struct Options {
     /// [`ErrorKind::LinkChain`]), with [`Links::Inside`]: as
     /// [`Options::on_refused`] says (the default), or left out whatever it says.
     /// Nothing is ever written through a link, as links are made last.
+    /// [`Options::on_links_outside`], if given, is asked instead.
     pub links_outside: OnRefused,
+    /// With [`Links::Inside`], asked once, before anything is written, what to do
+    /// with the symbolic links whose targets lead outside the destination or
+    /// through another link, each with its target: stop, leave them out, or
+    /// create them as [`Links::Any`] does ([`OnLinksOutside`]). Without it, they
+    /// are refused as [`Options::links_outside`] says. A target that is no path
+    /// (empty, not UTF-8, with a control character) is never asked about: it is
+    /// refused. Asked after [`Options::on_unnamable`], of the links it left.
+    pub on_links_outside: Option<OnLinksOutsideFn>,
     pub names: Names,
     /// Which systems' names an entry's has to be: this one's (the default), or
     /// every one's ([`NameRules`]).
@@ -317,6 +373,10 @@ impl std::fmt::Debug for Options {
             .field("password", &self.password.as_ref().map(|_| ".."))
             .field("links", &self.links)
             .field("links_outside", &self.links_outside)
+            .field(
+                "on_links_outside",
+                &self.on_links_outside.as_ref().map(|_| ".."),
+            )
             .field("names", &self.names)
             .field("name_rules", &self.name_rules)
             .field("on_unnamable", &self.on_unnamable.as_ref().map(|_| ".."))
@@ -604,6 +664,150 @@ pub(crate) fn skips_links(options: &Options) -> OnRefused {
     match (options.on_refused, options.links_outside) {
         (OnRefused::Skip, _) | (_, OnRefused::Skip) => OnRefused::Skip,
         _ => OnRefused::Stop,
+    }
+}
+
+/// A symbolic link to create: its target, and whether it leads to a directory
+/// of the archive (which Windows asks).
+pub(crate) struct LinkTo {
+    pub target: String,
+    pub to_dir: bool,
+}
+
+/// A symbolic link's target, checked as [`Options::links`] says, by [`link_to`]:
+/// the link it makes, if its target is a path at all, and why it is refused, if
+/// it is.
+pub(crate) struct LinkChecked {
+    link: Option<LinkTo>,
+    refused: Option<ErrorKind>,
+}
+
+impl LinkChecked {
+    /// Refused, with no link to create or ask about: its target too long, no
+    /// path, one this system cannot link to, or damaged as it was read.
+    pub(crate) fn unread(kind: ErrorKind) -> LinkChecked {
+        LinkChecked {
+            link: None,
+            refused: Some(kind),
+        }
+    }
+}
+
+/// The target of the symbolic link at `parent` (its directory), checked: with
+/// [`Links::Inside`], it must stay inside the destination and not pass through
+/// another link of the archive (`links`, by their folded paths); with
+/// [`Links::Any`], only be a path. `dirs` are the archive's directories, by
+/// their folded paths.
+pub(crate) fn link_to(
+    target: &[u8],
+    parent: &[String],
+    options: &Options,
+    links: &HashMap<String, u64>,
+    dirs: &HashMap<String, u64>,
+) -> LinkChecked {
+    let text = match link_text(target) {
+        Ok(text) => text,
+        Err(e) => return LinkChecked::unread(ErrorKind::LinkTarget(e)),
+    };
+    let resolved = link_target(target, parent, options.checks());
+    let to_dir = resolved
+        .as_ref()
+        .is_ok_and(|resolved| dirs.contains_key(&fold(resolved)));
+    let refused = match resolved {
+        _ if options.links == Links::Any => None,
+        Err(e) => Some(ErrorKind::LinkTarget(e)),
+        // A link on the way, which the system would follow.
+        Ok(_) => link_on_the_way(target, parent, |walked: &[String]| {
+            links.get(&fold(walked)).copied()
+        })
+        .map(|other| ErrorKind::LinkChain { other }),
+    };
+    if rooted(&text) {
+        // Not to be created here, whatever the options, nor asked about.
+        return LinkChecked::unread(refused.unwrap_or(ErrorKind::LinkTarget(NameError::Absolute)));
+    }
+    LinkChecked {
+        link: Some(LinkTo {
+            target: text,
+            to_dir,
+        }),
+        refused,
+    }
+}
+
+/// Whether a link to `target` cannot be created on this system, wherever it
+/// leads: on Windows, one from a root or a drive (`\\x`, `C:x`), which cap-std
+/// refuses to create.
+fn rooted(target: &str) -> bool {
+    cfg!(windows) && (target.starts_with(['/', '\\']) || target.get(1..2) == Some(":"))
+}
+
+/// The symbolic links checked by [`link_to`], settled: those that pass, those
+/// whose targets lead outside as [`Options::on_links_outside`] says once asked,
+/// and the others as [`skips_links`] says, those left out going to `skipped`
+/// in the archive's order. The links to create, in the archive's order.
+pub(crate) fn settle_links<'a>(
+    checked: Vec<(&'a Item, LinkChecked)>,
+    options: &Options,
+    skipped: &mut Vec<Error>,
+) -> Result<Vec<(&'a Item, LinkTo)>, Error> {
+    let asking = options
+        .on_links_outside
+        .as_ref()
+        .filter(|_| options.links == Links::Inside);
+    let mut links = Vec::new();
+    let mut left = Vec::new();
+    let mut outside: Vec<(&'a Item, LinkTo, ErrorKind)> = Vec::new();
+    for (item, LinkChecked { link, refused }) in checked {
+        match (link, refused) {
+            (Some(link), None) => links.push((item, link)),
+            (Some(link), Some(kind)) if asking.is_some() && leads_outside(&kind) => {
+                outside.push((item, link, kind));
+            }
+            (_, Some(kind)) => match (leads_outside(&kind), skips_links(options)) {
+                (true, OnRefused::Skip) => left.push(item.error(kind)),
+                _ => return Err(item.error(kind)),
+            },
+            (None, None) => {}
+        }
+    }
+    if let (Some(asked), false) = (asking, outside.is_empty()) {
+        let told: Vec<LinkOutside> = outside
+            .iter()
+            .map(|(item, link, kind)| LinkOutside {
+                error: item.error(clone_link_kind(kind)),
+                target: link.target.clone(),
+            })
+            .collect();
+        match asked(&told) {
+            OnLinksOutside::Stop => {
+                let first = told.into_iter().next().map(|told| told.error);
+                return Err(first.unwrap_or_else(|| Error::global(ErrorKind::Link)));
+            }
+            OnLinksOutside::Skip => left.extend(told.into_iter().map(|told| told.error)),
+            OnLinksOutside::Create => {
+                links.extend(outside.into_iter().map(|(item, link, _)| (item, link)));
+                links.sort_by_key(|(item, _)| item.index);
+            }
+        }
+    }
+    left.sort_by_key(|error| error.index);
+    skipped.extend(left);
+    Ok(links)
+}
+
+/// Whether a link is refused for where its target leads, as
+/// [`Options::links_outside`] and [`Options::on_links_outside`] take it.
+fn leads_outside(kind: &ErrorKind) -> bool {
+    matches!(kind, ErrorKind::LinkTarget(_) | ErrorKind::LinkChain { .. })
+}
+
+/// A copy of `kind`, one of those [`link_to`] makes.
+fn clone_link_kind(kind: &ErrorKind) -> ErrorKind {
+    match kind {
+        ErrorKind::LinkTarget(e) => ErrorKind::LinkTarget(*e),
+        ErrorKind::LinkChain { other } => ErrorKind::LinkChain { other: *other },
+        _ => ErrorKind::Link,
     }
 }
 

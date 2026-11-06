@@ -11,9 +11,9 @@ use crate::zip::{Archive, Flags, ReadAt, opsys, stat};
 
 use crate::extract::destination::{Destination, Target};
 use crate::extract::error::{Error, ErrorKind};
-use crate::extract::name::{NameError, link_on_the_way, link_target};
-use crate::extract::plan::{Item, Kind, Links, OnRefused, Options, Permissions, check, fold};
-use crate::extract::plan::{Renamed, named, settle, skips_links};
+use crate::extract::name::NameError;
+use crate::extract::plan::{Item, Kind, Links, Options, Permissions, check, fold};
+use crate::extract::plan::{LinkChecked, LinkTo, Renamed, link_to, named, settle, settle_links};
 use crate::extract::progress::Run;
 use crate::extract::sink::{Sink, SinkState};
 use crate::extract::tar::write_with;
@@ -27,7 +27,9 @@ pub struct Summary {
     pub links: u64,
     /// Bytes written.
     pub bytes: u64,
-    /// The entries left out with [`OnRefused::Skip`], and why.
+    /// The entries left out with [`OnRefused::Skip`](crate::extract::OnRefused::Skip),
+    /// or as [`Options::on_unnamable`] or [`Options::on_links_outside`] answered,
+    /// and why.
     pub skipped: Vec<Error>,
     /// The entries extracted under another name, as
     /// [`Options::on_unnamable`](crate::extract::Options::on_unnamable) said.
@@ -196,9 +198,9 @@ fn read_target<R: ReadAt>(
     Ok(target)
 }
 
-/// The links to create, with [`Links::Inside`]: their targets read, and
-/// checked to stay inside the destination and not to pass through another
-/// link of the archive. Those refused and skipped go to `skipped`.
+/// The links to create, with [`Links::Inside`] or [`Links::Any`]: their
+/// targets read, checked ([`link_to`]) and settled ([`settle_links`]). Those
+/// refused and skipped go to `skipped`.
 fn links<'a, R: ReadAt>(
     archive: &Archive<R>,
     kept: &[&'a Item],
@@ -218,39 +220,28 @@ fn links<'a, R: ReadAt>(
     };
     let paths: HashMap<String, u64> = fold_of(Kind::Link).collect();
     let dirs: HashMap<String, u64> = fold_of(Kind::Dir).collect();
-    let mut links = Vec::new();
+    let mut checked = Vec::new();
     for &item in kept.iter().filter(|item| item.kind == Kind::Link) {
         let Ok(name) = &item.name else {
             continue;
         };
         let parent = &name.components[..name.components.len().saturating_sub(1)];
-        let checked = read_target(archive, item, run, options).and_then(|target| {
-            let resolved =
-                link_target(&target, parent, options.checks()).map_err(ErrorKind::LinkTarget)?;
-            // A link on the way, which the system would follow.
-            let link_at = |walked: &[String]| paths.get(&fold(walked)).copied();
-            if let Some(other) = link_on_the_way(&target, parent, link_at) {
-                return Err(ErrorKind::LinkChain { other });
-            }
-            let to_dir = dirs.contains_key(&fold(&resolved));
-            // It was resolved, so it is UTF-8.
-            let target = String::from_utf8_lossy(&target).into_owned();
-            Ok((target, to_dir))
-        });
-        match (checked, skips_links(options)) {
-            (Ok((target, to_dir)), _) => links.push(Link {
-                item,
-                target,
-                to_dir,
-            }),
-            (
-                Err(kind @ (ErrorKind::LinkTarget(_) | ErrorKind::LinkChain { .. })),
-                OnRefused::Skip,
-            ) => skipped.push(item.error(kind)),
-            (Err(kind), _) => return Err(item.error(kind)),
-        }
+        checked.push((
+            item,
+            match read_target(archive, item, run, options) {
+                Ok(target) => link_to(&target, parent, options, &paths, &dirs),
+                Err(kind) => LinkChecked::unread(kind),
+            },
+        ));
     }
-    Ok(links)
+    Ok(settle_links(checked, options, skipped)?
+        .into_iter()
+        .map(|(item, LinkTo { target, to_dir })| Link {
+            item,
+            target,
+            to_dir,
+        })
+        .collect())
 }
 
 /// Extracts `archive` into `destination`, which is created if it is not
@@ -343,7 +334,7 @@ pub(crate) fn open_destination<'a>(
 
 /// Whether `item` is a link created after every other entry.
 fn created_later(item: &Item, options: &Options) -> bool {
-    item.kind == Kind::Link && options.links == Links::Inside
+    item.kind == Kind::Link && matches!(options.links, Links::Inside | Links::Any)
 }
 
 /// [`extract_zip`] into the target `make` makes, once the archive is checked,
@@ -369,7 +360,7 @@ fn extract_into<R: ReadAt, T: Target>(
     let settled = settle(&mut items, options)?;
     let (kept, mut skipped) = check(&items, &settled, options)?;
     let links = match options.links {
-        Links::Inside => links(archive, &kept, &run, options, &mut skipped)?,
+        Links::Inside | Links::Any => links(archive, &kept, &run, options, &mut skipped)?,
         _ => Vec::new(),
     };
     // Links to create are written after the rest; the others are files.

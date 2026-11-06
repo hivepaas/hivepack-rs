@@ -15,7 +15,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use hivepack::extract::{
-    ErrorKind, Limits, Links, NameError, OnRefused, Options, Progress, Summary, extract_tar,
+    ErrorKind, Limits, LinkOutside, Links, NameError, OnLinksOutside, OnRefused, Options, Progress,
+    Summary, extract_tar,
 };
 
 /// The time the test entries have.
@@ -297,6 +298,80 @@ fn symbolic_links_follow_the_options() {
         );
         assert!(!s.out().exists());
     }
+}
+
+/// With `Links::Any`, symbolic links anywhere are created as the archive has
+/// them; with `Links::Inside`, those that lead outside are asked about once.
+#[cfg(unix)]
+#[test]
+fn symbolic_links_anywhere_are_created_or_asked_about() {
+    let data = tar(&[
+        E::Dir(b"d/"),
+        E::File(b"d/f", b"data"),
+        E::Symlink(b"l", b"d"),
+        E::Symlink(b"abs", b"/etc/passwd"),
+        E::Symlink(b"up", b"../../outside"),
+        E::Symlink(b"d/through", b"../l/f"),
+        E::Symlink(b"in", b"d/f"),
+    ]);
+    let s = Scratch::new();
+    let summary = extract(&data, &s.out(), &options(|o| o.links = Links::Any)).unwrap();
+    assert_eq!((summary.files, summary.links), (1, 5));
+    for (link, target) in [
+        ("abs", "/etc/passwd"),
+        ("up", "../../outside"),
+        ("d/through", "../l/f"),
+    ] {
+        assert_eq!(
+            std::fs::read_link(s.out().join(link)).unwrap(),
+            Path::new(target)
+        );
+    }
+    assert_eq!(std::fs::read(s.out().join("d/through")).unwrap(), b"data");
+
+    // Asked once, with the three that lead outside, in the archive's order.
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let ask = |answer| {
+        let told = Arc::clone(&asked);
+        options(move |o| {
+            o.links = Links::Inside;
+            o.on_links_outside = Some(Arc::new(move |links: &[LinkOutside]| {
+                told.lock().unwrap().push(
+                    links
+                        .iter()
+                        .map(|l| (l.target.clone(), format!("{:?}", l.error.kind)))
+                        .collect::<Vec<_>>(),
+                );
+                answer
+            }));
+        })
+    };
+    let expected = vec![
+        (
+            "/etc/passwd".to_string(),
+            "LinkTarget(Absolute)".to_string(),
+        ),
+        ("../../outside".to_string(), "LinkTarget(Dot)".to_string()),
+        ("../l/f".to_string(), "LinkChain { other: 2 }".to_string()),
+    ];
+    let s = Scratch::new();
+    let e = extract(&data, &s.out(), &ask(OnLinksOutside::Stop)).unwrap_err();
+    assert!(matches!(e.kind, ErrorKind::LinkTarget(_)), "{e}");
+    assert!(!s.out().exists());
+    let s = Scratch::new();
+    let summary = extract(&data, &s.out(), &ask(OnLinksOutside::Skip)).unwrap();
+    assert_eq!((summary.links, summary.skipped.len()), (2, 3));
+    let s = Scratch::new();
+    let summary = extract(&data, &s.out(), &ask(OnLinksOutside::Create)).unwrap();
+    assert_eq!((summary.links, summary.skipped.len()), (5, 0));
+    assert_eq!(*asked.lock().unwrap(), vec![expected; 3]);
+
+    // A file under a link that leads out is the link's path, with Any too.
+    let s = Scratch::new();
+    let data = tar(&[E::Symlink(b"out", b"/tmp"), E::File(b"out/x", b"through")]);
+    let e = extract(&data, &s.out(), &options(|o| o.links = Links::Any)).unwrap_err();
+    assert!(matches!(e.kind, ErrorKind::Duplicate { .. }), "{e}");
+    assert!(!s.out().exists());
 }
 
 #[test]
