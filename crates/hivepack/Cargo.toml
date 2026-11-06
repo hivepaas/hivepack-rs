@@ -30,11 +30,23 @@ dbg_macro = "deny"
 # Each format's module keeps the file names of the crate it was: `zip::zip`.
 module_inception = "allow"
 
+# docs.rs builds the default features unless told: memory, off by default for
+# its unsafe calls to the system, is documented there too. Not rar, which takes
+# UnRAR's license.
+[package.metadata.docs.rs]
+features = ["full", "memory"]
+
 [features]
 # Every format but RAR, whose code is under UnRAR's license: see LICENSE.md.
 default = ["full"]
 
 full = ["age", "bzip2", "cpio", "crypto", "deflate", "extract", "iso", "lz4", "open", "sevenz", "sign", "tar", "udf", "xar", "xz", "zip", "zstd"]
+
+# How much memory the program may still take, and a budget to choose threads
+# under it. Not a format, and so not in `full`: it calls the system through
+# `unsafe` code on Windows and macOS, which the crate keeps off by default
+# (docs/memory.md, docs/unsafe.md).
+memory = ["dep:libc", "dep:rustix", "dep:windows-sys"]
 
 # Faster code with some `unsafe` in it, off by default: docs/unsafe.md.
 unsafe-fast = ["zstd-unsafe-fast", "lz4-unsafe-fast", "deflate-unsafe-fast"]
@@ -124,8 +136,25 @@ subtle = { version = "2", default-features = false, optional = true }
 cap-std = { workspace = true, optional = true }
 cap-fs-ext = { workspace = true, optional = true }
 
+# `ulimit`'s limits (getrlimit), for `memory`.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, optional = true, features = ["process"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
+# Extended attributes, for `extract`.
 rustix = { workspace = true, optional = true }
+# The system's page counts, for `memory`.
+libc = { workspace = true, optional = true }
+
+# The system's free memory and job objects, for `memory`.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, optional = true, features = [
+  "Win32_Foundation",
+  "Win32_System_JobObjects",
+  "Win32_System_ProcessStatus",
+  "Win32_System_SystemInformation",
+  "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 # The reference libraries, to compress, decompress and compare with in tests.
@@ -138,6 +167,15 @@ lz4-sys.workspace = true
 liblzma.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+# `tests/memory_job.rs` puts its own process in a job object.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }
 
 [[example]]
 name = "sevenz_sevenz"
@@ -338,6 +376,21 @@ required-features = ["lz4"]
 name = "lz4_unchecked"
 path = "tests/lz4_unchecked.rs"
 required-features = ["lz4"]
+
+[[test]]
+name = "memory_available"
+path = "tests/memory_available.rs"
+required-features = ["memory"]
+
+[[test]]
+name = "memory_job"
+path = "tests/memory_job.rs"
+required-features = ["memory"]
+
+[[test]]
+name = "memory_wiring"
+path = "tests/memory_wiring.rs"
+required-features = ["bzip2", "memory", "open", "sevenz", "xz", "zip", "zstd"]
 
 [[test]]
 name = "memory_limits"

@@ -79,6 +79,7 @@ jobs:
       - run: cargo check -p hivepack --lib --locked --no-default-features --features zip
       - run: cargo check -p hivepack --lib --locked --no-default-features --features zstd
       - run: cargo check -p hivepack --lib --locked --no-default-features --features zstd,zstd-unsafe-fast
+      - run: cargo check -p hivepack --lib --locked --no-default-features --features memory
 
   licenses:
     name: Dependency licenses and advisories
@@ -149,6 +150,11 @@ jobs:
           python scripts/testdata.py fetch "${args[@]}"
       - run: cargo test --workspace --locked
       - run: cargo test -p hivepack --locked --features rar --test extract_rar --test rar_oracle
+      # hivepack::memory, off by default: its tests on each system (on
+      # Windows, its own process in a job object), and the example that
+      # wires it to the coders.
+      - run: cargo test -p hivepack --locked --no-default-features --features memory
+      - run: cargo test -p hivepack --locked --features memory --test memory_wiring
       - if: matrix.unsafe-fast
         run: cargo test -p hivepack --locked --no-default-features --features zstd,zstd-unsafe-fast
       - if: matrix.unsafe-fast

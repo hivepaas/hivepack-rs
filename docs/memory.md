@@ -1,6 +1,6 @@
 # Memory
 
-Threads multiply what a coder takes: each has its own encoder or decoder, and its own data in and out. Running out of memory cannot be recovered from: Rust aborts when an allocation fails, and Linux's OOM killer ends the process before it does. So an application has to choose its threads before it starts. Each coder of hivepack that uses threads takes a limit, and lowers its threads until what it would take fits it; and each tells, before it starts, what a configuration takes, so that an application that cannot fit even one thread can say how much it needs. packwing measures the memory free when a job starts, and gives each job about half of it.
+Threads multiply what a coder takes: each has its own encoder or decoder, and its own data in and out. Running out of memory cannot be recovered from: Rust aborts when an allocation fails, and Linux's OOM killer ends the process before it does. So an application has to choose its threads before it starts. Each coder of hivepack that uses threads takes a limit, and lowers its threads until what it would take fits it; and each tells, before it starts, what a configuration takes, so that an application that cannot fit even one thread can say how much it needs. Where the limit comes from is the application's to say: `hivepack::memory`, behind the feature `memory`, measures how much the program may still take, and shares it between the jobs that run at once ([Measuring what is available](#measuring-what-is-available), [Wiring it to the coders](#wiring-it-to-the-coders)). The coders never call it on their own.
 
 Lowering the threads is always safe: every coder gives the same output whatever its threads, one or many (see `hivepack::Threads`), so the limit changes how fast something is made, never what is made.
 
@@ -126,3 +126,185 @@ Extracting a ZIP archive in threads (`extract::Options::threads`) decodes an ent
 | | 16 | 91.9 | 349.0 | 3.80 |
 
 7z and bzip2 hold what they are counted to hold, each buffer at its size: their estimates are a megabyte over, the slack for the writer's own. zstd's are further over with few workers, as its job table has room for more jobs waiting to be written out than a caller that writes out all it is given lets wait; and long distance matching counts room for its window that it only takes over a long input. bzip2's reader is counted for pieces of 2 MiB that decode to 4 MiB, the most its threads take, where `CompressMt`'s are a quarter of that: it is checked to hold no more, not to be near it.
+
+## Measuring what is available
+
+`hivepack::memory`, behind the feature `memory`, off by default, tells how much memory the program may still take now: `memory::available()` gives the bytes, and which bound applied (`Bound::System`, `Bound::ControlGroup`, `Bound::Ulimit`, `Bound::JobObject`), so that an application can say why it took fewer threads or a lower level. It is the least of what the system has free and of what each limit put on the program leaves it, measured each time it is called: a few files read on Linux, two or three calls elsewhere.
+
+| System | Bound | What is read | What it counts |
+|---|---|---|---|
+| Linux | `System` | `MemAvailable` in `/proc/meminfo` | Free memory, and the page cache and other memory the kernel gives back without swapping |
+| Linux | `ControlGroup` | `/proc/self/cgroup`. Version 2 (`0::/path`): each group from `/sys/fs/cgroup/path` up to `/sys/fs/cgroup` whose `memory.max` is not `max`. Version 1 (the line of the `memory` controller): each group from `/sys/fs/cgroup/memory/path` up, whose `memory.limit_in_bytes` there is | The least, of each group, of its limit less what it holds: `memory.current` (version 1: `memory.usage_in_bytes`) less its file pages not in use, `inactive_file` in `memory.stat` (`total_inactive_file`), which the kernel drops before it refuses memory, as container runtimes count a working set |
+| Linux | `Ulimit` | `getrlimit` of `RLIMIT_AS` (`ulimit -v`) and `RLIMIT_DATA` (`ulimit -d`), through rustix; `VmSize` and `VmData` in `/proc/self/status` | Each limit less what the program holds of it |
+| Windows | `System` | `GlobalMemoryStatusEx`: `ullAvailPhys` | Physical memory free, and on the standby list |
+| Windows | `JobObject` | `IsProcessInJob`; `QueryInformationJobObject` of the program's job, `JobObjectExtendedLimitInformation`; `GetProcessMemoryInfo`'s `PrivateUsage` | With `JOB_OBJECT_LIMIT_PROCESS_MEMORY`, `ProcessMemoryLimit` less what the process has committed; with `JOB_OBJECT_LIMIT_JOB_MEMORY`, `JobMemoryLimit` less `PeakJobMemoryUsed`, the most the job's processes have committed at once, no less than what they hold |
+| macOS | `System` | `host_statistics64(HOST_VM_INFO64)` and the page size | Pages free (speculative ones among them), holding files' data (`external_page_count`) and purgeable, as Activity Monitor counts the memory not used. Apps' inactive pages are not counted: to take them the system compresses or swaps them |
+
+The control groups are read from the program's own group up, not at the root alone: systemd puts its limits on slices and scopes (a user's slice, `systemd-run --scope -p MemoryMax=600M`), which the root does not show, where a container's runtime puts its limit on the container's root. A path the program's `/proc/self/cgroup` gives that is not under `/sys/fs/cgroup`, as in a container without a cgroup namespace, is walked up until it is: the container's own limit is at its root. A path outside the program's namespace (`/../..`) leaves only the root to read.
+
+Under `ulimit -v`, each thread takes address space besides what it allocates: its stack, 2 MiB for Rust's threads, and the arena glibc's allocator may reserve for it, 64 MiB on 64-bit systems (1 MiB on 32-bit ones, none with musl). `Available::thread_overhead` says so, 66 MiB there; under `ulimit -d` alone, 2 MiB, the stack, which is mapped writable; 0 elsewhere, where what a thread does not touch costs nothing. `Budget::of_available` counts it for each thread.
+
+What is not measured:
+
+- On Linux: `memory.high`, which slows a group down rather than refusing it memory; swap, in `memory.swap.max` and beside `MemAvailable`; the commit limit of `vm.overcommit_memory = 2` (`CommitLimit` less `Committed_AS`); and groups above the program's cgroup namespace, which it cannot see.
+- On Windows: the jobs that the program's job is in, as Windows tells only the program's own (nested jobs), and the commit limit, the page file.
+- On macOS, no limit applies: the figure is how much the program can take without making the system compress or swap, not a limit, and the program goes on past it, slower.
+- Other systems (the BSDs, illumos, Android): `available()` is `None`.
+- Memory the program has freed may stay with its allocator: it is not counted as available again until the allocator gives it back.
+
+hivepack does not depend on `sysinfo`, which packwing used for the system's figure: it reads much more than this needs, with `unsafe` code of its own on each system, and it reads only the root control group's limit, which misses systemd's: pkw was killed by the OOM killer in `systemd-run --user --scope -p MemoryMax=600M`, its threads chosen for the machine's free memory. The figures here are a few files on Linux, and two system calls on Windows and macOS: in `src/memory/windows.rs` and `src/memory/macos.rs`, the only `unsafe` code of the module, each call with what makes it sound ([unsafe.md](unsafe.md)).
+
+### A budget for the jobs
+
+`memory::Budget` shares memory between the jobs that run at once, as an application chooses: `Budget::new(bytes)`, or `Budget::of_available(1, 2)` for half of what is available now. Each job asks `budget.hold_threads(wanted, need)` for the most threads, `wanted` or fewer, whose memory, `need(n)` (a coder's estimate) with each thread's overhead, fits what is left, and holds that memory until the `Held` it gets is dropped. One thread is always given, holding what it needs even where that is more than is left, as each coder allows one under its limit; `budget.left()` tells beforehand, for an application that would rather wait or lower a level. A budget's clones share one account, so it can be handed to each job, or kept in a `static`. `Budget::set_bytes` measures it again for a program that lasts, keeping what is held.
+
+What a job holds is counted until it is done, and what it has taken is also no longer available, so jobs that start while others run get fewer threads than they could, never too many. The rest is the application's to choose, and not in the API: how much of what is available it gives its jobs (packwing half, so that what else it does, and other programs, have room), the least it gives them on a busy system (packwing 64 MiB), a variable that sets the figure (packwing's `PACKWING_MEMORY`, for `Budget::new`), and what to do where one thread does not fit.
+
+## Wiring it to the coders
+
+Each coder that uses threads takes the threads held, and the bytes held as its limit where it has one. A level whose one thread does not fit is the application's to lower, as packwing does, and say so; or to keep, with one thread past the budget. This is `tests/memory_wiring.rs`, which CI builds and runs; each function returns the `Held` beside its coder, for the job to keep until the coder is done:
+
+```rust
+use std::io::{self, Read, Seek, Write};
+
+use hivepack::Threads;
+use hivepack::memory::{Budget, Held};
+use hivepack::{bzip2, open, sevenz, xz, zip, zstd};
+
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+/// What the application gives its jobs, between them: half of what is
+/// available now, as packwing does, or 1 GiB where it is not measured.
+fn budget() -> Budget {
+    Budget::of_available(1, 2).unwrap_or_else(|| Budget::new(1 << 30))
+}
+
+/// 7z with LZMA2 in blocks, in the most threads, `wanted` or fewer, that
+/// fit. An estimate that fails is of options the writer refuses: counted
+/// as too much, it gives one thread, and the writer tells the error.
+fn sevenz_writer<W: Write + Seek>(
+    out: W,
+    budget: &Budget,
+    preset: u32,
+    wanted: u32,
+) -> Result<(sevenz::Writer<W>, Held)> {
+    let mut options = sevenz::WriteOptions {
+        method: sevenz::Method::Lzma2 { preset },
+        lzma2_blocks: sevenz::Lzma2Blocks::Auto,
+        ..Default::default()
+    };
+    let (threads, held) =
+        budget.hold_threads(wanted, |n| options.memory_usage(n).unwrap_or(u64::MAX));
+    options.threads = Threads::of(threads);
+    options.memory_limit = held.bytes();
+    Ok((sevenz::Writer::with_options(out, options)?, held))
+}
+
+/// zstd with workers: each frame takes the workers held, fewer where it
+/// would take more than the limit (a frame of another size).
+fn zstd_cctx(budget: &Budget, level: i32, wanted: u32) -> Result<(zstd::CCtx, Held)> {
+    let mut cctx = zstd::CCtx::new();
+    cctx.set_parameter(zstd::CParameter::CompressionLevel(level))?;
+    let (workers, held) =
+        budget.hold_threads(wanted, |n| cctx.estimate_memory(n).unwrap_or(u64::MAX));
+    cctx.set_parameter(zstd::CParameter::NbWorkers(workers))?;
+    cctx.set_workers_memory_limit(held.bytes());
+    Ok((cctx, held))
+}
+
+/// bzip2 in threads, as pbzip2 compresses.
+fn bzip2_compressor(budget: &Budget, level: i32, wanted: u32) -> Result<(bzip2::CompressMt, Held)> {
+    let mut options = bzip2::MtOptions {
+        block_size_100k: level,
+        ..Default::default()
+    };
+    let (threads, held) =
+        budget.hold_threads(wanted, |n| options.memory_usage(n).unwrap_or(u64::MAX));
+    options.threads = Threads::of(threads);
+    options.memory_limit = held.bytes();
+    Ok((bzip2::CompressMt::with_options(&options)?, held))
+}
+
+/// xz in threads: liblzma's encoder has no limit of its own, so the
+/// threads held are all it is told.
+fn xz_encoder(budget: &Budget, preset: u32, wanted: u32) -> Result<(xz::Stream, Held)> {
+    let mut options = xz::MtOptions {
+        preset,
+        ..Default::default()
+    };
+    let (threads, held) = budget.hold_threads(wanted, |n| {
+        xz::stream_encoder_mt_memusage(&xz::MtOptions {
+            threads: n,
+            ..options.clone()
+        })
+    });
+    options.threads = threads;
+    Ok((xz::Stream::stream_encoder_mt(&options)?, held))
+}
+
+/// What each thread of `zip::Archive::set_threads` takes: up to 32 MiB of
+/// entries compressed ahead, waiting to be written, and its compressor:
+/// Deflate's, 512 KiB at most (bzip2's 7 MiB, LZMA's and XZ's 94 MiB at
+/// preset 6). ZIP's threads take no limit: the threads are all it is told.
+fn zip_threads<R>(archive: &mut zip::Archive<R>, budget: &Budget, wanted: u32) -> Held {
+    let (threads, held) =
+        budget.hold_threads(wanted, |n| u64::from(n) * ((32 << 20) + (512 << 10)));
+    archive.set_threads(Threads::of(threads));
+    held
+}
+
+/// Reading through `open::Opener`, bzip2 in threads: 20.5 MiB a thread, and
+/// 13 MiB (`docs/memory.md`, "Readers"). xz's threads are bounded by
+/// `Limits::xz_memlimit`, which is also the most one Block may take before
+/// it fails: it is left as it is.
+fn opener<F, R>(open: F, budget: &Budget, wanted: u32) -> (open::Opener<F>, Held)
+where
+    F: FnMut() -> io::Result<R>,
+    R: Read + Send,
+{
+    let (threads, held) = budget.hold_threads(wanted, |n| u64::from(n) * (41 << 19) + (13 << 20));
+    let mut limits = open::Limits::default();
+    limits.bzip2_memlimit = held.bytes();
+    let opener = open::Opener::new(open)
+        .threads(Threads::of(threads))
+        .limits(limits);
+    (opener, held)
+}
+
+/// The preset of 7z's LZMA2 in blocks to compress with: `preset`, or the
+/// highest below it whose one thread fits what is left, as packwing lowers
+/// a level the machine has no room for, and says so. `None` where not even
+/// preset 0 fits: the application may wait for other jobs to end, refuse,
+/// or go on past the budget with one thread.
+fn sevenz_preset_that_fits(budget: &Budget, preset: u32) -> Option<u32> {
+    (0..=preset).rev().find(|&preset| {
+        let options = sevenz::WriteOptions {
+            method: sevenz::Method::Lzma2 { preset },
+            lzma2_blocks: sevenz::Lzma2Blocks::Auto,
+            ..Default::default()
+        };
+        options
+            .memory_usage(1)
+            .is_ok_and(|one| one <= budget.left())
+    })
+}
+
+/// A job: `data` in a 7z archive, at preset 9 or the highest that fits,
+/// and said so, in as many threads as the machine runs at once, or as fit.
+/// What it holds is given back when it ends, for the jobs after it.
+fn compress_job<W: Write + Seek>(budget: &Budget, out: W, name: &str, data: &[u8]) -> Result<W> {
+    let preset = match sevenz_preset_that_fits(budget, 9) {
+        Some(9) => 9,
+        Some(lower) => {
+            eprintln!("{name}: preset 9 does not fit in the memory left: made at preset {lower}");
+            lower
+        }
+        // Not even preset 0 fits: the least there is, past the budget.
+        None => 0,
+    };
+    let (mut writer, _held) = sevenz_writer(out, budget, preset, Threads::Auto.count())?;
+    writer.start_file(sevenz::NewEntry::new(name))?;
+    writer.write_all(data)?;
+    Ok(writer.finish()?)
+}
+```

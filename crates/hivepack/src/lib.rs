@@ -4,6 +4,9 @@
 //! Each format is a module behind a feature of the same name, and the ones it
 //! needs come with it. All but `rar` are on by default; use
 //! `default-features = false` and name the ones you want to compile less.
+//! Beside the formats, `memory`, off by default, measures how much memory
+//! the program may still take, for an application to choose the threads of
+//! its coders under it.
 //!
 //! | Module | Feature | What it is |
 //! |---|---|---|
@@ -15,6 +18,7 @@
 //! | [`extract`] | `extract` | extracting archives to disk, safe by default |
 //! | [`iso`] | `iso` | ISO 9660 images |
 //! | [`lz4`] | `lz4` | LZ4 (liblz4 1.10.0) |
+//! | [`memory`](memory/index.html) | `memory` | the memory the program may still take, and a budget for threads |
 //! | [`open`] | `open` | opening files through their layers (age, zstd, xz, gzip, ...) |
 //! | [`rar`] | `rar` | reading RAR (UnRAR 7.3.2), under UnRAR's license |
 //! | [`sevenz`] | `sevenz` | 7z archives |
@@ -50,6 +54,8 @@ pub mod extract;
 pub mod iso;
 #[cfg(feature = "lz4")]
 pub mod lz4;
+#[cfg(feature = "memory")]
+pub mod memory;
 #[cfg(feature = "open")]
 pub mod open;
 #[cfg(feature = "rar")]
