@@ -73,8 +73,8 @@ pub enum Links {
     /// them, and a name under a link is still the same path as the link
     /// ([`ErrorKind::Duplicate`]). Only a target that is no path is refused
     /// ([`ErrorKind::LinkTarget`]): empty, not UTF-8, or with a control
-    /// character; and on Windows one from a root or a drive, which cap-std
-    /// does not create. What is extracted can then lead elsewhere on the
+    /// character; and on Windows, into a folder, one from a root or a drive,
+    /// which cap-std does not create. What is extracted can then lead elsewhere on the
     /// system: for archives that are trusted, as a backup of one's own files.
     Any,
 }
