@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `extract`: `extract_rar` with `Options::threads` writes the files of an archive that is not solid at once, each by a thread that opens the archive itself and goes through its headers: files larger than a share of the whole first, largest first, then the rest in the archive's order; the directories before, and hard links, file copies and links written as files after, in order. What is written, and the summary, are the same as with one thread. 22,540 files of 343 MB extract in 1.18 s on one thread, 0.28 s on eight and 0.22 s on sixteen. A solid archive is read on one thread, as before. See [docs/extract.md](docs/extract.md#threads).
+- `extract`: `Options::memory_limit` lowers those threads until each one's window, as large as the archive's dictionary asks, and PPMd's model in RAR 4, fit; and with the feature `memory`, `Options::memory_budget` holds them from a `memory::Budget` once the first reading knows what they need. See [docs/memory.md](docs/memory.md#readers).
+- `extract`: outside a solid stream, RAR entries that are not written (left out, or not picked by `Options::select`) are passed over, not decompressed: the data a picked file needs is its own.
+- Breaking: `extract_rar`'s `open` is `Fn` and `Sync`, as each thread calls it. `extract_rar_to` takes an `FnMut`, as before.
+- `extract`: a RAR header that is no link no longer counts the target of a link before it, which a header keeps, when the two readings are compared.
 - `rar`: `Extract::threads` decodes an entry of RAR 5 or 7 in threads, as UnRAR's `-mt` does: each Huffman block decoded ahead in a thread of its own, and written into the window in order on the caller's thread. Not UnRAR's code, which differs from its own single thread on damaged data: `Unpack5`'s loop runs as it is and takes, at each block, what a thread decoded only where that is what it would decode itself, so what comes out is the same as with one thread, byte for byte, damaged data and errors too. Silesia's 211 MB as one entry, `-m3`: 0.46 s on one thread, 0.32 s on four or more, as UnRAR takes on eight. `Extract::threads_from`, 1 MiB by default, is the packed size from which an entry takes threads. Not for an entry going on in another volume, nor the older algorithms. See [docs/rar.md](docs/rar.md).
 
 ## 0.9.0

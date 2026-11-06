@@ -654,3 +654,100 @@ fn every_preset_and_level() {
         bzip2_read_case(threads);
     }
 }
+
+/// RAR extracted in threads, each holding what it decompresses with, against
+/// the bound `docs/memory.md` gives for each thread, counted for the entry
+/// that takes the most: its window, as large as the entry asks and no larger
+/// than twice its size and 8 MiB more, PPMd's 257 MiB for RAR 2.9 to 4, and 5
+/// MiB; and 8 MiB more for the caller's, its list of entries and the archive's
+/// buffers. Under a memory limit of two threads, no more than two are held.
+#[cfg(all(feature = "extract", feature = "rar"))]
+mod rar {
+    use std::path::{Path, PathBuf};
+
+    use hivepack::Threads;
+    use hivepack::extract::{Options, extract_rar};
+    use hivepack::rar::{Archive, Format, HEAD_FILE};
+
+    use super::{MIB, lock, measure};
+
+    /// The most a thread holds for one entry of `data`, as the bound says.
+    fn each(data: &[u8]) -> u64 {
+        let mut arc = Archive::open_with_password(data, false, "hivepack").unwrap();
+        let mut most = 0;
+        while arc.read_header().unwrap() != 0 {
+            let head = &arc.file_head;
+            if arc.cur_header_type == HEAD_FILE && !head.dir && head.method != 0 {
+                let largest = head.win_size.max(0x4_0000);
+                let reached = (head.unp_size.max(0) as u64) + (8 << 20) + (64 << 10);
+                let window = largest.min((2 * reached).max(1 << 20));
+                let ppmd = if arc.format != Format::Rar50 && head.unp_ver == 29 {
+                    257 << 20
+                } else {
+                    0
+                };
+                most = most.max(window + ppmd + (5 << 20));
+            }
+            arc.seek_to_next();
+        }
+        most
+    }
+
+    fn scratch(name: &str, threads: u32) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "hivepack-memory-rar-{}-{name}-{threads}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn extract(data: &[u8], out: &Path, threads: u32, limit: Option<u64>) {
+        let mut options = Options::default();
+        options.threads = Threads::of(threads);
+        options.memory_limit = limit;
+        options.password = Some(b"hivepack".to_vec());
+        options.limits.max_ratio = u64::MAX;
+        extract_rar(
+            |password| Archive::open_with_password(data, false, password),
+            out,
+            &options,
+        )
+        .unwrap();
+    }
+
+    fn case(name: &str, threads: u32) {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/rar")
+            .join(name);
+        let data = std::fs::read(path).unwrap();
+        let each = each(&data);
+        for (limit, most) in [(None, threads), (Some(2 * each), threads.min(2))] {
+            let out = scratch(name, threads);
+            let (actual, ()) = measure(|| extract(&data, &out, threads, limit));
+            let _ = std::fs::remove_dir_all(&out);
+            let bound = u64::from(most) * each + (8 << 20);
+            println!(
+                "{name}, {threads} threads, limit {limit:?}: {:.1} MiB held, bound {:.1} MiB",
+                actual as f64 / MIB,
+                bound as f64 / MIB
+            );
+            assert!(actual <= bound, "{name}: {actual} held, bound {bound}");
+        }
+    }
+
+    #[test]
+    fn rar_threads_hold_no_more_than_their_bound() {
+        let _one = lock();
+        for name in [
+            "rar5-m3.rar",
+            "rar5-m5.rar",
+            "rar4-m3.rar",
+            "rar4-m3-ppmd.rar",
+        ] {
+            for threads in [1, 4, 8] {
+                case(name, threads);
+            }
+        }
+    }
+}
