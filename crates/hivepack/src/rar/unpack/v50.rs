@@ -11,14 +11,16 @@
 
 //! The algorithm of RAR 5.0 and 7.0: UnRAR's unpack50.cpp. Its fragmented
 //! window (unpack50frag.cpp), for 32-bit systems that cannot allocate a whole
-//! one, and its threads (unpack50mt.cpp) are left out: what comes out is the
-//! same.
+//! one, is left out: what comes out is the same. Its threads (unpack50mt.cpp)
+//! are `v50mt`, which takes symbols decoded ahead in this loop.
 
 use crate::rar::error::Error;
 
+use super::v50mt::{Replay, Speculation};
 use super::{
-    BC, BitInput, DCB, DCX, Filter, HUFF_TABLE_SIZEB, HUFF_TABLE_SIZEX, LDC, MAX_FILTER_BLOCK_SIZE,
-    MAX_INC_LZ_MATCH, MAX_UNPACK_FILTERS, NC, RC, UNPACK_MAX_WRITE, UnpIo, Unpack, slot_to_length,
+    BC, BitInput, BlockTables, DCB, DCX, Filter, HUFF_TABLE_SIZEB, HUFF_TABLE_SIZEX, LDC,
+    MAX_FILTER_BLOCK_SIZE, MAX_INC_LZ_MATCH, MAX_UNPACK_FILTERS, NC, RC, TableLengths,
+    UNPACK_MAX_WRITE, UnpIo, Unpack, slot_to_length,
 };
 
 /// `FILTER_DELTA`.
@@ -33,7 +35,7 @@ const FILTER_ARM: u8 = 3;
 const FILTER_NONE: u8 = 10;
 
 /// `Unpack::ReadFilterData`.
-fn read_filter_data(inp: &mut BitInput) -> u32 {
+pub(super) fn read_filter_data(inp: &mut BitInput) -> u32 {
     let byte_count = (inp.getbits() >> 14) + 1;
     inp.addbits(2);
 
@@ -45,9 +47,160 @@ fn read_filter_data(inp: &mut BitInput) -> u32 {
     data
 }
 
+/// What a block's Huffman codes give, one at a time: what the main loop of
+/// `Unpack5` does with each, decoded here or ahead, in a thread.
+#[derive(Clone, Copy)]
+pub(super) enum Symbol {
+    Literal(u8),
+    /// A length and distance, as they are copied: adjusted for the distance.
+    Match {
+        length: u32,
+        distance: usize,
+    },
+    /// A filter follows, whose data is read after the buffer is refilled if
+    /// it has to be: when decoded ahead, that data and the bits it took.
+    Filter(Option<(RawFilter, u32)>),
+    FullRep,
+    Rep {
+        dist_num: usize,
+        length: u32,
+    },
+}
+
+/// The next symbol of a block with `tables`, from `inp`: the body of
+/// `Unpack5`'s loop up to what it does with it.
+#[inline(always)]
+pub(super) fn decode_symbol(tables: &BlockTables, inp: &mut BitInput) -> Symbol {
+    let main_slot = tables.ld.decode(inp);
+    if main_slot < 256 {
+        return Symbol::Literal(main_slot as u8);
+    }
+    if main_slot >= 262 {
+        let mut length = slot_to_length(inp, main_slot - 262);
+
+        let mut distance = 1usize;
+        let dist_slot = tables.dd.decode(inp);
+        let d_bits;
+        if dist_slot < 4 {
+            d_bits = 0;
+            distance += dist_slot as usize;
+        } else {
+            d_bits = dist_slot / 2 - 1;
+            distance = distance.wrapping_add(((2 | (dist_slot & 1)) as usize).wrapping_shl(d_bits));
+        }
+
+        if d_bits > 0 {
+            if d_bits >= 4 {
+                if d_bits > 4 {
+                    let high = if d_bits > 36 {
+                        (inp.getbits64() as usize) >> (68 - d_bits)
+                    } else {
+                        (inp.getbits32() as usize) >> (36 - d_bits)
+                    };
+                    distance = distance.wrapping_add(high.wrapping_shl(4));
+                    inp.addbits(d_bits - 4);
+                }
+                let low_dist = tables.ldd.decode(inp);
+                distance = distance.wrapping_add(low_dist as usize);
+
+                // A 32-bit size_t cannot hold these. A distance that
+                // cannot be gives zeros in `copy_string`.
+                if usize::BITS == 32 && d_bits >= 30 {
+                    distance = usize::MAX;
+                }
+            } else {
+                distance += (inp.getbits() >> (16 - d_bits)) as usize;
+                inp.addbits(d_bits);
+            }
+        }
+
+        if distance > 0x100 {
+            length += 1;
+            if distance > 0x2000 {
+                length += 1;
+                if distance > 0x4_0000 {
+                    length += 1;
+                }
+            }
+        }
+        return Symbol::Match { length, distance };
+    }
+    if main_slot == 256 {
+        return Symbol::Filter(None);
+    }
+    if main_slot == 257 {
+        return Symbol::FullRep;
+    }
+    // Below 262.
+    let dist_num = (main_slot - 258) as usize;
+    let length_slot = tables.rd.decode(inp);
+    let length = slot_to_length(inp, length_slot);
+    Symbol::Rep { dist_num, length }
+}
+
+/// A filter's fields as `ReadFilter` reads them.
+#[derive(Clone, Copy)]
+pub(super) struct RawFilter {
+    block_start: u32,
+    block_length: u32,
+    kind: u8,
+    channels: u8,
+}
+
+/// The fields of a filter, from `inp`: `ReadFilter` past its refill.
+pub(super) fn read_filter_bits(inp: &mut BitInput) -> RawFilter {
+    let block_start = read_filter_data(inp);
+    let block_length = read_filter_data(inp);
+    let kind = (inp.getbits() >> 13) as u8;
+    inp.addbits(3);
+    let mut channels = 0;
+    if kind == FILTER_DELTA {
+        channels = (inp.getbits() >> 11) as u8 + 1;
+        inp.addbits(5);
+    }
+    RawFilter {
+        block_start,
+        block_length,
+        kind,
+        channels,
+    }
+}
+
 impl Unpack {
-    /// `Unpack::Unpack5`.
+    /// `Unpack::Unpack5`, in threads where it may be: see `v50mt`.
     pub(super) fn unpack5(&mut self, solid: bool, io: &mut dyn UnpIo) -> Result<(), Error> {
+        if self.threads > 1
+            && let Some(size) = io.packed_size()
+        {
+            return self.unpack5_mt(solid, io, size);
+        }
+        self.unpack5_with(solid, io, None)
+    }
+
+    /// Where the bits about to be read are in the packed data.
+    pub(super) fn bit_at(&self) -> i64 {
+        (self.inp_base + i64::from(self.inp.in_addr)) * 8 + i64::from(self.inp.in_bit)
+    }
+
+    /// What `spec` decoded ahead of the block just begun, if it is this one,
+    /// with these tables: else it is decoded here.
+    fn begun(&self, spec: &mut Option<&mut Speculation>, io: &mut dyn UnpIo) -> Option<Replay> {
+        let spec = spec.as_deref_mut()?;
+        spec.block(
+            io,
+            self.header_at,
+            self.bit_at(),
+            self.table_lengths.as_deref(),
+        )
+    }
+
+    /// `Unpack::Unpack5`, its blocks decoded here, or by `spec` ahead.
+    pub(super) fn unpack5_with(
+        &mut self,
+        solid: bool,
+        io: &mut dyn UnpIo,
+        mut spec: Option<&mut Speculation>,
+    ) -> Result<(), Error> {
         self.unp_init_data(solid);
         if !self.unp_read_buf(io)? {
             return Ok(());
@@ -57,6 +210,7 @@ impl Unpack {
         if !self.read_block_header(io)? || !self.read_tables(io)? || !self.tables_read5 {
             return Ok(());
         }
+        let mut replay = self.begun(&mut spec, io);
 
         loop {
             self.unp_ptr = self.wrap_up(self.unp_ptr);
@@ -85,6 +239,7 @@ impl Unpack {
                     if !self.read_block_header(io)? || !self.read_tables(io)? {
                         return Ok(());
                     }
+                    replay = self.begun(&mut spec, io);
                 }
                 if file_done || !self.unp_read_buf(io)? {
                     break;
@@ -101,120 +256,114 @@ impl Unpack {
                 }
             }
 
-            let main_slot = self.block_tables.ld.decode(&mut self.inp);
-            if main_slot < 256 {
-                self.window[self.unp_ptr] = main_slot as u8;
-                self.unp_ptr += 1;
-                continue;
-            }
-            if main_slot >= 262 {
-                let mut length = slot_to_length(&mut self.inp, main_slot - 262);
-
-                let mut distance = 1usize;
-                let dist_slot = self.block_tables.dd.decode(&mut self.inp);
-                let d_bits;
-                if dist_slot < 4 {
-                    d_bits = 0;
-                    distance += dist_slot as usize;
-                } else {
-                    d_bits = dist_slot / 2 - 1;
-                    distance = distance
-                        .wrapping_add(((2 | (dist_slot & 1)) as usize).wrapping_shl(d_bits));
+            // Literals decoded ahead, as many at once as go through the
+            // loop above without anything in it doing more than this does.
+            if let Some(r) = replay.as_mut()
+                && let Some((bytes, bits)) = r.literals()
+            {
+                let n = self.literals_at_once(bytes, bits);
+                if n > 0 {
+                    r.took_literals(n);
+                    continue;
                 }
-
-                if d_bits > 0 {
-                    if d_bits >= 4 {
-                        if d_bits > 4 {
-                            let high = if d_bits > 36 {
-                                (self.inp.getbits64() as usize) >> (68 - d_bits)
-                            } else {
-                                (self.inp.getbits32() as usize) >> (36 - d_bits)
-                            };
-                            distance = distance.wrapping_add(high.wrapping_shl(4));
-                            self.inp.addbits(d_bits - 4);
-                        }
-                        let low_dist = self.block_tables.ldd.decode(&mut self.inp);
-                        distance = distance.wrapping_add(low_dist as usize);
-
-                        // A 32-bit size_t cannot hold these. A distance that
-                        // cannot be gives zeros in `copy_string`.
-                        if usize::BITS == 32 && d_bits >= 30 {
-                            distance = usize::MAX;
-                        }
-                    } else {
-                        distance += (self.inp.getbits() >> (16 - d_bits)) as usize;
-                        self.inp.addbits(d_bits);
+            }
+            let replayed = replay.as_mut().and_then(|r| r.next(&mut self.inp));
+            let symbol = match replayed {
+                Some(symbol) => symbol,
+                None => decode_symbol(&self.block_tables, &mut self.inp),
+            };
+            match symbol {
+                Symbol::Literal(byte) => {
+                    self.window[self.unp_ptr] = byte;
+                    self.unp_ptr += 1;
+                }
+                Symbol::Match { length, distance } => {
+                    self.insert_old_dist(distance);
+                    self.last_length = length;
+                    self.copy_string(length, distance);
+                }
+                Symbol::Filter(ahead) => {
+                    let Some(filter) = self.read_filter(io, ahead)? else {
+                        break;
+                    };
+                    self.add_filter(filter, io)?;
+                }
+                Symbol::FullRep => {
+                    if self.last_length != 0 {
+                        self.copy_string(self.last_length, self.old_dist[0]);
                     }
                 }
-
-                if distance > 0x100 {
-                    length += 1;
-                    if distance > 0x2000 {
-                        length += 1;
-                        if distance > 0x4_0000 {
-                            length += 1;
-                        }
-                    }
+                Symbol::Rep { dist_num, length } => {
+                    let distance = self.old_dist[dist_num];
+                    self.old_dist.copy_within(0..dist_num, 1);
+                    self.old_dist[0] = distance;
+                    self.last_length = length;
+                    self.copy_string(length, distance);
                 }
-
-                self.insert_old_dist(distance);
-                self.last_length = length;
-                self.copy_string(length, distance);
-                continue;
             }
-            if main_slot == 256 {
-                let Some(filter) = self.read_filter(io)? else {
-                    break;
-                };
-                self.add_filter(filter, io)?;
-                continue;
-            }
-            if main_slot == 257 {
-                if self.last_length != 0 {
-                    self.copy_string(self.last_length, self.old_dist[0]);
-                }
-                continue;
-            }
-            // Below 262.
-            let dist_num = (main_slot - 258) as usize;
-            let distance = self.old_dist[dist_num];
-            self.old_dist.copy_within(0..dist_num, 1);
-            self.old_dist[0] = distance;
-
-            let length_slot = self.block_tables.rd.decode(&mut self.inp);
-            let length = slot_to_length(&mut self.inp, length_slot);
-            self.last_length = length;
-            self.copy_string(length, distance);
         }
         self.unp_write_buf(io)
     }
 
-    /// `Unpack::ReadFilter`. `None` when the buffer cannot be refilled.
-    fn read_filter(&mut self, io: &mut dyn UnpIo) -> Result<Option<Filter>, Error> {
+    /// Writes literals of `bytes`, each taking the bits of `bits`, as the main
+    /// loop would one at a time from here, and as many of them as it does no
+    /// more for than that: before its window wraps or grows, its buffer is
+    /// refilled, or it writes out. How many.
+    #[inline(always)]
+    fn literals_at_once(&mut self, bytes: &[u8], bits: &[u8]) -> usize {
+        // The loop writes out once this close to its border.
+        let to_write = if self.write_border == self.unp_ptr {
+            self.max_win_size
+        } else {
+            self.wrap_down(self.write_border.wrapping_sub(self.unp_ptr))
+        };
+        let most = bytes
+            .len()
+            .min(self.window.len().saturating_sub(self.unp_ptr))
+            .min(to_write.saturating_sub(MAX_INC_LZ_MATCH));
+        // The first is the one the loop is on: past its checks.
+        let mut n = 0;
+        while n < most && (n == 0 || self.inp.in_addr < self.read_border) {
+            self.window[self.unp_ptr + n] = bytes[n];
+            self.inp.addbits(u32::from(bits[n]));
+            n += 1;
+        }
+        if n > 0 {
+            self.unp_ptr += n;
+            // Where the loop's last turn was.
+            self.prev_ptr = self.unp_ptr - 1;
+        }
+        n
+    }
+
+    /// `Unpack::ReadFilter`. `None` when the buffer cannot be refilled. Its
+    /// fields from `ahead` where they were read ahead, the bits they took
+    /// passed over as reading them does.
+    fn read_filter(
+        &mut self,
+        io: &mut dyn UnpIo,
+        ahead: Option<(RawFilter, u32)>,
+    ) -> Result<Option<Filter>, Error> {
         if self.inp.in_addr > self.read_top - 16 && !self.unp_read_buf(io)? {
             return Ok(None);
         }
 
-        let block_start = read_filter_data(&mut self.inp);
-        let mut block_length = read_filter_data(&mut self.inp);
+        let raw = match ahead {
+            Some((raw, bits)) => {
+                self.inp.addbits(bits);
+                raw
+            }
+            None => read_filter_bits(&mut self.inp),
+        };
+        let mut block_length = raw.block_length;
         if block_length > MAX_FILTER_BLOCK_SIZE {
             block_length = 0;
         }
-
-        let kind = (self.inp.getbits() >> 13) as u8;
-        self.inp.addbits(3);
-
-        let mut channels = 0;
-        if kind == FILTER_DELTA {
-            channels = (self.inp.getbits() >> 11) as u8 + 1;
-            self.inp.addbits(5);
-        }
-
         Ok(Some(Filter {
-            kind,
-            channels,
+            kind: raw.kind,
+            channels: raw.channels,
             next_window: false,
-            block_start: block_start as usize,
+            block_start: raw.block_start as usize,
             block_length,
         }))
     }
@@ -261,6 +410,7 @@ impl Unpack {
                     .in_buf
                     .copy_within(from..from + data_size as usize, 0);
             }
+            self.inp_base += i64::from(self.inp.in_addr);
             self.inp.in_addr = 0;
             self.read_top = data_size;
         } else {
@@ -502,6 +652,7 @@ impl Unpack {
             return Ok(false);
         }
         self.inp.addbits((8 - self.inp.in_bit) & 7);
+        self.header_at = self.inp_base + i64::from(self.inp.in_addr);
 
         let block_flags = (self.inp.getbits() >> 8) as u8;
         self.inp.addbits(8);
@@ -643,6 +794,14 @@ impl Unpack {
             return Ok(false);
         }
         let d_codes = if self.extra_dist { DCX } else { DCB };
+        let lengths = self.table_lengths.get_or_insert_with(|| {
+            Box::new(TableLengths {
+                lengths: [0; HUFF_TABLE_SIZEX],
+                extra_dist: false,
+            })
+        });
+        lengths.lengths = table;
+        lengths.extra_dist = self.extra_dist;
         let tables = &mut *self.block_tables;
         tables.ld.make(&table[..NC]);
         tables.dd.make(&table[NC..NC + d_codes]);

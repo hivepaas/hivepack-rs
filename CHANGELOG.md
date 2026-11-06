@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `rar`: `Extract::threads` decodes an entry of RAR 5 or 7 in threads, as UnRAR's `-mt` does: each Huffman block decoded ahead in a thread of its own, and written into the window in order on the caller's thread. Not UnRAR's code, which differs from its own single thread on damaged data: `Unpack5`'s loop runs as it is and takes, at each block, what a thread decoded only where that is what it would decode itself, so what comes out is the same as with one thread, byte for byte, damaged data and errors too. Silesia's 211 MB as one entry, `-m3`: 0.46 s on one thread, 0.32 s on four or more, as UnRAR takes on eight. `Extract::threads_from`, 1 MiB by default, is the packed size from which an entry takes threads. Not for an entry going on in another volume, nor the older algorithms. See [docs/rar.md](docs/rar.md).
+
 ## 0.9.0
 
 - `extract`: `Links::Any` creates every symbolic link, its target as the archive has it, absolute or leading outside the destination too, as tar does, for archives that are trusted (a backup of one's own files). Links are still created after every other entry, so nothing is written through them, and a path under a link is still the link's; a target that is no path (empty, not UTF-8, a control character) is refused, and on Windows, into a folder, one from a root or a drive.

@@ -171,7 +171,10 @@ impl fmt::Debug for KdfCache {
     }
 }
 
-/// What decrypting goes on from: `CryptData` after `SetCryptKeys`.
+/// What decrypting goes on from: `CryptData` after `SetCryptKeys`. A clone
+/// goes on from where this is, on its own: decompressing in threads reads
+/// the data ahead with one.
+#[derive(Clone)]
 pub(crate) enum CryptData {
     Rar13 {
         key: [u8; 3],

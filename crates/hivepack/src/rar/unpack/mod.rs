@@ -28,6 +28,7 @@ mod v15;
 mod v20;
 mod v30;
 mod v50;
+mod v50mt;
 
 use std::fmt;
 
@@ -83,6 +84,19 @@ pub(crate) trait UnpIo {
     fn unp_read(&mut self, buf: &mut [u8]) -> Result<Option<usize>, Error>;
     /// `UnpWrite`: unpacked data.
     fn unp_write(&mut self, data: &[u8]) -> Result<(), Error>;
+    /// The size of the packed data, if it can be read ahead with
+    /// [`UnpIo::packed_ahead`]: all of it here, in one volume.
+    fn packed_size(&self) -> Option<u64> {
+        None
+    }
+    /// The packed data at `offset`, decrypted, read apart from
+    /// [`UnpIo::unp_read`], which goes on as it was: what threads decode ahead
+    /// of the caller's. Called with each offset after the one before; how many
+    /// bytes, 0 at the end, or nothing where it cannot be.
+    fn packed_ahead(&mut self, offset: u64, buf: &mut [u8]) -> Result<Option<usize>, Error> {
+        let _ = (offset, buf);
+        Ok(None)
+    }
 }
 
 /// `BitInput`: bits from a buffer, the highest first.
@@ -103,6 +117,16 @@ impl BitInput {
             in_addr: 0,
             in_bit: 0,
             in_buf: vec![0; BitInput::MAX_SIZE as usize + 8].into_boxed_slice(),
+        }
+    }
+
+    /// Over `bytes`, which have eight zero bytes more at their end, from
+    /// `in_bit` bits into the first: a thread's copy of a block.
+    fn over(bytes: Box<[u8]>, in_bit: u32) -> BitInput {
+        BitInput {
+            in_addr: 0,
+            in_bit,
+            in_buf: bytes,
         }
     }
 
@@ -372,6 +396,24 @@ pub(crate) struct Unpack {
     max_win_size: usize,
 
     extra_dist: bool,
+
+    /// How many threads RAR 5's blocks may be decoded in: see `v50mt`.
+    threads: u32,
+    /// Where in the packed data `inp`'s first byte is, for this entry.
+    inp_base: i64,
+    /// Where the last block header read starts in the packed data.
+    header_at: i64,
+    /// The lengths the Huffman tables in `block_tables` were made from, in
+    /// RAR 5, with `extra_dist` as it was: none while they are not read.
+    table_lengths: Option<Box<TableLengths>>,
+}
+
+/// The lengths a RAR 5 block's Huffman tables are made from, and whether
+/// they have RAR 7's extra distances: equal lengths make equal tables.
+#[derive(Clone, PartialEq, Eq)]
+struct TableLengths {
+    lengths: [u8; HUFF_TABLE_SIZEX],
+    extra_dist: bool,
 }
 
 impl fmt::Debug for Unpack {
@@ -426,6 +468,10 @@ impl Unpack {
             alloc_win_size: 0,
             max_win_size: 0,
             extra_dist: false,
+            threads: 1,
+            inp_base: 0,
+            header_at: 0,
+            table_lengths: None,
         };
         // Done once for all files, so that a first file wrongly called solid
         // starts from something.
@@ -468,6 +514,11 @@ impl Unpack {
         Ok(())
     }
 
+    /// How many threads RAR 5's blocks may be decoded in, at most.
+    pub(crate) fn set_threads(&mut self, threads: u32) {
+        self.threads = threads.max(1);
+    }
+
     /// `Unpack::SetDestSize`.
     pub(crate) fn set_dest_size(&mut self, dest_size: i64) {
         self.dest_unp_size = dest_size;
@@ -480,6 +531,10 @@ impl Unpack {
         solid: bool,
         io: &mut dyn UnpIo,
     ) -> Result<(), Error> {
+        if !matches!(method, 50 | 70) {
+            // The older algorithms' tables are in `block_tables` too.
+            self.table_lengths = None;
+        }
         match method {
             // RAR 1.5.
             15 => self.unpack15(solid, io),
@@ -504,6 +559,7 @@ impl Unpack {
             self.last_dist = u32::MAX;
             self.last_length = 0;
             *self.block_tables = BlockTables::zero();
+            self.table_lengths = None;
             self.unp_ptr = 0;
             self.wr_ptr = 0;
             self.prev_ptr = 0;
@@ -514,6 +570,7 @@ impl Unpack {
         self.filters.clear();
 
         self.inp.init();
+        self.inp_base = 0;
         self.written_file_size = 0;
         self.read_top = 0;
         self.read_border = 0;

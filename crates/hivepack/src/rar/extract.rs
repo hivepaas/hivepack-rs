@@ -47,6 +47,20 @@ pub(crate) struct DataIo<'a, 'o, R: ReadAt> {
     pub(crate) unp_volume: bool,
     /// `NextVolumeMissing`.
     pub(crate) next_volume_missing: bool,
+    /// The packed data read again, apart, for threads to decode ahead: none
+    /// where it goes on in another volume.
+    pub(crate) ahead: Option<Ahead>,
+}
+
+/// Where an entry's packed data is in the archive, to be read again from its
+/// start, decrypted by a clone of what decrypts it.
+pub(crate) struct Ahead {
+    /// Where the data starts in the archive's file.
+    pub(crate) start: u64,
+    pub(crate) size: u64,
+    pub(crate) decrypt: Option<CryptData>,
+    /// The offset of the next read.
+    pub(crate) next: u64,
 }
 
 impl<R: ReadAt> UnpIo for DataIo<'_, '_, R> {
@@ -108,6 +122,31 @@ impl<R: ReadAt> UnpIo for DataIo<'_, '_, R> {
         Ok(Some(total))
     }
 
+    fn packed_size(&self) -> Option<u64> {
+        self.ahead.as_ref().map(|ahead| ahead.size)
+    }
+
+    fn packed_ahead(&mut self, offset: u64, buf: &mut [u8]) -> Result<Option<usize>, Error> {
+        let Some(ahead) = &mut self.ahead else {
+            return Ok(None);
+        };
+        if offset != ahead.next {
+            return Ok(None);
+        }
+        let left = ahead.size.saturating_sub(offset);
+        let mut n = (buf.len() as u64).min(left) as usize;
+        // Whole blocks, but for the end.
+        if ahead.decrypt.is_some() && (n as u64) < left {
+            n &= !15;
+        }
+        let read = self.arc.read_at(ahead.start + offset, &mut buf[..n])?;
+        if let Some(decrypt) = &mut ahead.decrypt {
+            decrypt.decrypt_block(buf, read);
+        }
+        ahead.next += read as u64;
+        Ok(Some(read))
+    }
+
     fn unp_write(&mut self, data: &[u8]) -> Result<(), Error> {
         (self.out)(data)?;
         *self.cur_unp_write += data.len() as u64;
@@ -132,6 +171,17 @@ pub struct Extract {
     /// the extraction stops, as `CheckWinLimit` stops it when nobody allows
     /// more. By default what UnRAR allows, 4 GiB.
     pub win_size_limit: u64,
+    /// How many threads decompress an entry of RAR 5 or 7 with, at most: one
+    /// by default. Each Huffman block is decoded ahead in a thread of its own,
+    /// as UnRAR's `-mt` does, and what is decoded is written into the window
+    /// on the caller's thread, in order: what comes out is the same, damaged
+    /// data and errors too. Not for an entry going on in another volume, nor
+    /// the older algorithms.
+    pub threads: u32,
+    /// The packed size from which an entry is decompressed in
+    /// [`Extract::threads`]: 1 MiB by default, as threads for a few blocks
+    /// cost more than they give.
+    pub threads_from: u64,
     /// Goes through the entries without decompressing or giving out any data:
     /// what is read and what is passed over are as when reading it, as what
     /// follows a directory's header or a split entry's end depends on that, so
@@ -183,6 +233,8 @@ impl Default for Extract {
     fn default() -> Extract {
         Extract {
             win_size_limit: 0x1_0000_0000,
+            threads: 1,
+            threads_from: 1 << 20,
             headers_only: false,
             link_targets: false,
             link_target: Vec::new(),
@@ -402,6 +454,7 @@ impl Extract {
                         decrypt,
                         unp_volume: false,
                         next_volume_missing: false,
+                        ahead: None,
                     };
                     let read = io.unp_read(&mut target)?.unwrap_or(0);
                     if read == target.len() {
@@ -434,6 +487,7 @@ impl Extract {
                 decrypt,
                 unp_volume: self.unp_volume,
                 next_volume_missing: false,
+                ahead: None,
             };
             unstore_file(&mut io, dest_left)?;
             self.unp_volume = io.unp_volume;
@@ -449,6 +503,18 @@ impl Extract {
                 (arc.file_head.unp_ver, arc.file_head.solid)
             };
             let packed_left = arc.file_head.pack_size;
+            // Read again apart for threads, where it is all in this volume.
+            let threads = if packed_left.max(0) as u64 >= self.threads_from {
+                self.threads
+            } else {
+                1
+            };
+            let ahead = (threads > 1 && !self.unp_volume).then(|| Ahead {
+                start: arc.tell(),
+                size: packed_left.max(0) as u64,
+                decrypt: decrypt.clone(),
+                next: 0,
+            });
             let mut io = DataIo {
                 arc: &mut *arc,
                 packed_left,
@@ -459,7 +525,9 @@ impl Extract {
                 decrypt,
                 unp_volume: self.unp_volume,
                 next_volume_missing: false,
+                ahead,
             };
+            unp.set_threads(threads);
             unp.do_unpack(method, solid, &mut io)?;
             self.unp_volume = io.unp_volume;
             next_volume_missing = io.next_volume_missing;
