@@ -2,6 +2,9 @@
 //! header is read past: the archive opened and every header read and
 //! stepped over, twice. Both reads must see the same headers, and a panic
 //! is a bug (`crates/hivepack/tests/rar_oracle.rs` compares the answers with UnRAR).
+//! The second reading decodes RAR 5's blocks in three threads, ahead of
+//! the caller's (`Extract::threads`), from any size: what comes out of each
+//! entry, and how it ends, are the same.
 //!
 //! UnRAR's license, which hivepack::rar is under:
 //!
@@ -23,12 +26,14 @@ use libfuzzer_sys::fuzz_target;
 mod patch;
 
 /// What came out of each entry, then how the going through ended.
-fn test(data: &[u8]) -> (Vec<(u64, u64)>, String) {
+fn test(data: &[u8], threads: u32) -> (Vec<(u64, u64)>, String) {
     let mut arc = match Archive::open(data, true) {
         Ok(arc) => arc,
         Err(e) => return (Vec::new(), format!("open: {e}")),
     };
     let mut extract = Extract::new();
+    extract.threads = threads;
+    extract.threads_from = 0;
     let mut entries = Vec::new();
     loop {
         let size = match arc.read_header() {
@@ -61,5 +66,5 @@ fn test(data: &[u8]) -> (Vec<(u64, u64)>, String) {
 // the data does not get far in archives so small.
 fuzz_target!(|data: &[u8]| {
     let archive = patch::with_packed_data(data);
-    assert_eq!(test(&archive), test(&archive));
+    assert_eq!(test(&archive, 1), test(&archive, 3));
 });

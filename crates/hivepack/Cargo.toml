@@ -313,6 +313,11 @@ path = "tests/extract_rar.rs"
 required-features = ["extract", "rar", "xz", "zip"]
 
 [[test]]
+name = "extract_rar_threads"
+path = "tests/extract_rar_threads.rs"
+required-features = ["extract", "rar", "xz", "zip"]
+
+[[test]]
 name = "extract_select"
 path = "tests/extract_select.rs"
 required-features = ["extract", "sevenz", "tar", "xz", "zip"]
@@ -410,6 +415,11 @@ required-features = ["cpio", "extract", "iso", "open", "sevenz", "udf", "xar", "
 [[test]]
 name = "rar_oracle"
 path = "tests/rar_oracle.rs"
+required-features = ["deflate", "rar"]
+
+[[test]]
+name = "rar_threads"
+path = "tests/rar_threads.rs"
 required-features = ["deflate", "rar"]
 
 [[test]]

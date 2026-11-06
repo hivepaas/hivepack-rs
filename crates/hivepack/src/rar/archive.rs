@@ -228,6 +228,17 @@ impl<R: ReadAt> Archive<R> {
         }
     }
 
+    /// Reads at `pos` in the archive's file, wherever its own position is,
+    /// as much of `buf` as there is: data is never a QuickOpen record's copy.
+    pub(crate) fn read_at(&self, pos: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+        let mut pos = pos;
+        Cursor {
+            src: &self.src,
+            pos: &mut pos,
+        }
+        .read(buf)
+    }
+
     /// `Archive::Tell`.
     pub(crate) fn tell(&self) -> u64 {
         if self.qopen.loaded {
