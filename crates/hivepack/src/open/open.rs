@@ -23,6 +23,11 @@ pub struct Limits {
     /// default, libzstd's own limit, beyond which `zstd -d` needs
     /// `--long` or `--memory`.
     pub zstd_window_log_max: u32,
+    /// What zstd's frames decoded in threads ([`Opener::threads`]) may hold
+    /// at once: their bytes, what they decode to, and a decoder each. 1 GiB
+    /// by default; one thread, the caller's, is always allowed, its window
+    /// held to `zstd_window_log_max`.
+    pub zstd_memlimit: u64,
     /// What xz, lzip and .lzma's decoders may use: 1 GiB by default. `xz
     /// -9` needs 65 MiB. With [`Opener::threads`], xz's threads are lowered
     /// to fit it, as liblzma lowers them, one always allowed, and pbzx's
@@ -40,6 +45,7 @@ impl Default for Limits {
         Limits {
             max_layers: 8,
             zstd_window_log_max: 27,
+            zstd_memlimit: 1 << 30,
             xz_memlimit: 1 << 30,
             bzip2_memlimit: u64::MAX,
         }
@@ -161,7 +167,10 @@ where
     }
 
     /// How many threads its decoders may use: one, the caller's, by
-    /// default. An xz Stream whose Blocks have their sizes in their headers,
+    /// default. zstd frames one after the other, as pzstd and zstd's
+    /// seekable format write them, are decoded a frame in each, as far as
+    /// [`Limits::zstd_memlimit`] allows (`zstd -T`'s one frame is not). An
+    /// xz Stream whose Blocks have their sizes in their headers,
     /// as `xz -T`, 7-Zip and [`Stream::stream_encoder_mt`] write them, is
     /// decoded a Block in each, as far as [`Limits::xz_memlimit`] allows;
     /// bzip2 streams one after the other, as pbzip2 and [`CompressMt`] write
@@ -195,6 +204,7 @@ where
     {
         let decode_limits = DecodeLimits {
             zstd_window_log_max: self.limits.zstd_window_log_max,
+            zstd_memlimit: self.limits.zstd_memlimit,
             xz_memlimit: self.limits.xz_memlimit,
             bzip2_memlimit: self.limits.bzip2_memlimit,
             threads: self.threads.count(),

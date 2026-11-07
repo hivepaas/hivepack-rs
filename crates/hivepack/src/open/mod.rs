@@ -45,6 +45,8 @@ mod detect;
 mod error;
 mod open;
 mod pbzx_threads;
+mod pieces;
+mod zstd_threads;
 
 pub use decode::DecodeError;
 pub use detect::{Container, Detected, HEAD_LEN, ISO_HEAD_LEN, Layer, UDF_HEAD_LEN, detect};

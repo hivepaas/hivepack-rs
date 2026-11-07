@@ -1160,6 +1160,108 @@ fn pbzx_chunks_decode_in_threads_as_in_one() {
     }
 }
 
+/// zstd frames as pzstd writes them: a skippable frame of each frame's
+/// size before it, the frames libzstd's (the `zstd` crate's).
+fn pzstd_like(data: &[u8], cut: usize) -> Vec<u8> {
+    let mut file = Vec::new();
+    for piece in data.chunks(cut) {
+        let frame = zstd(piece);
+        file.extend(0x184D_2A50u32.to_le_bytes());
+        file.extend(4u32.to_le_bytes());
+        file.extend((frame.len() as u32).to_le_bytes());
+        file.extend(frame);
+    }
+    file
+}
+
+/// zstd's frames in threads read what one thread reads; after an error,
+/// the start of it, as what libzstd gives out before one depends on its
+/// output buffer, and the same error.
+#[test]
+fn zstd_frames_decode_in_threads_as_in_one() {
+    let tar = sample_tar();
+    let file = pzstd_like(&tar, 8 << 10);
+    // The frame in the middle, its first block's type made reserved.
+    let mut starts = Vec::new();
+    let mut at = 0;
+    while at < file.len() {
+        let size = u32::from_le_bytes(file[at + 8..at + 12].try_into().unwrap()) as usize;
+        starts.push(at + 12);
+        at += 12 + size;
+    }
+    let middle = starts[starts.len() / 2];
+    let mut damaged = file.clone();
+    damaged[middle + hivepack::zstd::frame_header_size(&file[middle..]).unwrap()] |= 0x06;
+    let mut cut = file.clone();
+    cut.truncate(file.len() * 2 / 3);
+    let mut after = file.clone();
+    after.extend(b"more");
+    let mut narrow = Limits::default();
+    narrow.zstd_window_log_max = 10;
+    let mut tight = Limits::default();
+    tight.zstd_memlimit = 1;
+    let cases: [(&str, &[u8], Limits); 7] = [
+        ("frames", &file, Limits::default()),
+        ("one frame", &zstd(&tar), Limits::default()),
+        ("damaged", &damaged, Limits::default()),
+        ("cut short", &cut, Limits::default()),
+        ("bytes after", &after, Limits::default()),
+        ("windows past the limit", &file, narrow),
+        ("no room for threads", &file, tight),
+    ];
+    for (what, file, limits) in cases {
+        let alone = read_with(file, Threads::One, limits);
+        for threads in [Threads::of(2), Threads::of(8)] {
+            let (data, error) = read_with(file, threads, limits);
+            assert!(error == alone.1, "{what}, {threads:?}: {error:?}");
+            let n = data.len().min(alone.0.len());
+            assert!(data[..n] == alone.0[..n], "{what}, {threads:?}");
+        }
+        match what {
+            "frames" | "one frame" | "no room for threads" => {
+                assert!(alone == (tar.clone(), None), "{what}")
+            }
+            _ => assert!(alone.1.is_some(), "{what} read through"),
+        }
+    }
+}
+
+/// What `zstd::CompressFrames` writes, its seek table after the frames, is
+/// read in threads as in one: the data, and the seek table, a skippable
+/// frame, passed over.
+#[test]
+fn zstd_compress_frames_decode_in_threads() {
+    use hivepack::zstd::{
+        CompressFrames, EndDirective, FramesOptions, InBuffer, OutBuffer, compress_bound,
+    };
+    let tar = sample_tar();
+    for seek_table in [true, false] {
+        let options = FramesOptions {
+            frame_size: 8 << 10,
+            threads: Threads::of(2),
+            seek_table,
+            ..FramesOptions::default()
+        };
+        let mut frames = CompressFrames::new(&options).unwrap();
+        let mut file = vec![0; compress_bound(tar.len()).unwrap() + 4096];
+        let mut output = OutBuffer::new(&mut file);
+        let mut input = InBuffer::new(&tar);
+        while frames
+            .compress_stream(&mut output, &mut input, EndDirective::End)
+            .unwrap()
+            != 0
+        {}
+        let n = output.pos;
+        file.truncate(n);
+        for threads in [Threads::One, Threads::of(2), Threads::of(8)] {
+            assert!(
+                read_with(&file, threads, Limits::default()) == (tar.clone(), None),
+                "seek table {seek_table}, {threads:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn xz_blocks_decode_in_threads_as_in_one() {
     let tar = sample_tar();

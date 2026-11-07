@@ -373,7 +373,7 @@ fn bzip2_case(threads: u32) {
 }
 
 /// What `Opener` reads of `file`, with `threads` and `limits`, as a hash:
-/// bzip2's, and pbzx's.
+/// bzip2's, pbzx's and zstd's.
 fn open_bzip2(file: &[u8], threads: u32, limits: Limits) -> u64 {
     let mut opener = Opener::new(|| Ok(Cursor::new(file)))
         .threads(Threads::of(threads))
@@ -452,6 +452,35 @@ fn pbzx_threads_within_the_limit() {
         assert_eq!(got, plain, "limit {limit}");
         println!(
             "pbzx read, 8 threads: {:.1} MiB held, limit {:.1} MiB",
+            actual as f64 / MIB,
+            limit as f64 / MIB
+        );
+        assert!(actual <= limit + (1 << 20), "limit {limit}: {actual} held");
+    }
+}
+
+/// zstd frames read in threads by `Opener`: their bytes, what they decode
+/// to and a decoder each, within `Limits::zstd_memlimit`, and a megabyte
+/// for what is read ahead and the layers' buffers.
+#[test]
+fn zstd_frames_threads_within_the_limit() {
+    let _one = lock();
+    let data = text(4 << 20, 19);
+    let mut file = Vec::new();
+    for piece in data.chunks(256 << 10) {
+        let mut cctx = zstd_cctx(3, 0);
+        let mut frame = vec![0; hivepack::zstd::compress_bound(piece.len()).unwrap()];
+        let n = cctx.compress2(&mut frame, piece).unwrap();
+        file.extend(&frame[..n]);
+    }
+    let plain = open_bzip2(&file, 1, Limits::default());
+    for limit in [2 << 20, 6 << 20] {
+        let mut limits = Limits::default();
+        limits.zstd_memlimit = limit;
+        let (actual, got) = measure(|| open_bzip2(&file, 8, limits));
+        assert_eq!(got, plain, "limit {limit}");
+        println!(
+            "zstd frames read, 8 threads: {:.1} MiB held, limit {:.1} MiB",
             actual as f64 / MIB,
             limit as f64 / MIB
         );
