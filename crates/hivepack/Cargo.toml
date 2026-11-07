@@ -163,6 +163,7 @@ windows-sys = { workspace = true, optional = true, features = [
 [dev-dependencies]
 # The reference libraries, to compress, decompress and compare with in tests.
 zstd = { workspace = true, features = ["no_asm"] }
+zstd-safe.workspace = true
 libz-sys.workspace = true
 flate2.workspace = true
 bzip2.workspace = true
@@ -477,6 +478,11 @@ path = "tests/tar_oracle.rs"
 required-features = ["bzip2", "crypto", "tar"]
 
 [[test]]
+name = "tar_sparse_write"
+path = "tests/tar_sparse_write.rs"
+required-features = ["tar"]
+
+[[test]]
 name = "tar_writer"
 path = "tests/tar_writer.rs"
 required-features = ["bzip2", "crypto", "tar"]
@@ -594,6 +600,11 @@ required-features = ["zstd"]
 [[test]]
 name = "zstd_compress_target"
 path = "tests/zstd_compress_target.rs"
+required-features = ["zstd"]
+
+[[test]]
+name = "zstd_frames"
+path = "tests/zstd_frames.rs"
 required-features = ["zstd"]
 
 [[test]]

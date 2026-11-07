@@ -538,7 +538,10 @@ where
                 Some((threads, _held)) => {
                     write_at_once(*opener, destination, plan, run, options, summary, threads)
                 }
-                None => write_in_order(opener, destination, plan, run, options, summary),
+                None => {
+                    let (threads, _held) = block_threads(plan, options);
+                    write_in_order(opener, destination, plan, run, options, summary, threads)
+                }
             }
         },
     )
@@ -565,7 +568,8 @@ where
         || Ok(state.target(options)),
         options,
         |opener, target, plan, run, summary| {
-            write_in_order(opener, target, plan, run, options, summary)
+            let (threads, _held) = block_threads(plan, options);
+            write_in_order(opener, target, plan, run, options, summary, threads)
         },
     )
 }
@@ -731,8 +735,64 @@ fn threads_for(
     (threads > 1).then_some((threads, held))
 }
 
+/// What RAR 5's blocks decoded ahead in threads hold besides the window, at
+/// most, whatever the threads, and [`BLOCK_THREAD_MEMORY`] for each thread:
+/// see `docs/memory.md`.
+const BLOCK_THREADS_MEMORY: u64 = 72 << 20;
+/// What each thread adds to [`BLOCK_THREADS_MEMORY`]: two blocks in flight.
+const BLOCK_THREAD_MEMORY: u64 = 160 << 10;
+
+/// The threads an entry of RAR 5 or 7 is decompressed in where the entries
+/// are written one at a time, a Huffman block in each
+/// ([`Extract::threads`]): [`Options::threads`], lowered until the window and
+/// what they hold besides ([`BLOCK_THREADS_MEMORY`], and
+/// [`BLOCK_THREAD_MEMORY`] for each) fit [`Options::memory_limit`], and held
+/// from [`Options::memory_budget`] until they are done. One, the window alone
+/// as without threads, is always allowed.
+fn block_threads(plan: &Plan<'_>, options: &Options) -> (u32, Option<Box<dyn std::any::Any>>) {
+    let layout = plan.layout;
+    // A solid stream decompresses every entry, written or not.
+    let window = (0..plan.items.len())
+        .filter(|&at| layout.solid || plan.writes_data(at))
+        .map(|at| layout.memory[at])
+        .max()
+        .unwrap_or(0);
+    block_threads_with(window, options)
+}
+
+/// [`block_threads`], for a window of `window` bytes at most.
+fn block_threads_with(window: u64, options: &Options) -> (u32, Option<Box<dyn std::any::Any>>) {
+    let wanted = options.threads.count();
+    let base = window.saturating_add(BLOCK_THREADS_MEMORY);
+    let need = |n: u32| {
+        if n > 1 {
+            base.saturating_add(u64::from(n) * BLOCK_THREAD_MEMORY)
+        } else {
+            0
+        }
+    };
+    let limit = options.memory_limit.unwrap_or(u64::MAX);
+    let fit = limit.saturating_sub(base) / BLOCK_THREAD_MEMORY;
+    let threads = u32::try_from(fit).unwrap_or(u32::MAX).min(wanted);
+    let threads = if threads > 1 && need(threads) <= limit {
+        threads
+    } else {
+        1
+    };
+    #[cfg(feature = "memory")]
+    if let Some(budget) = &options.memory_budget
+        && threads > 1
+    {
+        let (fit, held) = budget.hold_threads(threads, need);
+        return (fit, Some(Box::new(held)));
+    }
+    (threads, None)
+}
+
 /// Goes through the archive once more, as the first reading did, and writes
-/// what `plan` says, one entry at a time, in order.
+/// what `plan` says, one entry at a time, in order, each entry of RAR 5 or
+/// 7 decompressed in `threads`.
+#[allow(clippy::too_many_arguments)]
 fn write_in_order<R, F, T>(
     open: &mut F,
     destination: &T,
@@ -740,6 +800,7 @@ fn write_in_order<R, F, T>(
     run: &Run<'_>,
     options: &Options,
     summary: &mut Summary,
+    threads: u32,
 ) -> Result<(), Error>
 where
     R: ReadAt,
@@ -749,6 +810,7 @@ where
     let mut arc = open(plan.password).map_err(|e| Error::global(rar_error(e)))?;
     let mut extract = Extract::new();
     extract.link_targets = true;
+    extract.threads = threads;
     let mut next = 0;
     // What the entries not written read through.
     let mut read_through = 0u64;
@@ -1271,4 +1333,53 @@ where
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU32;
+
+    use super::*;
+    use crate::Threads;
+
+    fn options(threads: u32, limit: Option<u64>) -> Options {
+        Options {
+            threads: Threads::Exactly(NonZeroU32::new(threads).unwrap()),
+            memory_limit: limit,
+            ..Options::default()
+        }
+    }
+
+    /// RAR 5's blocks take as many threads as fit the limit with the window;
+    /// one, the window alone, is always allowed.
+    #[test]
+    fn block_threads_fit_the_limit() {
+        let window = 4 << 20;
+        let threads = |wanted, limit| block_threads_with(window, &options(wanted, limit)).0;
+        let four = window + BLOCK_THREADS_MEMORY + 4 * BLOCK_THREAD_MEMORY;
+        assert_eq!(threads(1, None), 1);
+        assert_eq!(threads(8, None), 8);
+        assert_eq!(threads(8, Some(0)), 1);
+        assert_eq!(threads(8, Some(four)), 4);
+        assert_eq!(threads(8, Some(four - 1)), 3);
+        assert_eq!(threads(u32::MAX, Some(four)), 4);
+        let two = window + BLOCK_THREADS_MEMORY + 2 * BLOCK_THREAD_MEMORY;
+        assert_eq!(threads(8, Some(two - 1)), 1);
+        assert_eq!(threads(8, Some(two - window)), 1);
+    }
+
+    #[cfg(feature = "memory")]
+    #[test]
+    fn block_threads_are_held_from_the_budget() {
+        let budget = crate::memory::Budget::new(1 << 30);
+        let with_budget = Options {
+            memory_budget: Some(budget.clone()),
+            ..options(4, None)
+        };
+        let (threads, held) = block_threads_with(4 << 20, &with_budget);
+        assert_eq!(threads, 4);
+        assert!(budget.held() >= (4 << 20) + BLOCK_THREADS_MEMORY + 4 * BLOCK_THREAD_MEMORY);
+        drop(held);
+        assert_eq!(budget.held(), 0);
+    }
 }

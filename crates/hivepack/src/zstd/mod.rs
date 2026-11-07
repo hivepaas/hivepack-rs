@@ -233,6 +233,7 @@ mod common;
 mod compress;
 mod decompress;
 mod dict_builder;
+mod frames;
 
 #[cfg(test)]
 mod oracle;
@@ -278,6 +279,7 @@ pub use dict_builder::zdict::{
     DictParams, add_entropy_tables_from_buffer, finalize_dictionary, get_dict_header_size,
     get_dict_id, train_from_buffer,
 };
+pub use frames::{CompressFrames, FRAME_SIZE, FramesOptions};
 
 /// The libzstd release this crate follows, as libzstd's
 /// `ZSTD_VERSION_STRING` gives it.
