@@ -477,6 +477,11 @@ path = "tests/tar_oracle.rs"
 required-features = ["bzip2", "crypto", "tar"]
 
 [[test]]
+name = "tar_sparse_write"
+path = "tests/tar_sparse_write.rs"
+required-features = ["tar"]
+
+[[test]]
 name = "tar_writer"
 path = "tests/tar_writer.rs"
 required-features = ["bzip2", "crypto", "tar"]
