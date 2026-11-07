@@ -352,18 +352,22 @@ pub struct Options {
     /// archive's entries are apart (ZIP, and RAR that is not solid), that many
     /// files are written at once, each read and decompressed in a thread of
     /// its own. A tar or cpio archive, a stream, is read on the caller's
-    /// thread, and its files written by the others, as many at once. In 7z, a
-    /// folder whose LZMA2 stream resets its dictionary on the way (7-Zip's in
-    /// threads, [`Lzma2Blocks`](crate::sevenz::Lzma2Blocks)) is decompressed a
-    /// block in each thread, its files still written one after another. What
-    /// is written is the same.
+    /// thread, and its files written by the others, as many at once. In 7z,
+    /// that many folders (solid blocks, or the files of an archive that is not
+    /// solid) are decoded at once, each by a thread that writes its files; the
+    /// threads left over decompress LZMA2 whose stream resets its dictionary
+    /// on the way (7-Zip's in threads,
+    /// [`Lzma2Blocks`](crate::sevenz::Lzma2Blocks)) a block in each. What is
+    /// written is the same.
     pub threads: Threads,
     /// The memory the threads may take, where each holds what it decompresses
     /// with: RAR's ([`extract_rar`](crate::extract::extract_rar)), whose every
     /// thread has a window as large as the archive's dictionary asks, and
-    /// PPMd's model in RAR 4. The threads are lowered until what they take,
-    /// counted for the most each may hold, fits; one is always allowed, as it
-    /// takes what extracting without threads does. For tar and cpio, the data
+    /// PPMd's model in RAR 4; 7z's ([`extract_7z`](crate::extract::extract_7z)),
+    /// whose every thread has its folder's dictionaries and models, LZMA2's
+    /// blocks decoded ahead taking what they leave. The threads are lowered
+    /// until what they take, counted for the most each may hold, fits; one is
+    /// always allowed, as it takes what extracting without threads does. For tar and cpio, the data
     /// read and handed to threads to write, 32 MiB at most, is held to it.
     /// None by default. See
     /// [docs/memory.md](https://github.com/hivepaas/hivepack-rs/blob/main/docs/memory.md#readers).

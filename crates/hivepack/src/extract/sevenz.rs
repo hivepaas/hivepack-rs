@@ -8,11 +8,15 @@
 //! ends, and each folder's checks made when its last file is read.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{self, Read, Seek, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::sevenz::{Archive, Entry, Files};
+use crate::sevenz::{Archive, Entry, Files, FolderFiles, Lzma2Threads, Spare};
 
 use crate::extract::destination::Target;
 use crate::extract::error::{Error, ErrorKind};
@@ -22,7 +26,7 @@ use crate::extract::plan::{LinkChecked, LinkTo, link_to, named, settle, settle_l
 use crate::extract::progress::Run;
 use crate::extract::sink::{Sink, SinkState};
 use crate::extract::tar::write_with;
-use crate::extract::zip::{Summary, open_destination, set_dir_times};
+use crate::extract::zip::{Room, Summary, open_destination, set_dir_times};
 
 /// `FILE_ATTRIBUTE_UNIX_EXTENSION`: 7-Zip keeps a Unix mode in the high 16
 /// bits of the attributes when this bit is set.
@@ -247,11 +251,23 @@ fn links<'a, R: Read + Seek>(
 /// are encrypted needs it to be opened, with
 /// [`crate::sevenz::Options::password`].
 ///
-/// [`Options::threads`] decodes LZMA2 whose stream resets its dictionary on
-/// the way, as 7-Zip writes it in threads and
-/// [`crate::sevenz::Lzma2Blocks`] does, a block in each thread, in place of
-/// what [`Archive::set_threads`] said, for this extraction. The files are
-/// still written one after another, in the archive's order.
+/// With [`Options::threads`], that many folders (each a solid block, or a
+/// file of an archive that is not solid) are decoded at once, each by a thread
+/// of its own, which writes its files in the archive's order; the largest
+/// folders are started first. The directories and the files without data are
+/// made first, on the caller's thread, which reads the archive for the others,
+/// a piece at a time: `R` needs no more than [`Read`] and [`Seek`]. Each thread
+/// holds its folder's decoder, whose dictionaries and models the archive says:
+/// the threads are lowered until they fit [`Options::memory_limit`] and
+/// `Options::memory_budget`, one always allowed. The threads left over, and
+/// those whose folders are done as the last ones are decoded, decode LZMA2
+/// whose stream resets its dictionary on the way, as 7-Zip writes it in
+/// threads and [`crate::sevenz::Lzma2Blocks`] does, a block in each, in place
+/// of what [`Archive::set_threads`] said, for this extraction: all of them
+/// where one folder is decoded at a time. What is written is the same whatever
+/// the threads, and so is the summary. The first error stops the other
+/// threads, which remove the files they were writing, and is the one returned;
+/// files after it in the archive may have been written.
 pub fn extract_7z<R: Read + Seek>(
     archive: &mut Archive<R>,
     destination: &Path,
@@ -263,11 +279,22 @@ pub fn extract_7z<R: Read + Seek>(
             .map_err(|e| Error::global(ErrorKind::Origin(e)))?;
     }
     let options = &options.for_folder(destination);
-    extract_into(archive, || open_destination(destination, options), options)
+    extract_into(
+        archive,
+        || open_destination(destination, options),
+        options,
+        true,
+        |archive, writing, summary| match writing.threading.workers {
+            1 => write_in_order(archive, writing, summary),
+            _ => write_at_once(archive, writing, summary),
+        },
+    )
 }
 
 /// Extracts `archive` into `sink`, with the checks and in the order of
-/// [`extract_7z`], each folder decoded once: see [`Sink`].
+/// [`extract_7z`], each folder decoded once: see [`Sink`]. The sink is given
+/// one entry at a time, on the caller's thread, the folders decoded one after
+/// another, whatever [`Options::threads`] says; it decodes LZMA2 in blocks.
 pub fn extract_7z_to<R: Read + Seek>(
     archive: &mut Archive<R>,
     sink: &mut dyn Sink,
@@ -275,19 +302,143 @@ pub fn extract_7z_to<R: Read + Seek>(
 ) -> Result<Summary, Error> {
     let state = SinkState::new(sink);
     let options = &options.for_sink();
-    extract_into(archive, || Ok(state.target(options)), options)
+    extract_into(
+        archive,
+        || Ok(state.target(options)),
+        options,
+        false,
+        write_in_order,
+    )
+}
+
+/// Entries one after another whose data is in the same folder, or which have
+/// none: what one thread writes, as [`Files`] reads them. A folder has one,
+/// unless entries without data are put between its files.
+struct Span {
+    files: Range<usize>,
+    folder: Option<usize>,
+}
+
+/// The spans of `folders`, each entry's folder, in order.
+fn spans(folders: &[Option<usize>]) -> Vec<Span> {
+    let mut spans: Vec<Span> = Vec::new();
+    for (index, &folder) in folders.iter().enumerate() {
+        match spans.last_mut() {
+            Some(last) if last.folder == folder => last.files.end = index + 1,
+            _ => spans.push(Span {
+                files: index..index + 1,
+                folder,
+            }),
+        }
+    }
+    spans
+}
+
+/// How the folders are decoded: how many at once, and LZMA2 in blocks in
+/// each, its threads and what their jobs may hold.
+struct Threading {
+    workers: u32,
+    lzma2: Lzma2Threads,
+    /// LZMA2 in blocks where one folder is decoded at a time: to read the links'
+    /// targets, and with one worker.
+    alone: Lzma2Threads,
+    /// What is held of [`Options::memory_budget`] until the extraction is done.
+    _held: Option<Box<dyn std::any::Any + Send + Sync>>,
+}
+
+/// The threads to decode the folders of `spans` with, one at a time unless
+/// `at_once`. Each holds its folder's decoder, counted for the folder that
+/// takes the most (`Archive::folder_memory`): the threads are lowered until
+/// they fit the memory limit and budget, one always allowed. The threads left
+/// over are shared ([`Spare`]) by the folders whose LZMA2 is in blocks, and
+/// those of the folders done as the last are decoded; their jobs share what is
+/// left of the limit, and of
+/// [`decoder_memory_limit`](crate::sevenz::Options::decoder_memory_limit),
+/// once the decoders are counted, an equal part for each folder.
+fn threading<R: Read + Seek>(
+    archive: &Archive<R>,
+    spans: &[Span],
+    options: &Options,
+    at_once: bool,
+) -> Threading {
+    let threads = options.threads.count().max(1);
+    let folders = spans.iter().filter_map(|span| span.folder);
+    let wanted = match at_once {
+        true => threads.min(u32::try_from(folders.clone().count()).unwrap_or(u32::MAX)),
+        false => 1,
+    };
+    let each = folders
+        .map(|folder| archive.folder_memory(folder, threads > 1))
+        .max()
+        .unwrap_or(0);
+    let need = |n: u32| u64::from(n).saturating_mul(each);
+    let limit = options.memory_limit.unwrap_or(u64::MAX);
+    let workers = (1..=wanted).rev().find(|&n| need(n) <= limit).unwrap_or(1);
+    #[cfg(feature = "memory")]
+    let (workers, limit, held) = match &options.memory_budget {
+        Some(budget) if threads > 1 => {
+            let left = budget.left();
+            let (fit, holds) = budget.hold_threads(workers, need);
+            (
+                fit,
+                limit.min(left),
+                Some(Box::new(holds) as Box<dyn std::any::Any + Send + Sync>),
+            )
+        }
+        _ => (workers, limit, None),
+    };
+    #[cfg(not(feature = "memory"))]
+    let held = None;
+    let jobs = |n: u32| {
+        limit
+            .saturating_sub(need(n))
+            .min(archive.decoder_memory_limit())
+            / u64::from(n.max(1))
+    };
+    Threading {
+        workers,
+        lzma2: Lzma2Threads {
+            threads,
+            jobs: jobs(workers),
+            spare: Some(Spare::new(threads.saturating_sub(workers))),
+        },
+        alone: Lzma2Threads {
+            threads,
+            jobs: jobs(1),
+            spare: None,
+        },
+        _held: held,
+    }
+}
+
+/// What the entries are written by, once checked.
+struct Writing<'a, T> {
+    items: &'a [Item],
+    spans: &'a [Span],
+    written_now: &'a HashSet<u64>,
+    destination: &'a T,
+    run: &'a Run<'a>,
+    options: &'a Options,
+    threading: &'a Threading,
 }
 
 /// [`extract_7z`] into the target `make` makes, once the archive is checked,
-/// LZMA2 decoded in [`Options::threads`] for this extraction only.
+/// the entries written by `write`, folders decoded at once if `at_once`; LZMA2
+/// decoded in [`Options::threads`] for this extraction only.
 fn extract_into<R: Read + Seek, T: Target>(
     archive: &mut Archive<R>,
     make: impl FnOnce() -> Result<T, Error>,
     options: &Options,
+    at_once: bool,
+    write: impl FnOnce(&mut Archive<R>, &Writing<'_, T>, &mut Summary) -> Result<(), Error>,
 ) -> Result<Summary, Error> {
-    let before = archive.swap_thread_count(options.threads.count());
-    let extracted = extract_with(archive, make, options);
-    archive.swap_thread_count(before);
+    let before = archive.swap_lzma2(Lzma2Threads {
+        threads: options.threads.count(),
+        jobs: u64::MAX,
+        spare: None,
+    });
+    let extracted = extract_with(archive, make, options, at_once, write);
+    archive.swap_lzma2(before);
     extracted
 }
 
@@ -296,6 +447,8 @@ fn extract_with<R: Read + Seek, T: Target>(
     archive: &mut Archive<R>,
     make: impl FnOnce() -> Result<T, Error>,
     options: &Options,
+    at_once: bool,
+    write: impl FnOnce(&mut Archive<R>, &Writing<'_, T>, &mut Summary) -> Result<(), Error>,
 ) -> Result<Summary, Error> {
     let limits = &options.limits;
     let run = Run::new(options);
@@ -315,12 +468,18 @@ fn extract_with<R: Read + Seek, T: Target>(
         })
         .collect();
     let mut items = Vec::with_capacity(n);
+    let mut folder_of = Vec::with_capacity(n);
     for index in 0..n {
         run.check().map_err(Error::global)?;
-        items.push(item(&archive.entry(index), &folders, options));
+        let entry = archive.entry(index);
+        folder_of.push(entry.folder);
+        items.push(item(&entry, &folders, options));
     }
     let settled = settle(&mut items, options)?;
     let (kept, mut skipped) = check(&items, &settled, options)?;
+    let spans = spans(&folder_of);
+    let threading = threading(archive, &spans, options, at_once);
+    archive.swap_lzma2(threading.alone.clone());
     let links = match options.links {
         Links::Inside | Links::Any => links(archive, &kept, &run, options, &mut skipped)?,
         _ => Vec::new(),
@@ -348,15 +507,16 @@ fn extract_with<R: Read + Seek, T: Target>(
         renamed: settled.renamed,
         ..Summary::default()
     };
-    write_entries(
-        archive,
-        &items,
-        &written_now,
-        &destination,
-        &run,
+    let writing = Writing {
+        items: &items,
+        spans: &spans,
+        written_now: &written_now,
+        destination: &destination,
+        run: &run,
         options,
-        &mut summary,
-    )?;
+        threading: &threading,
+    };
+    write(archive, &writing, &mut summary)?;
     for link in &links {
         let error = |kind| link.item.error(kind);
         let Ok(name) = &link.item.name else {
@@ -371,37 +531,265 @@ fn extract_with<R: Read + Seek, T: Target>(
     }
     set_dir_times(&destination, &kept, &run)?;
     summary.damaged = run.take_damaged();
+    // In the archive's order, as one thread meets them, whatever the threads.
+    summary.damaged.sort_by_key(|damaged| damaged.error.index);
     Ok(summary)
 }
 
-/// The directories and files of `written_now`, in the archive's order, the
-/// folders decoded once from start to end; the last folder's checks made,
-/// whether its last files were written or skipped.
-fn write_entries<R: Read + Seek, T: Target>(
+/// What a thread wrote.
+#[derive(Default)]
+struct Tally {
+    files: u64,
+    directories: u64,
+    bytes: u64,
+}
+
+impl Tally {
+    fn add_to(&self, summary: &mut Summary) {
+        summary.files += self.files;
+        summary.directories += self.directories;
+        summary.bytes += self.bytes;
+    }
+}
+
+/// The directories and files of `writing.written_now`, in the archive's
+/// order, on this thread, the folders decoded one after another.
+fn write_in_order<R: Read + Seek, T: Target>(
     archive: &mut Archive<R>,
-    items: &[Item],
-    written_now: &HashSet<u64>,
-    destination: &T,
-    run: &Run<'_>,
-    options: &Options,
+    writing: &Writing<'_, T>,
     summary: &mut Summary,
 ) -> Result<(), Error> {
-    let mut files = archive.files();
+    let (folders, reader) = archive.apart();
+    let mut tally = Tally::default();
+    for span in writing.spans {
+        let mut files = folders.files(span.files.clone(), &mut *reader);
+        write_span(&mut files, span, writing, &mut tally, None)?;
+    }
+    tally.add_to(summary);
+    Ok(())
+}
+
+/// [`write_in_order`] with folders decoded at once, in `writing.threading`'s
+/// workers: the directories and the files without data first, in order, on
+/// this thread; then the folders, the largest first, each taken by the next
+/// thread that is free, which writes its files, reading the archive through
+/// this thread ([`serve`]).
+///
+/// The threads share `writing.run`, which tells [`Options::progress`] and
+/// asks [`Options::on_damaged`] one at a time, and what all files have
+/// written, held to the limit on it. The first to fail keeps its error and
+/// halts the others, which stop as if cancelled and remove the file they were
+/// writing.
+fn write_at_once<R: Read + Seek, T: Target + Sync>(
+    archive: &mut Archive<R>,
+    writing: &Writing<'_, T>,
+    summary: &mut Summary,
+) -> Result<(), Error> {
+    let total = AtomicU64::new(0);
+    let mut tally = Tally::default();
+    let mut by_size: Vec<(&Span, u64)> = writing
+        .spans
+        .iter()
+        .filter_map(|span| Some((span, archive.folder_size(span.folder?))))
+        .collect();
+    by_size.sort_by_key(|&(_, size)| std::cmp::Reverse(size));
+    let spare = writing.threading.lzma2.spare.clone();
+    archive.swap_lzma2(writing.threading.lzma2.clone());
+    let (folders, reader) = archive.apart();
+    for span in writing.spans.iter().filter(|span| span.folder.is_none()) {
+        let mut files = folders.files(span.files.clone(), &mut *reader);
+        write_span(&mut files, span, writing, &mut tally, Some(&total))?;
+    }
+
+    let next = AtomicUsize::new(0);
+    let failed: Mutex<Option<Error>> = Mutex::new(None);
+    let workers = usize::try_from(writing.threading.workers)
+        .unwrap_or(usize::MAX)
+        .min(by_size.len());
+    let (requests, asked) = mpsc::sync_channel::<Request>(workers);
+    let tallies = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                let mut remote = Remote::new(requests.clone());
+                let (folders, by_size, next, failed, total, spare) =
+                    (&folders, &by_size, &next, &failed, &total, &spare);
+                scope.spawn(move || {
+                    let mut tally = Tally::default();
+                    while let Some(&(span, _)) = by_size.get(next.fetch_add(1, Ordering::Relaxed)) {
+                        let written = writing.run.check().map_err(Error::global).and_then(|()| {
+                            let mut files = folders.files(span.files.clone(), &mut remote);
+                            write_span(&mut files, span, writing, &mut tally, Some(total))
+                        });
+                        if let Err(e) = written {
+                            // Kept before the others are halted: their errors
+                            // come after it.
+                            failed
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .get_or_insert(e);
+                            writing.run.halt();
+                            break;
+                        }
+                    }
+                    // Its thread, for the folders still decoded.
+                    if let Some(spare) = spare {
+                        spare.give(1);
+                    }
+                    tally
+                })
+            })
+            .collect();
+        drop(requests);
+        serve(reader, &asked);
+        handles
+            .into_iter()
+            .map(|handle| handle.join())
+            .collect::<Vec<_>>()
+    });
+    tally.add_to(summary);
+    for each in tallies {
+        // A thread that panicked: its panic goes on to the caller.
+        each.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            .add_to(summary);
+    }
+    match failed.into_inner().unwrap_or_else(PoisonError::into_inner) {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// A piece of the archive a thread asks for: `buf.len()` bytes at `pos`, and
+/// where to send them.
+struct Request {
+    pos: u64,
+    buf: Vec<u8>,
+    reply: SyncSender<Reply>,
+}
+
+/// The buffer of a [`Request`], filled with as many bytes as there were, or
+/// the error reading them.
+type Reply = (Vec<u8>, io::Result<usize>);
+
+/// Reads what the threads ask of `reader`, one piece at a time, until none of
+/// them is left to ask.
+fn serve<R: Read + Seek>(reader: &mut R, asked: &Receiver<Request>) {
+    for Request {
+        pos,
+        mut buf,
+        reply,
+    } in asked
+    {
+        let read = read_at(reader, pos, &mut buf);
+        // A thread that is gone needs no answer.
+        let _ = reply.send((buf, read));
+    }
+}
+
+/// Fills `buf` from `pos` in `reader`, as far as it goes.
+fn read_at<R: Read + Seek>(reader: &mut R, pos: u64, buf: &mut [u8]) -> io::Result<usize> {
+    reader.seek(SeekFrom::Start(pos))?;
+    let mut got = 0;
+    while got < buf.len() {
+        match reader.read(&mut buf[got..]) {
+            Ok(0) => break,
+            Ok(n) => got += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(got)
+}
+
+/// The archive, read by a thread through the one that [`serve`]s it.
+struct Remote {
+    pos: u64,
+    requests: SyncSender<Request>,
+    reply: SyncSender<Reply>,
+    replies: Receiver<Reply>,
+    /// The buffer sent with each request, kept between them.
+    buf: Vec<u8>,
+}
+
+impl Remote {
+    fn new(requests: SyncSender<Request>) -> Remote {
+        let (reply, replies) = mpsc::sync_channel(1);
+        Remote {
+            pos: 0,
+            requests,
+            reply,
+            replies,
+            buf: Vec::new(),
+        }
+    }
+}
+
+impl Read for Remote {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        let mut buf = std::mem::take(&mut self.buf);
+        buf.resize(out.len(), 0);
+        let gone = || io::Error::other("the archive's reader is gone");
+        let request = Request {
+            pos: self.pos,
+            buf,
+            reply: self.reply.clone(),
+        };
+        self.requests.send(request).map_err(|_| gone())?;
+        let (buf, read) = self.replies.recv().map_err(|_| gone())?;
+        self.buf = buf;
+        let n = read?.min(out.len());
+        out[..n].copy_from_slice(&self.buf[..n]);
+        self.pos = self.pos.saturating_add(n as u64);
+        Ok(n)
+    }
+}
+
+impl Seek for Remote {
+    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+        self.pos = match to {
+            SeekFrom::Start(pos) => Some(pos),
+            SeekFrom::Current(by) => self.pos.checked_add_signed(by),
+            SeekFrom::End(_) => None,
+        }
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        Ok(self.pos)
+    }
+}
+
+/// The entries of `span` that `writing` writes now, in order, read by `files`:
+/// at most `writing.options.limits.max_total_size` bytes in all, with those
+/// `tally` wrote, or with `total`, what all threads wrote. Its folder's checks
+/// are made once its last file is read, or after it if it is not, as the
+/// entry after it is read with one thread: they fail as that entry, if any.
+fn write_span<S: Read + Seek, T: Target>(
+    files: &mut FolderFiles<'_, '_, S>,
+    span: &Span,
+    writing: &Writing<'_, T>,
+    tally: &mut Tally,
+    total: Option<&AtomicU64>,
+) -> Result<(), Error> {
+    let Writing {
+        items,
+        written_now,
+        destination,
+        run: progress,
+        options,
+        ..
+    } = *writing;
     // Whether the last file written was damaged, and gone on from.
     let mut gone_on = false;
     // The files of a folder whose data failed, after what failed, and why.
-    let mut lost: Option<(std::ops::Range<usize>, crate::sevenz::Error)> = None;
-    for item in items {
-        run.check().map_err(Error::global)?;
+    let mut lost: Option<(Range<usize>, crate::sevenz::Error)> = None;
+    for item in &items[span.files.clone()] {
+        progress.check().map_err(Error::global)?;
         let index = item.index as usize;
         if let Some((range, e)) = &lost
             && range.contains(&index)
         {
             // Nothing of it can be read: left out, unless to stop.
             if written_now.contains(&item.index) && item.kind != Kind::Dir {
-                let (_, damage) = run.decide(item, ErrorKind::SevenZip(*e))?;
-                run.damaged(damage, None);
-                run.entry_done();
+                let (_, damage) = progress.decide(item, ErrorKind::SevenZip(*e))?;
+                progress.damaged(damage, None);
+                progress.entry_done();
             }
             continue;
         }
@@ -414,9 +802,9 @@ fn write_entries<R: Read + Seek, T: Target>(
             lost = Some((range, e));
             if in_it {
                 if written_now.contains(&item.index) && item.kind != Kind::Dir {
-                    let (_, damage) = run.decide(item, ErrorKind::SevenZip(e))?;
-                    run.damaged(damage, None);
-                    run.entry_done();
+                    let (_, damage) = progress.decide(item, ErrorKind::SevenZip(e))?;
+                    progress.damaged(damage, None);
+                    progress.entry_done();
                 }
                 gone_on = false;
                 continue;
@@ -440,39 +828,62 @@ fn write_entries<R: Read + Seek, T: Target>(
         let components = &name.components;
         if item.kind == Kind::Dir {
             destination.directory(item, components).map_err(error)?;
-            summary.directories += 1;
-            run.entry_done();
+            tally.directories += 1;
+            progress.entry_done();
             continue;
         }
-        let remaining = options.limits.max_total_size.saturating_sub(summary.bytes);
-        let before = run.damaged_count();
-        let written = write_with(item, Some(item.size), destination, run, options, |file| {
-            write_data(&mut files, item, file, remaining, run, options)
-        })?;
-        gone_on = run.damaged_count() > before;
+        let room = match total {
+            Some(total) => Room::Shared(total),
+            None => Room::Left(options.limits.max_total_size.saturating_sub(tally.bytes)),
+        };
+        let mut failed = false;
+        let written = write_with(
+            item,
+            Some(item.size),
+            destination,
+            progress,
+            options,
+            |file| {
+                let written = write_data(files, item, file, room, progress, options);
+                failed = written.is_err();
+                written
+            },
+        )?;
+        // Its data failed, and the file was left out or kept.
+        gone_on = failed;
         if let Some(written) = written {
-            summary.files += 1;
-            summary.bytes += written;
+            tally.files += 1;
+            tally.bytes += written;
         }
-        run.entry_done();
+        progress.entry_done();
     }
-    // Past the last file: its folder's checks, if it was skipped; none to make
-    // of a folder gone on from.
+    // Past its last file: its folder's checks, if that file was skipped, as
+    // the next entry is read; none to make of a folder gone on from.
+    let after = items.get(span.files.end);
+    if after.is_some() {
+        progress.check().map_err(Error::global)?;
+    }
     match files.next() {
         Ok(_) => Ok(()),
         Err(_) if gone_on => Ok(()),
-        Err(e) => Err(Error::global(ErrorKind::SevenZip(e))),
+        Err(e) => {
+            let kind = ErrorKind::SevenZip(e);
+            Err(match after {
+                Some(after) => after.error(kind),
+                None => Error::global(kind),
+            })
+        }
     }
 }
 
-/// Writes the current file of `files` into `file`, for `item`, at most
-/// `remaining` bytes in all: the bytes written. Its data is read to its end,
-/// where its CRC is checked.
-fn write_data<R: Read + Seek>(
-    files: &mut Files<'_, R>,
+/// Writes the current file of `files` into `file`, for `item`, at most as
+/// many bytes as `room` leaves: the bytes written. Its data is read to its
+/// end, where its CRC is checked.
+fn write_data<S: Read + Seek>(
+    files: &mut FolderFiles<'_, '_, S>,
     item: &Item,
     file: &mut impl Write,
-    remaining: u64,
+    room: Room<'_>,
     run: &Run<'_>,
     options: &Options,
 ) -> Result<u64, ErrorKind> {
@@ -491,7 +902,7 @@ fn write_data<R: Read + Seek>(
         if written > limits.max_entry_size {
             return Err(ErrorKind::EntryTooLarge);
         }
-        if written > remaining {
+        if !room.fits(written, n as u64, limits.max_total_size) {
             return Err(ErrorKind::TotalTooLarge);
         }
         if written > item.size {

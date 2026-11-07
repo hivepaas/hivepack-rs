@@ -404,6 +404,17 @@ fn bzip2_read_case(threads: u32) {
         bound as f64 / MIB
     );
     assert!(actual <= bound, "{actual} held, bound {bound}");
+    // One stream, as `bzip2 -9` writes a file: a block in each thread.
+    let mut one = vec![0; data.len() + data.len() / 50 + 1000];
+    let len = hivepack::bzip2::buff_to_buff_compress(&mut one, &data, 9, 30).unwrap();
+    one.truncate(len);
+    let (actual, _) = measure(|| open_bzip2(&one, threads, Limits::default()));
+    println!(
+        "bzip2 of one stream read, {threads} threads: {:.1} MiB held, bound {:.1} MiB",
+        actual as f64 / MIB,
+        bound as f64 / MIB
+    );
+    assert!(actual <= bound, "one stream: {actual} held, bound {bound}");
 }
 
 #[test]
@@ -749,5 +760,119 @@ mod rar {
                 case(name, threads);
             }
         }
+    }
+}
+
+/// 7z extracted in threads, a folder in each, each holding its folder's
+/// decoder, against the bound `docs/memory.md` gives for each thread, counted
+/// for the folder that takes the most: its dictionary or model, no larger than
+/// its output, LZMA's probabilities, BZip2's 4 MiB, 128 KiB for each coder and
+/// 1 MiB, and with more than one thread, LZMA2's input read ahead, no more
+/// than the folder's packed size; and 8 MiB more for the caller's, its list of
+/// entries and the archive's buffers. Under a memory limit of two threads, no
+/// more than two are held.
+#[cfg(feature = "extract")]
+mod sevenz_extract {
+    use std::io::Cursor;
+    use std::path::{Path, PathBuf};
+
+    use hivepack::Threads;
+    use hivepack::extract::{Options, extract_7z};
+    use hivepack::sevenz::{Archive, Method, NewEntry, WriteOptions, Writer};
+
+    use super::{MIB, lock, measure, text};
+
+    /// Eight files of `size` bytes, each in a folder of its own.
+    fn archive(method: Method, size: usize) -> Vec<u8> {
+        let options = WriteOptions {
+            method,
+            solid_block_size: None,
+            ..WriteOptions::default()
+        };
+        let mut w = Writer::with_options(Cursor::new(Vec::new()), options).unwrap();
+        for n in 0..8 {
+            let data = text(size, n + 1);
+            w.add_file(NewEntry::new(format!("f{n}")), &mut &data[..])
+                .unwrap();
+        }
+        w.finish().unwrap().into_inner()
+    }
+
+    /// The most a thread holds for a folder of `size` bytes of `method`, as
+    /// the bound says.
+    fn each(method: Method, size: u64) -> u64 {
+        let coder = match method {
+            // Presets 1 and 6: dictionaries of 1 and 8 MiB; `lc + lp` of 3.
+            Method::Lzma { preset } | Method::Lzma2 { preset } => {
+                let dict: u64 = if preset == 1 { 1 << 20 } else { 8 << 20 };
+                dict.min(size) + ((2 * 0x300) << 3) + (64 << 10)
+            }
+            Method::BZip2 { .. } => 4 << 20,
+            _ => 0,
+        };
+        coder + (128 << 10) + (1 << 20)
+    }
+
+    fn scratch(name: &str, threads: u32) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "hivepack-memory-7z-{}-{name}-{threads}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn extract(data: &[u8], out: &Path, threads: u32, limit: Option<u64>) {
+        let mut options = Options::default();
+        options.threads = Threads::of(threads);
+        options.memory_limit = limit;
+        options.limits.max_ratio = u64::MAX;
+        let mut archive = Archive::open(Cursor::new(data)).unwrap();
+        extract_7z(&mut archive, out, &options).unwrap();
+    }
+
+    fn case(name: &str, method: Method, size: usize) {
+        let data = archive(method, size);
+        let opened = Archive::open(Cursor::new(&data)).unwrap();
+        let packed = (0..opened.folders())
+            .map(|folder| opened.folder_packed_size(folder))
+            .max()
+            .unwrap();
+        for threads in [1, 4, 8] {
+            let ahead = match method {
+                Method::Lzma2 { .. } if threads > 1 => packed,
+                _ => 0,
+            };
+            let each = each(method, size as u64) + ahead;
+            for (limit, most) in [(None, threads), (Some(2 * each), threads.min(2))] {
+                let out = scratch(name, threads);
+                let (actual, ()) = measure(|| extract(&data, &out, threads, limit));
+                let _ = std::fs::remove_dir_all(&out);
+                let bound = u64::from(most) * each + (8 << 20);
+                println!(
+                    "7z {name}, {threads} threads, limit {limit:?}: {:.1} MiB held, bound {:.1} MiB",
+                    actual as f64 / MIB,
+                    bound as f64 / MIB
+                );
+                assert!(actual <= bound, "{name}: {actual} held, bound {bound}");
+            }
+        }
+    }
+
+    #[test]
+    fn sevenz_folders_in_threads_hold_no_more_than_their_bound() {
+        let _one = lock();
+        case("lzma2", Method::Lzma2 { preset: 1 }, 1_500_000);
+        case("lzma", Method::Lzma { preset: 1 }, 600_000);
+        case("bzip2", Method::BZip2 { level: 9 }, 1_000_000);
+        case("copy", Method::Copy, 300_000);
+    }
+
+    /// LZMA2 of preset 6, a dictionary of 8 MiB, in folders of 12 MB.
+    #[test]
+    #[ignore = "takes 100 MB and a minute in a debug build"]
+    fn sevenz_large_dictionaries() {
+        let _one = lock();
+        case("lzma2-6", Method::Lzma2 { preset: 6 }, 12_000_000);
     }
 }

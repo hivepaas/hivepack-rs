@@ -162,11 +162,6 @@ impl Run<'_> {
         lock(&self.damaged).last().and_then(|d| d.error.index)
     }
 
-    /// How many entries were gone on from so far.
-    pub(crate) fn damaged_count(&self) -> usize {
-        lock(&self.damaged).len()
-    }
-
     /// The entries gone on from so far, taken.
     pub(crate) fn take_damaged(&self) -> Vec<Damaged> {
         std::mem::take(&mut *lock(&self.damaged))

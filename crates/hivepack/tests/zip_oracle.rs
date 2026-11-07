@@ -636,6 +636,65 @@ fn past_libzip_refusal(
     }
 }
 
+/// Whether `got`, the port's answer to `request`, differs from `want`,
+/// libzip's, only where libzip misreads a data descriptor: it takes the sizes
+/// of every data descriptor in a Zip64 archive as 8 bytes each, and so
+/// refuses an archive whose entry has 4-byte ones, as Info-ZIP's zip and
+/// libarchive write for the entries that need no more, when its local
+/// headers are checked (`ZIP_ER_INCONS`, the local header or the data
+/// descriptor disagreeing with the central directory). The port reads them as
+/// they are: the entry libzip names has a descriptor whose 4-byte compressed
+/// size is the central directory's, and a header's signature after it.
+fn reads_narrow_descriptor(request: &str, got: &str, want: &str) -> bool {
+    let Some(detail) = want
+        .strip_prefix("e21/")
+        .and_then(|d| d.parse::<u64>().ok())
+    else {
+        return false;
+    };
+    if got == want || got.starts_with('e') || !matches!(detail & 0xff, 6 | 21) {
+        return false;
+    }
+    let index = detail >> 8;
+    let data = unhex(request.rsplit(' ').next().unwrap_or("-"));
+    if !data.windows(4).any(|w| w == b"PK\x06\x06") {
+        return false;
+    }
+    let Ok(za) = Archive::open(data.as_slice(), OpenFlags(0)) else {
+        return false;
+    };
+    let (Ok(stat), Ok(start)) = (za.stat_index(index, Flags::NONE), za.file_get_offset(index))
+    else {
+        return false;
+    };
+    let Some(descriptor) = start
+        .checked_add(stat.comp_size)
+        .and_then(|at| data.get(usize::try_from(at).ok()?..))
+    else {
+        return false;
+    };
+    let descriptor = descriptor.strip_prefix(b"PK\x07\x08").unwrap_or(descriptor);
+    descriptor.len() >= 16
+        && u64::from(u32::from_le_bytes([
+            descriptor[4],
+            descriptor[5],
+            descriptor[6],
+            descriptor[7],
+        ])) == stat.comp_size
+        && matches!(
+            &descriptor[12..16],
+            b"PK\x03\x04" | b"PK\x01\x02" | b"PK\x06\x08"
+        )
+}
+
+/// Checks the port's answer to a request that opens an archive against
+/// libzip's: the same, but as [`reads_narrow_descriptor`] allows.
+fn assert_answers_as(request: &str, got: &str, want: &str, context: &str) {
+    if !reads_narrow_descriptor(request, got, want) {
+        assert_eq!(got, want, "{context}");
+    }
+}
+
 /// Whether the port reads `method` where libzip refuses it as
 /// `ZIP_ER_COMPNOTSUPP`: Deflate64 and PPMd.
 fn libzip_lacks(method: u16) -> bool {
@@ -668,6 +727,9 @@ fn written_part(answer: &str) -> Option<(&str, &str)> {
 /// [`writes_invalid_zip64`]); the port's is checked by [`check_written`].
 fn assert_edit(request: &str, want: &str, context: &str) {
     let got = checked_answer(request, want);
+    if reads_narrow_descriptor(request, &got, want) {
+        return;
+    }
     // libzip has no Deflate64 nor PPMd: where it refuses to recompress such
     // an entry, the port recompresses it, or fails on its data.
     if got != want && want.ends_with(" |e16/0") && has_method_libzip_lacks(request) {
@@ -2393,10 +2455,11 @@ fn regress_archives_match_libzip() {
             for kind in ["b", "f"] {
                 let request = format!("open {flags} {kind} {}", hex(data));
                 let want = oracle.ask(&request);
-                assert_eq!(
-                    answer(&request),
-                    want,
-                    "{name} with flags {flags}, source {kind}"
+                assert_answers_as(
+                    &request,
+                    &answer(&request),
+                    &want,
+                    &format!("{name} with flags {flags}, source {kind}"),
                 );
             }
         }
@@ -2439,17 +2502,23 @@ fn zipdiff_archives_match_libzip() {
             for kind in ["b", "f"] {
                 let request = format!("open {flags} {kind} {}", hex(data));
                 let want = oracle.ask(&request);
-                assert_eq!(
-                    answer(&request),
-                    want,
-                    "{name} with flags {flags}, source {kind}"
+                assert_answers_as(
+                    &request,
+                    &answer(&request),
+                    &want,
+                    &format!("{name} with flags {flags}, source {kind}"),
                 );
             }
         }
         for parameters in ["0 b 0 8192 -1", "4 b 0 8192 -1", "0 f 4 100 -1"] {
             let request = format!("read {parameters} {}", hex(data));
             let want = oracle.ask(&request);
-            assert_eq!(answer(&request), want, "{name}: read {parameters}");
+            assert_answers_as(
+                &request,
+                &answer(&request),
+                &want,
+                &format!("{name}: read {parameters}"),
+            );
         }
     }
     assert_eq!(compared, 5926);
@@ -2477,7 +2546,12 @@ fn regress_archives_read_like_libzip() {
         {
             let request = format!("read {parameters} {}", hex(data));
             let want = oracle.ask(&request);
-            assert_eq!(answer(&request), want, "{name}: read {parameters}");
+            assert_answers_as(
+                &request,
+                &answer(&request),
+                &want,
+                &format!("{name}: read {parameters}"),
+            );
         }
     }
 }
@@ -2499,7 +2573,12 @@ fn regress_archives_read_in_ranges_like_libzip() {
         {
             let request = format!("range {parameters} {}", hex(data));
             let want = oracle.ask(&request);
-            assert_eq!(answer(&request), want, "{name}: range {parameters}");
+            assert_answers_as(
+                &request,
+                &answer(&request),
+                &want,
+                &format!("{name}: range {parameters}"),
+            );
         }
     }
 }
@@ -2512,7 +2591,12 @@ fn generated_archives_read_in_ranges_like_libzip() {
     let mut rng = Rng(0x2800_0002);
     for request in range_requests(&mut rng, 500) {
         let want = oracle.ask(&request);
-        assert_eq!(answer(&request), want, "{request:.400}");
+        assert_answers_as(
+            &request,
+            &answer(&request),
+            &want,
+            &format!("{request:.400}"),
+        );
     }
 }
 
@@ -2543,7 +2627,12 @@ fn generated_archives_read_like_libzip() {
     let mut rng = Rng(0x2400_0002);
     for request in read_requests(&mut rng, 800) {
         let want = oracle.ask(&request);
-        assert_eq!(answer(&request), want, "{request:.400}");
+        assert_answers_as(
+            &request,
+            &answer(&request),
+            &want,
+            &format!("{request:.400}"),
+        );
     }
 }
 
@@ -2567,7 +2656,12 @@ fn encrypted_archives_read_like_libzip() {
     let mut rng = Rng(0x4000_0001);
     for request in decrypt_requests(&mut oracle, &mut rng, 1200, 9000) {
         let want = oracle.ask(&request);
-        assert_eq!(answer(&request), want, "{request:.400}");
+        assert_answers_as(
+            &request,
+            &answer(&request),
+            &want,
+            &format!("{request:.400}"),
+        );
     }
 }
 
@@ -2579,7 +2673,12 @@ fn generated_archives_match_libzip() {
     let mut rng = Rng(0x2100_0001);
     for request in requests(&mut rng, 1500) {
         let want = oracle.ask(&request);
-        assert_eq!(answer(&request), want, "{request:.400}");
+        assert_answers_as(
+            &request,
+            &answer(&request),
+            &want,
+            &format!("{request:.400}"),
+        );
     }
 }
 
@@ -3036,7 +3135,8 @@ fn port_matches_recorded_answers() {
         .filter(|l| !l.starts_with('#') && !l.is_empty())
     {
         let (request, want) = line.split_once('\t').expect("request, tab, answer");
-        assert_eq!(recorded_form(&answer(request)), want, "{request:.300}");
+        let got = recorded_form(&answer(request));
+        assert_answers_as(request, &got, want, &format!("{request:.300}"));
         checked += 1;
     }
     assert!(checked > 500, "only {checked} recorded answers");

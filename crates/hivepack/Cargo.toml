@@ -328,6 +328,11 @@ path = "tests/extract_sevenz.rs"
 required-features = ["deflate", "extract", "sevenz", "xz", "zip"]
 
 [[test]]
+name = "extract_sevenz_threads"
+path = "tests/extract_sevenz_threads.rs"
+required-features = ["extract", "sevenz"]
+
+[[test]]
 name = "extract_sink"
 path = "tests/extract_sink.rs"
 required-features = ["cpio", "extract", "sevenz", "tar", "udf", "xar", "xz", "zip"]
@@ -511,6 +516,11 @@ required-features = ["xz"]
 name = "xz_raw_again"
 path = "tests/xz_raw_again.rs"
 required-features = ["xz"]
+
+[[test]]
+name = "zip_data_descriptor"
+path = "tests/zip_data_descriptor.rs"
+required-features = ["zip"]
 
 [[test]]
 name = "zip_deflate64"
