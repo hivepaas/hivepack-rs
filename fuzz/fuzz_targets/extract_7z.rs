@@ -7,6 +7,9 @@
 //! destination, a link that leads outside it, a count of files the summary
 //! does not give, or a file left cut off: the files left hold the bytes of
 //! the entries written in full, however the extraction ends.
+//! Half the time, by the input's length, with three threads, which decode
+//! folders at once: then what is left is no more than what was told written,
+//! as files other threads were writing when one failed are removed.
 //! `crates/hivepack/tests/extract_sevenz.rs` has the cases made by hand.
 
 #![no_main]
@@ -15,6 +18,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use hivepack::Threads;
 use hivepack::sevenz::Archive;
 use hivepack::extract::{Cancel, Links, Names, OnRefused, Options, Progress, extract_7z};
 use libfuzzer_sys::fuzz_target;
@@ -88,19 +92,23 @@ fuzz_target!(|data: &[u8]| {
     options.limits.max_entry_size = 256 << 10;
     options.limits.max_total_size = 1 << 20;
     options.limits.max_entries = 200;
-    // The bytes written when the last entry was, and the reports so far;
-    // cancelled after some, which the input's length picks.
-    let seen = Arc::new(Mutex::new((0u64, 0u64, 0usize)));
+    let threaded = (data.len() / 16) % 2 == 1;
+    options.threads = if threaded { Threads::of(3) } else { Threads::One };
+    // The bytes written when the last entry was, the reports so far, and the
+    // most bytes told; cancelled after some, which the input's length picks.
+    let seen = Arc::new(Mutex::new((0u64, 0u64, 0usize, 0u64)));
     let cancel_after = (choice & 64 != 0).then_some(data.len() % 16);
     let cancel = Cancel::new();
     options.cancel = Some(cancel.clone());
     let record = Arc::clone(&seen);
     options.progress = Some(Arc::new(move |progress: &Progress| {
         let mut seen = record.lock().unwrap();
-        let (entries, done, reports) = &mut *seen;
+        let (entries, done, reports, told) = &mut *seen;
         if progress.entries > *entries {
             (*entries, *done) = (progress.entries, progress.bytes);
         }
+        assert!(progress.bytes >= *told, "told less than before: {progress:?}");
+        *told = progress.bytes;
         assert!(progress.bytes <= progress.total_bytes, "{progress:?}");
         if Some(*reports) == cancel_after {
             cancel.cancel();
@@ -143,8 +151,12 @@ fuzz_target!(|data: &[u8]| {
         .filter_map(|file| std::fs::symlink_metadata(file).ok())
         .map(|m| m.len())
         .sum();
-    let done = seen.lock().unwrap().1;
-    assert_eq!(on_disk, done, "a file cut off is left: {result:?}");
+    let (_, done, _, told) = *seen.lock().unwrap();
+    if threaded {
+        assert!(on_disk <= told, "more left than told written: {result:?}");
+    } else {
+        assert_eq!(on_disk, done, "a file cut off is left: {result:?}");
+    }
     if let Ok(summary) = result {
         assert_eq!(files.len() as u64, summary.files);
         assert_eq!(links.len() as u64, summary.links);

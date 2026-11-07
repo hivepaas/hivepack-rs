@@ -565,13 +565,24 @@ pub(crate) fn set_dir_times<T: Target>(
 
 /// What a file may write of [`Limits::max_total_size`](crate::extract::Limits::max_total_size).
 #[derive(Clone, Copy)]
-enum Room<'a> {
+pub(crate) enum Room<'a> {
     /// These many bytes, for one file written at a time.
     Left(u64),
     /// What the files written at once have written in all, shared by their
     /// threads. A file left out for its damage stays counted: the sizes the
     /// archive says, checked first, bound what is written anyway.
     Shared(&'a AtomicU64),
+}
+
+impl Room<'_> {
+    /// Whether `n` bytes more, `written` with them, fit within `most` in all;
+    /// counted, when shared.
+    pub(crate) fn fits(self, written: u64, n: u64, most: u64) -> bool {
+        match self {
+            Room::Left(remaining) => written <= remaining,
+            Room::Shared(total) => total.fetch_add(n, Ordering::Relaxed).saturating_add(n) <= most,
+        }
+    }
 }
 
 /// Writes the data of `item` into `file`, at most as many bytes as `room`
@@ -592,13 +603,7 @@ fn write_file<R: ReadAt>(
         if written > limits.max_entry_size {
             return Err(ErrorKind::EntryTooLarge);
         }
-        let fits = match room {
-            Room::Left(remaining) => written <= remaining,
-            Room::Shared(total) => {
-                total.fetch_add(n, Ordering::Relaxed).saturating_add(n) <= limits.max_total_size
-            }
-        };
-        if !fits {
+        if !room.fits(written, n, limits.max_total_size) {
             return Err(ErrorKind::TotalTooLarge);
         }
         if written > item.size {
