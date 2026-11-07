@@ -626,6 +626,11 @@ fn deflate_mt(data: &[u8], options: &GzOptions) -> u64 {
 fn deflate_threads() {
     let _one = lock();
     let data = text(16 << 20, 23);
+    // The estimate counts every thread's compressor and blocks. With fewer
+    // cores than threads, how many hold theirs at once is the scheduler's to
+    // say: what is held may then be well under it (half of it at 8 threads on
+    // macOS's runners, of 3 cores), and only the bound is checked.
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
     for (level, threads) in [(1, 1), (6, 4), (9, 8)] {
         let options = GzOptions {
             level,
@@ -634,11 +639,20 @@ fn deflate_threads() {
         };
         let estimate = options.memory_usage(threads).unwrap();
         let (actual, _) = measure(|| deflate_mt(&data, &options));
-        check(
-            &format!("deflate level {level}, {threads} threads"),
-            actual,
-            estimate,
-        );
+        let what = format!("deflate level {level}, {threads} threads");
+        if threads as usize <= cores {
+            check(&what, actual, estimate);
+        } else {
+            println!(
+                "{what}: {:.1} MiB held, {:.1} MiB estimated, on {cores} cores",
+                actual as f64 / MIB,
+                estimate as f64 / MIB,
+            );
+            assert!(
+                actual <= estimate,
+                "{what}: {actual} held, {estimate} estimated"
+            );
+        }
     }
     let wide = GzOptions {
         threads: Threads::of(8),
