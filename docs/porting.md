@@ -176,6 +176,28 @@ What made the difference, against a first version at 0.74–0.82× with 8 worker
 
 **Memory**, beside the port: libzstd estimates a context without workers and refuses to with them. `CCtx::estimate_memory(nb_workers)` counts what the port allocates for the next frame, with workers or without, as an upper bound, and `CCtx::set_workers_memory_limit` lowers each frame's workers until it fits, one always allowed: the frames are the same with one worker or many. Level 3 takes 4.5 MiB without workers, 69 MiB with one and 572 MiB with 16; level 19 90 MiB, 373 MiB and 3.5 GiB. The formula, and how it is checked against what is allocated, are in [memory.md](memory.md#zstd-with-workers).
 
+### zstd in frames, beside the port
+
+libzstd's workers make one frame, which one thread decodes. Beside the port, in `crates/hivepack/src/zstd/frames.rs`, `CompressFrames` writes the input as frames of their own, as `pzstd` and zstd's seekable format do, so that a reader decodes them a frame in each thread:
+
+- **Each frame is `CCtx::compress2`'s**, at the level set, with a checksum, from a piece of the input of `FramesOptions::frame_size` (`FRAME_SIZE`, 32 MiB, by default), with its content size in its header; each thread keeps its context from one frame to the next.
+- **The same output whatever the threads.** The pieces are cut where their size says, and where a flush or the end is asked for, never where the threads would: `Threads::One` compresses each piece in the call that fills it, and gives the same bytes.
+- **The seek table**, after the frames, is zstd's seekable format's (`contrib/seekable_format`): a skippable frame of each frame's size and its content's, without checksums, the frames having theirs. Every reader passes over it: `zstd`, `pzstd`, GNU tar, 7-Zip 26.05 and Python 3.14's `compression.zstd` read the frames back as one stream; libzstd's seekable reader reads the table and seeks with it. `FramesOptions::seek_table` leaves it out.
+- **It is used as `CCtx::compress_stream2` is**: `EndDirective::Continue` takes input and writes out the frames made, waiting for the oldest when as many are in flight as there are threads; `Flush` ends the frame being filled; `End` ends it and writes the table.
+
+`tests/zstd_frames.rs` checks that the output is each piece's frame from `CCtx::compress2` and the table after them, the same with 1, 2, 3 and 8 threads, with the input and the output in pieces of every size (a byte at a time too), at levels 1, 3, 9 and 19; that libzstd and the port decode it, and that libzstd's seekable reader finds every frame and reads from anywhere; flushes, a stream after another, an empty input, and the memory limit.
+
+On 546 MB of mixed files (a tar of source code, binaries and documents), 32 threads of an AMD machine with 32, in 64 KiB calls as packwing makes them, against one frame with 32 workers:
+
+| Level | Frames of 32 MiB | One frame, 32 workers |
+|---|---|---|
+| 1 | 223,176,736 bytes, 0.19 s | 223,689,830 bytes, 0.11 s |
+| 3 | 201,545,166 bytes, 0.24 s | 201,852,219 bytes, 0.18 s |
+| 9 | 186,376,508 bytes, 1.36 s | 186,266,757 bytes, 1.38 s |
+| 19 | 170,614,218 bytes, 13.7 s | 169,825,079 bytes, 16.0 s |
+
+At levels 1 and 3 the frames are smaller than the workers' frame, whose jobs are 8 MiB; at 9 and 19, larger by 0.06% and 0.46%, each frame starting without a window. 546 MB makes 17 frames, so 17 threads at most work at once, where the workers' smaller jobs keep all 32 busy at levels 1 and 3. One thread takes 1.56 s at level 3, and writes the same bytes.
+
 ### Where the dictionary builder stands
 
 On the same machine, loaded by other work (October 2026), the port and libzstd 1.5.7 (zstd-sys, its macOS build) in turn, best of five, on two sets: the 500 JSON files of zstd's `github` regression set (398 KB), and 1,674 pieces of 1 to 4 KB of four Silesia files (4 MB). The dictionaries are the same, but COVER's (see below: libzstd's macOS build sorts with Apple's `qsort_r`):
