@@ -10,9 +10,9 @@
 //! with the same data, or, after a failure, data of which one is the start
 //! of the other: what libzstd gives out before an error depends on the
 //! size of its output buffer. Opened again with three threads, which
-//! decode xz's Blocks, bzip2's streams and blocks and pbzx's chunks, it
-//! must end the same way, with the same data or its start. A panic is a
-//! bug.
+//! decode zstd's frames, xz's Blocks, bzip2's streams and blocks and
+//! pbzx's chunks, it must end the same way, with the same data or its
+//! start. A panic is a bug.
 
 #![no_main]
 
