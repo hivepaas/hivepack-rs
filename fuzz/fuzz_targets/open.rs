@@ -9,13 +9,17 @@
 //! each must find the same layers and container, and end the same way,
 //! with the same data, or, after a failure, data of which one is the start
 //! of the other: what libzstd gives out before an error depends on the
-//! size of its output buffer. A panic is a bug.
+//! size of its output buffer. Opened again with three threads, which
+//! decode xz's Blocks, bzip2's streams and blocks and pbzx's chunks, it
+//! must end the same way, with the same data or its start. A panic is a
+//! bug.
 
 #![no_main]
 
 use std::io::{Cursor, Read};
 
 use hivepack::age::{BoxedIdentity, X25519Identity};
+use hivepack::Threads;
 use hivepack::open::{Limits, Opener};
 use libfuzzer_sys::fuzz_target;
 
@@ -63,8 +67,15 @@ fuzz_target!(|data: &[u8]| {
     }
     let seed = file.iter().take(8).fold(0u64, |h, &b| h.rotate_left(8) ^ u64::from(b));
     let first = read(&mut opener, seed);
-    for seed in [!seed, seed.rotate_left(17)] {
-        let again = read(&mut opener, seed);
+    let mut threaded = Opener::new(|| Ok(Cursor::new(file.to_vec())))
+        .identities(vec![Box::new(X25519Identity::parse(KEY).unwrap())])
+        .limits(limits)
+        .threads(Threads::of(3));
+    if mode & 1 == 1 {
+        threaded = threaded.name("archive.tar.lzma");
+    }
+    let threaded = read(&mut threaded, seed.rotate_left(29));
+    for again in [read(&mut opener, !seed), read(&mut opener, seed.rotate_left(17)), threaded] {
         assert_eq!((&again.0, &again.2), (&first.0, &first.2));
         if first.2 == "end" || first.2 == "-" {
             assert!(again.1 == first.1);

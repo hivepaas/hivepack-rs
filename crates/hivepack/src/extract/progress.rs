@@ -54,7 +54,7 @@ pub type ProgressFn = Arc<dyn Fn(&Progress) + Send + Sync>;
 /// limit and the token of [`Options`]. Shared by the threads that write files
 /// at once ([`Options::threads`]): each is told in turn.
 pub(crate) struct Run<'a> {
-    options: &'a Options,
+    pub(crate) options: &'a Options,
     deadline: Option<Instant>,
     /// Set when one of the threads writing at once failed: the others stop.
     halted: AtomicBool,

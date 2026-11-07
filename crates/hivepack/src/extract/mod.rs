@@ -35,7 +35,8 @@
 //! - **Threads**: a ZIP archive's files, a RAR archive's that is not solid,
 //!   and a 7z archive's folders can be written several at once, each in a
 //!   thread of its own, a tar or cpio archive's by threads while it is read,
-//!   and a solid RAR 5 archive's decompressed a Huffman block in each thread
+//!   a XAR package's payloads decoded in threads too, and a solid RAR 5
+//!   archive's decompressed a Huffman block in each thread
 //!   ([`Options::threads`]); what is written is the same.
 //! - **Marks of origin**: the archive's Mark of the Web on Windows, or its
 //!   quarantine on macOS ([`Origin`]), is carried to every file written.
@@ -105,8 +106,8 @@ pub use name::{MAX_COMPONENT, Name, NameError, NameRules, check_name, check_name
 pub use origin::Origin;
 pub use plan::{
     Limits, LinkOutside, Links, NameDecoder, Names, OnDamaged, OnDamagedFn, OnLinksOutside,
-    OnLinksOutsideFn, OnRefused, OnUnnamable, OnUnnamableFn, Options, Packages, Permissions,
-    Renamed, Select,
+    OnLinksOutsideFn, OnRefused, OnUnnamable, OnUnnamableFn, Options, Owners, Packages,
+    Permissions, Renamed, Select,
 };
 pub use progress::{Cancel, Progress, ProgressFn};
 #[cfg(feature = "rar")]

@@ -385,12 +385,12 @@ impl Codec for XzCodec {
 }
 
 /// pbzx's header: `pbzx` and the block size, a 64-bit big-endian number.
-const PBZX_HEADER: usize = 12;
+pub(super) const PBZX_HEADER: usize = 12;
 /// A chunk's header: its size, then the size of what stores it.
-const PBZX_CHUNK_HEADER: usize = 16;
+pub(super) const PBZX_CHUNK_HEADER: usize = 16;
 
 /// A 64-bit big-endian number, pbzx's.
-fn be64(b: &[u8]) -> u64 {
+pub(super) fn be64(b: &[u8]) -> u64 {
     b.iter().take(8).fold(0, |n, &c| n << 8 | u64::from(c))
 }
 
@@ -416,7 +416,7 @@ enum PbzxState {
 /// other is one xz stream that decompresses to exactly its size. A chunk
 /// of nothing is allowed; a header cut short, or anything after the last
 /// chunk, is not.
-struct PbzxCodec {
+pub(super) struct PbzxCodec {
     xz_memlimit: u64,
     header: [u8; PBZX_CHUNK_HEADER],
     have: usize,
@@ -426,13 +426,22 @@ struct PbzxCodec {
 }
 
 impl PbzxCodec {
-    fn new(xz_memlimit: u64) -> PbzxCodec {
+    pub(super) fn new(xz_memlimit: u64) -> PbzxCodec {
         PbzxCodec {
             xz_memlimit,
             header: [0; PBZX_CHUNK_HEADER],
             have: 0,
             block: None,
             state: PbzxState::Header,
+        }
+    }
+
+    /// After the file's header, of block size `block`, where a chunk
+    /// starts.
+    pub(super) fn within(xz_memlimit: u64, block: u64) -> PbzxCodec {
+        PbzxCodec {
+            block: Some(block),
+            ..PbzxCodec::new(xz_memlimit)
         }
     }
 
@@ -665,8 +674,10 @@ pub(crate) struct DecodeLimits {
     pub(crate) xz_memlimit: u64,
     /// What bzip2's threads may take.
     pub(crate) bzip2_memlimit: u64,
-    /// The threads xz's and bzip2's decoders may use, at least one.
+    /// The threads xz's, bzip2's and pbzx's decoders may use, at least one.
     pub(crate) threads: u32,
+    /// What their threads may hold in all, under the limits above.
+    pub(crate) threads_memory: u64,
 }
 
 /// The decoder of `layer` over `inner`.
@@ -693,7 +704,10 @@ pub(crate) fn decoder<'a, R: Read + Send + 'a>(
         // each thread, as many as fit the limit.
         Layer::Bzip2 => {
             use crate::open::bzip2_threads::{Bzip2Threads, threads_within};
-            match threads_within(limits.threads, limits.bzip2_memlimit) {
+            match threads_within(
+                limits.threads,
+                limits.bzip2_memlimit.min(limits.threads_memory),
+            ) {
                 1 => Box::new(Decoder::new(inner, Bzip2Codec::new(), layer)),
                 threads => Box::new(Bzip2Threads::new(inner, threads)),
             }
@@ -706,7 +720,7 @@ pub(crate) fn decoder<'a, R: Read + Send + 'a>(
                     crate::xz::Stream::stream_decoder_mt(&crate::xz::MtOptions {
                         flags,
                         threads: limits.threads,
-                        memlimit_threading: limits.xz_memlimit,
+                        memlimit_threading: limits.xz_memlimit.min(limits.threads_memory),
                         memlimit_stop: limits.xz_memlimit,
                         ..crate::xz::MtOptions::default()
                     })
@@ -724,6 +738,14 @@ pub(crate) fn decoder<'a, R: Read + Send + 'a>(
             };
             Box::new(Decoder::new(inner, XzCodec { s, after }, layer))
         }
+        // Its chunks, each an xz stream of its own, a chunk in each thread,
+        // as many as fit the limit.
+        Layer::Pbzx if limits.threads > 1 => Box::new(crate::open::pbzx_threads::PbzxThreads::new(
+            inner,
+            limits.threads,
+            limits.xz_memlimit,
+            limits.xz_memlimit.min(limits.threads_memory),
+        )),
         Layer::Pbzx => Box::new(Decoder::new(
             inner,
             PbzxCodec::new(limits.xz_memlimit),

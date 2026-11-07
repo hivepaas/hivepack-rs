@@ -372,7 +372,8 @@ fn bzip2_case(threads: u32) {
     );
 }
 
-/// What `Opener` reads of `file`, with `threads` and `limits`, as a hash.
+/// What `Opener` reads of `file`, with `threads` and `limits`, as a hash:
+/// bzip2's, and pbzx's.
 fn open_bzip2(file: &[u8], threads: u32, limits: Limits) -> u64 {
     let mut opener = Opener::new(|| Ok(Cursor::new(file)))
         .threads(Threads::of(threads))
@@ -415,6 +416,47 @@ fn bzip2_read_case(threads: u32) {
         bound as f64 / MIB
     );
     assert!(actual <= bound, "one stream: {actual} held, bound {bound}");
+}
+
+/// pbzx of `data`, chunks of `block` bytes, each xz of preset 6 without a
+/// check, as Apple writes them: an 8 MiB dictionary each.
+fn pbzx(data: &[u8], block: usize) -> Vec<u8> {
+    let mut file = b"pbzx".to_vec();
+    file.extend((block as u64).to_be_bytes());
+    for chunk in data.chunks(block) {
+        let mut xz = vec![0; hivepack::xz::stream_buffer_bound(chunk.len())];
+        let mut len = 0;
+        hivepack::xz::easy_buffer_encode(6, hivepack::xz::Check::NONE, chunk, &mut xz, &mut len)
+            .unwrap();
+        file.extend((chunk.len() as u64).to_be_bytes());
+        file.extend((len as u64).to_be_bytes());
+        file.extend(&xz[..len]);
+    }
+    file
+}
+
+/// pbzx read in threads by `Opener`: its chunks in flight, what stores
+/// them, what they decode to and their decoders, within
+/// `Limits::xz_memlimit`, and a megabyte for what is read ahead and the
+/// layers' buffers.
+#[test]
+fn pbzx_threads_within_the_limit() {
+    let _one = lock();
+    let data = text(4 << 20, 17);
+    let file = pbzx(&data, 512 << 10);
+    let plain = open_bzip2(&file, 1, Limits::default());
+    for limit in [20 << 20, 40 << 20] {
+        let mut limits = Limits::default();
+        limits.xz_memlimit = limit;
+        let (actual, got) = measure(|| open_bzip2(&file, 8, limits));
+        assert_eq!(got, plain, "limit {limit}");
+        println!(
+            "pbzx read, 8 threads: {:.1} MiB held, limit {:.1} MiB",
+            actual as f64 / MIB,
+            limit as f64 / MIB
+        );
+        assert!(actual <= limit + (1 << 20), "limit {limit}: {actual} held");
+    }
 }
 
 #[test]

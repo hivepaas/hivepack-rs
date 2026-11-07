@@ -134,6 +134,8 @@ fn item_of<R: ReadAt>(arc: &Archive<R>, index: u64, options: &Options) -> Item {
             .is_set()
             .then(|| head.mtime.system_time())
             .flatten(),
+        owner: None,
+        xattrs: Vec::new(),
     }
 }
 
@@ -960,6 +962,8 @@ fn step<R: ReadAt, T: Target>(
         data: None,
         mode: None,
         mtime: None,
+        owner: None,
+        xattrs: Vec::new(),
     };
     let about = item.unwrap_or(&fallback);
     let total_left = options.limits.max_total_size;

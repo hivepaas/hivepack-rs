@@ -4,14 +4,16 @@
 //! has to work in the middle of an entry; `close` flushes the output too; an
 //! error that comes with the last bytes written comes after them, at the next
 //! call. Not ported: `AddFS`, and what Go's writer has commented out or does
-//! not reach, sparse files.
+//! not reach, sparse files. Not Go's: [`Writer::write_sparse_header`] writes a
+//! sparse file in PAX's GNU format 1.0, as GNU tar does.
 
 use std::io::{self, Write};
 
 use crate::tar::common::{
     BLOCK_SIZE, Error, Format, Header, HeaderView, MAX_SPECIAL_FILE_SIZE, NAME_SIZE, Records,
-    TYPE_GNU_LONG_LINK, TYPE_GNU_LONG_NAME, TYPE_X_GLOBAL_HEADER, TYPE_X_HEADER, allowed_formats,
-    block_padding, is_header_only_type,
+    SparseEntry, TYPE_GNU_LONG_LINK, TYPE_GNU_LONG_NAME, TYPE_REG, TYPE_REG_A,
+    TYPE_X_GLOBAL_HEADER, TYPE_X_HEADER, allowed_formats, block_padding, is_header_only_type,
+    validate_sparse_entries,
 };
 use crate::tar::format::{Block, field, get_mut, set_format};
 use crate::tar::strconv::{Formatter, append_pax_record, split_ustar_path, to_ascii};
@@ -86,6 +88,110 @@ impl<W: Write> Writer<W> {
             self.write_gnu_header(h)
         };
         written.map_err(|e| self.stick(e))
+    }
+
+    /// Begins a sparse file, which is not Go's: `header` as for a regular file,
+    /// its `size` the whole file's, and `data` the parts of it that hold data,
+    /// each an offset and a length, in order, apart and within the size; the
+    /// rest of it reads as zeros, a hole. Each part starts on a block of 512 bytes
+    /// and is whole blocks long, but one that ends where the file does, as GNU tar
+    /// reads them: a block at a time, a part's last one whole. The holes a file
+    /// system tells (`SEEK_HOLE`, `SEEK_DATA`) are so. Then the bytes of those parts
+    /// are to be written, one after the other, and nothing of the holes.
+    ///
+    /// It is written in PAX's GNU sparse format 1.0, as GNU tar's `--sparse
+    /// --format=posix` writes it: the name and size in `GNU.sparse.` records, a
+    /// header named `GNUSparseFile.0/` beside the file, and the map at the start of
+    /// the data. GNU tar, bsdtar and [`Reader`](crate::tar::Reader) restore the
+    /// holes; a reader that knows no sparse format extracts the map and the data,
+    /// under that name. A map that is not as said, or a header with a format other
+    /// than PAX, is an [`Error::CannotEncode`].
+    pub fn write_sparse_header(
+        &mut self,
+        header: &Header,
+        data: &[(i64, i64)],
+    ) -> Result<(), Error> {
+        self.finish_entry()?;
+        let written = self.write_sparse(header, data);
+        written.map_err(|e| self.stick(e))
+    }
+
+    fn write_sparse(&mut self, header: &Header, data: &[(i64, i64)]) -> Result<(), Error> {
+        let entries: Vec<SparseEntry> = data
+            .iter()
+            .map(|&(offset, length)| SparseEntry { offset, length })
+            .collect();
+        if !matches!(header.typeflag, TYPE_REG | TYPE_REG_A)
+            || !validate_sparse_entries(&entries, header.size)
+        {
+            return Err(Error::CannotEncode(
+                "a sparse file is a regular file, its data in order within its size".into(),
+            ));
+        }
+        let block = BLOCK_SIZE as i64;
+        // A part of nothing is where it is: GNU tar ends its maps with one.
+        if entries.iter().any(|e| {
+            e.length > 0
+                && (e.offset % block != 0
+                    || (e.length % block != 0 && e.end_offset() != header.size))
+        }) {
+            return Err(Error::CannotEncode(
+                "a sparse file's data is in whole blocks of 512 bytes, but at its end".into(),
+            ));
+        }
+        if header.format != Format::UNKNOWN && !header.format.has(Format::PAX) {
+            return Err(Error::CannotEncode(
+                "a sparse file is written in PAX alone".into(),
+            ));
+        }
+        // The map: decimal numbers, each on a line, padded to a block. It ends
+        // at the file's end, with a part of nothing there if it must, as GNU tar
+        // writes it and wants it.
+        let mut entries = entries;
+        if entries.last().map_or(0, |e| e.end_offset()) != header.size || entries.is_empty() {
+            entries.push(SparseEntry {
+                offset: header.size,
+                length: 0,
+            });
+        }
+        let mut map = format!("{}\n", entries.len()).into_bytes();
+        for e in &entries {
+            map.extend_from_slice(format!("{}\n{}\n", e.offset, e.length).as_bytes());
+        }
+        map.resize(map.len() + block_padding(map.len() as i64) as usize, 0);
+        let stored = entries
+            .iter()
+            .try_fold(map.len() as i64, |sum, e| sum.checked_add(e.length))
+            .ok_or_else(|| Error::CannotEncode("a sparse file of too much data".into()))?;
+
+        let (dir, file) = split_path(&header.name);
+        let mut stand_in = Header {
+            name: join_path(dir, b"GNUSparseFile.0", file),
+            size: stored,
+            typeflag: TYPE_REG,
+            format: Format::PAX,
+            ..header.clone()
+        };
+        stand_in
+            .pax_records
+            .retain(|k, _| !k.starts_with(b"GNU.sparse."));
+        let h = HeaderView::new(&stand_in);
+        let (allowed, mut pax_hdrs) = allowed_formats(&h)?;
+        if !allowed.has(Format::PAX) {
+            return Err(Error::CannotEncode(
+                "the header cannot be written in PAX".into(),
+            ));
+        }
+        pax_hdrs.insert(b"GNU.sparse.major".to_vec(), b"1".to_vec());
+        pax_hdrs.insert(b"GNU.sparse.minor".to_vec(), b"0".to_vec());
+        pax_hdrs.insert(b"GNU.sparse.name".to_vec(), header.name.clone());
+        pax_hdrs.insert(
+            b"GNU.sparse.realsize".to_vec(),
+            header.size.to_string().into_bytes(),
+        );
+        self.write_pax_header(h, &pax_hdrs)?;
+        io::Write::write_all(self, &map)?;
+        Ok(())
     }
 
     /// `writeUSTARHeader`.
