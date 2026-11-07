@@ -34,7 +34,8 @@
 //!   and followed ([`Options::progress`]).
 //! - **Threads**: a ZIP archive's files, a RAR archive's that is not solid,
 //!   and a 7z archive's folders can be written several at once, each in a
-//!   thread of its own ([`Options::threads`]); what is written is the same.
+//!   thread of its own, and a tar or cpio archive's by threads while it is
+//!   read ([`Options::threads`]); what is written is the same.
 //! - **Marks of origin**: the archive's Mark of the Web on Windows, or its
 //!   quarantine on macOS ([`Origin`]), is carried to every file written.
 //!
@@ -90,6 +91,7 @@ mod sink;
 mod tar;
 mod udf;
 mod unicode;
+mod writers;
 mod xar;
 mod zip;
 

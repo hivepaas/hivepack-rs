@@ -56,21 +56,25 @@ impl<'a> Destination<'a> {
     pub(crate) fn directory(&self, components: &[String]) -> Result<Dir, ErrorKind> {
         let mut dir = self.root.try_clone().map_err(ErrorKind::Io)?;
         for component in components {
-            let created = match dir.create_dir(component) {
-                Ok(()) => true,
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => false,
-                Err(e) => return Err(ErrorKind::Io(e)),
-            };
-            dir = match dir.open_dir_nofollow(component) {
-                Ok(next) => next,
-                Err(e) => {
-                    // A link, or a file, where a directory was to be.
-                    return Err(match dir.symlink_metadata(component) {
-                        Ok(metadata) if !metadata.is_dir() => ErrorKind::NotADirectory,
-                        _ => ErrorKind::Io(e),
-                    });
+            // Opened first: most are there, and opening one takes no lock on
+            // its parent, as creating one does, which threads writing files
+            // at once would all wait for.
+            let (next, created) = match dir.open_dir_nofollow(component) {
+                Ok(next) => (next, false),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    let created = match dir.create_dir(component) {
+                        Ok(()) => true,
+                        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => false,
+                        Err(e) => return Err(ErrorKind::Io(e)),
+                    };
+                    match dir.open_dir_nofollow(component) {
+                        Ok(next) => (next, created),
+                        Err(e) => return Err(not_a_directory(&dir, component, e)),
+                    }
                 }
+                Err(e) => return Err(not_a_directory(&dir, component, e)),
             };
+            dir = next;
             if let (true, Some(origin)) = (created, self.origin) {
                 origin.write_dir(&dir).map_err(ErrorKind::Origin)?;
             }
@@ -170,6 +174,15 @@ impl<'a> Destination<'a> {
     }
 }
 
+/// The error of `component` in `dir`, which did not open as a directory with
+/// `e`: a link, or a file, where a directory was to be.
+fn not_a_directory(dir: &Dir, component: &str, e: io::Error) -> ErrorKind {
+    match dir.symlink_metadata(component) {
+        Ok(metadata) if !metadata.is_dir() => ErrorKind::NotADirectory,
+        _ => ErrorKind::Io(e),
+    }
+}
+
 /// Where an extraction writes: a folder on disk ([`Destination`]), or a caller's
 /// [`Sink`](crate::extract::Sink). Each entry is given with its path's components,
 /// checked; what a folder needs of directories on the way it opens itself.
@@ -241,6 +254,12 @@ pub(crate) trait Target: Sized {
     /// The file being written is damaged, as `error` says, and is to be gone on
     /// from: kept as it is, or removed, next.
     fn damaged(&self, _error: &Error) {}
+
+    /// This target, if it is a folder on disk, which threads can write files
+    /// into at once.
+    fn folder(&self) -> Option<&Destination<'_>> {
+        None
+    }
 }
 
 /// A file a [`Target`] writes, and how long it is so far.
@@ -391,6 +410,10 @@ impl Target for Destination<'_> {
 
     fn copies_hard_links(&self, options: &Options) -> bool {
         options.links == Links::AsFile
+    }
+
+    fn folder(&self) -> Option<&Destination<'_>> {
+        Some(self)
     }
 }
 
