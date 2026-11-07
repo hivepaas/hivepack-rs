@@ -22,7 +22,7 @@ use crate::tar::{
 use crate::extract::destination::{Counted, Target, TargetFile};
 use crate::extract::error::{Error, ErrorKind};
 use crate::extract::name::{Name, NameError};
-use crate::extract::plan::{Item, Kind, Links, OnDamaged, OnRefused, Options, check, fold};
+use crate::extract::plan::{Item, Kind, Links, OnDamaged, OnRefused, Options, Owner, check, fold};
 use crate::extract::plan::{LinkTo, link_to, named, settle, settle_links, skips_links};
 use crate::extract::progress::Run;
 use crate::extract::sink::{Sink, SinkState};
@@ -488,6 +488,7 @@ fn extract_into<R: Read, F: FnMut() -> io::Result<R>, T: Target>(
 
     set_dir_times(&destination, &kept, &run)?;
     summary.damaged = run.take_damaged();
+    summary.owners_left = destination.owners_left();
     Ok(summary)
 }
 
@@ -840,9 +841,14 @@ pub(crate) fn copy_of<T: Target>(
     )
 }
 
-/// The owner and group a tar entry keeps, by number, if it keeps one: both 0,
-/// as most archives to share have them, is none.
-fn owner_of(h: &crate::tar::Header) -> Option<(u32, u32)> {
+/// The owner and group a tar entry keeps, numbers and names, if it keeps one:
+/// both 0 and no names, as most archives to share have them, is none.
+fn owner_of(h: &crate::tar::Header) -> Option<Owner> {
     let (uid, gid) = (u32::try_from(h.uid).ok()?, u32::try_from(h.gid).ok()?);
-    (uid != 0 || gid != 0 || !h.uname.is_empty() || !h.gname.is_empty()).then_some((uid, gid))
+    (uid != 0 || gid != 0 || !h.uname.is_empty() || !h.gname.is_empty()).then(|| Owner {
+        uid,
+        gid,
+        user: h.uname.clone(),
+        group: h.gname.clone(),
+    })
 }

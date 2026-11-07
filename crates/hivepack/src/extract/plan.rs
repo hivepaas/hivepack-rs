@@ -202,6 +202,24 @@ pub enum Permissions {
     Ignore,
 }
 
+/// Whose files and folders are, extracted: [`Options::owners`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Owners {
+    /// The user's who extracts, as the system makes them (the default).
+    #[default]
+    Ignore,
+    /// The archive's, by name: the user and group of this system named as the
+    /// archive names them, or the archive's numbers where this system has no
+    /// such name, or the archive none. As GNU tar does by default, for a backup
+    /// taken to another system, whose numbers may be other people's.
+    ByName,
+    /// The archive's, by number, names aside: as GNU tar's `--numeric-owner`,
+    /// for a backup restored on the system it was taken from, or where the
+    /// names mean other people.
+    ByNumber,
+}
+
 /// What to do with the payloads of macOS packages, in a XAR archive.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -326,13 +344,15 @@ pub struct Options {
     /// directories. Nothing is overwritten otherwise.
     pub overwrite: bool,
     pub permissions: Permissions,
-    /// Restores each file's and folder's owner and group, by number, as a tar
-    /// archive kept them for a backup (`uid`, `gid`), as GNU tar's
-    /// `--same-owner --numeric-owner` does, on Linux and macOS. Who may give a
-    /// file away (root, as a rule) gives it to anyone; others, to themselves and
-    /// their groups, and what is not allowed is left as it is. Off by default:
-    /// what is extracted is the user's. Other formats keep no owners.
-    pub owners: bool,
+    /// Restores each file's and folder's owner and group as a tar archive kept
+    /// them for a backup, as GNU tar's `--same-owner` does, on Linux and macOS:
+    /// by name where this system has it, or by number ([`Owners`]). Who may give
+    /// a file away (root, as a rule) gives it to anyone; others, to themselves
+    /// and their groups. An owner or group not allowed is left as it is, and
+    /// counted in [`Summary::owners_left`](crate::extract::Summary::owners_left).
+    /// [`Owners::Ignore`] by default: what is extracted is the user's. Other
+    /// formats keep no owners.
+    pub owners: Owners,
     /// Restores each file's and folder's extended attributes, as a tar archive
     /// kept them (PAX's `SCHILY.xattr.`), Linux's ACLs among them, as GNU tar's
     /// `--xattrs` does, on Linux and macOS: before the mark of origin, which an
@@ -472,12 +492,22 @@ pub(crate) struct Item {
     /// Unix permission bits, if the archive has them
     pub mode: Option<u32>,
     pub mtime: Option<SystemTime>,
-    /// Its owner and group, by number, if the archive kept them for a backup
-    /// (a tar archive's, when not both 0): [`Options::owners`].
-    pub owner: Option<(u32, u32)>,
+    /// Its owner and group, if the archive kept them for a backup (a tar
+    /// archive's, when not both 0 and nameless): [`Options::owners`].
+    pub owner: Option<Owner>,
     /// Its extended attributes, if the archive kept them (a tar archive's
     /// `SCHILY.xattr.` records): [`Options::xattrs`].
     pub xattrs: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+/// An entry's owner and group, as the archive kept them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Owner {
+    pub uid: u32,
+    pub gid: u32,
+    /// Their names, empty where the archive has none.
+    pub user: Vec<u8>,
+    pub group: Vec<u8>,
 }
 
 impl Item {

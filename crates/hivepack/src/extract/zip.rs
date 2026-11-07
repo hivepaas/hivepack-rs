@@ -38,6 +38,11 @@ pub struct Summary {
     /// [`Options::on_damaged`](crate::extract::Options::on_damaged), in the
     /// order met.
     pub damaged: Vec<Damaged>,
+    /// The files and folders whose owner or group, kept by the archive, was
+    /// not given with [`Options::owners`](crate::extract::Options::owners):
+    /// the user may not give them away, as a rule, not being root. Their
+    /// owner, or group, is the user's.
+    pub owners_left: u64,
 }
 
 /// An entry whose data was damaged, gone on from.

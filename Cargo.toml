@@ -53,6 +53,11 @@ cap-fs-ext = { version = "4.0.3", default-features = false, features = ["std"] }
 # which the standard library does not wrap. cap-std already depends on it.
 # hivepack::memory takes its `getrlimit` on Linux.
 rustix = { version = "1.1.6", default-features = false, features = ["fs", "std"] }
+# The users and groups this system has by name (getpwnam_r, getgrnam_r), for
+# hivepack::extract's owners kept by name: neither the standard library nor
+# rustix looks them up, and the system's own lookup (NSS on Linux, Directory
+# Services on macOS) is the one that knows them all.
+nix = { version = "0.31", default-features = false, features = ["user"] }
 # What the system says of its memory, for hivepack::memory, where neither the
 # standard library nor rustix has it: macOS's page counts (libc), and
 # Windows' free memory and job objects (windows-sys). Both are already in the
