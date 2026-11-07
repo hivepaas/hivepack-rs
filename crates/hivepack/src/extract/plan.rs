@@ -357,8 +357,11 @@ pub struct Options {
     /// solid) are decoded at once, each by a thread that writes its files; the
     /// threads left over decompress LZMA2 whose stream resets its dictionary
     /// on the way (7-Zip's in threads,
-    /// [`Lzma2Blocks`](crate::sevenz::Lzma2Blocks)) a block in each. What is
-    /// written is the same.
+    /// [`Lzma2Blocks`](crate::sevenz::Lzma2Blocks)) a block in each. Where
+    /// RAR's files are written one at a time (a solid archive, or one file),
+    /// an entry of RAR 5 or 7 has its Huffman blocks decoded ahead in that
+    /// many threads ([`Extract::threads`](crate::rar::Extract::threads)). What
+    /// is written is the same.
     pub threads: Threads,
     /// The memory the threads may take, where each holds what it decompresses
     /// with: RAR's ([`extract_rar`](crate::extract::extract_rar)), whose every
