@@ -103,6 +103,8 @@ fn item(entry: &Entry, folders: &[(u64, u64)], options: &Options) -> Item {
         data: None,
         mode: unix_mode.map(|mode| mode & 0o7777),
         mtime: entry.mtime.and_then(system_time),
+        owner: None,
+        xattrs: Vec::new(),
     }
 }
 

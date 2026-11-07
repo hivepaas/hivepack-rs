@@ -174,6 +174,8 @@ fn read_headers<R: Read>(r: R, run: &Run<'_>, options: &Options) -> Result<First
             data: None,
             mode: Some(h.mode & 0o7777),
             mtime: system_time(h.mod_time),
+            owner: None,
+            xattrs: Vec::new(),
         });
         entry.item = Some(first.items.len() - 1);
         first.entries.push(entry);
