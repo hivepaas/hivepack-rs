@@ -311,6 +311,72 @@ impl Decompress {
         result(ret)
     }
 
+    /// Not libbzip2's: a decoder where one reading a stream of blocks of
+    /// `block_size_100k` × 100,000 bytes from its start is at the start of a
+    /// block, its magic next: the combined CRC of the blocks before, and of
+    /// the byte it read last, the `live` lowest bits of `bits` it has not
+    /// read yet. Nothing else goes from one block to the next, as each block
+    /// writes what it reads of the decoder's state before reading it. With
+    /// `stop_after_block`, [`Decompress::decompress_block`] stops once the
+    /// block's output is given, before the next block's magic.
+    #[cfg(feature = "open")]
+    pub(crate) fn at_block(
+        block_size_100k: i32,
+        combined_crc: u32,
+        bits: u32,
+        live: i32,
+        stop_after_block: bool,
+    ) -> Decompress {
+        let mut s = DState::new(false);
+        s.state = BZ_X_BLKHDR_1;
+        s.block_size_100k = block_size_100k;
+        s.calculated_combined_crc = combined_crc;
+        s.bs_buff = bits;
+        s.bs_live = live;
+        s.stop_after_block = stop_after_block;
+        // What the stream's header reserves.
+        let failed =
+            s.tt.try_reserve_exact(block_size_100k.clamp(1, 9) as usize * 100000)
+                .err()
+                .map(|_| Error::Mem);
+        Decompress { s, failed }
+    }
+
+    /// [`Decompress::decompress`], for a decoder made by
+    /// [`Decompress::at_block`] with `stop_after_block`: `true` once the
+    /// block's output is all given and its CRC checked.
+    #[cfg(feature = "open")]
+    pub(crate) fn decompress_block(
+        &mut self,
+        output: &mut OutBuffer<'_>,
+        input: &mut InBuffer<'_>,
+    ) -> Result<bool> {
+        if let Some(error) = self.failed {
+            return Err(error);
+        }
+        let ret = bz_decompress(&mut self.s, output, input);
+        if ret == BZ_BLOCK_DONE {
+            return Ok(true);
+        }
+        if matches!(ret, BZ_MEM_ERROR | BZ_DATA_ERROR | BZ_DATA_ERROR_MAGIC) {
+            self.failed = Some(Error::from_number(ret));
+        }
+        result(ret).map(|_| false)
+    }
+
+    /// The bits of the last byte read not read yet, and how many: where in
+    /// the input the decoder is, past the bytes it took.
+    #[cfg(feature = "open")]
+    pub(crate) fn bits_left(&self) -> (u32, i32) {
+        (self.s.bs_buff, self.s.bs_live)
+    }
+
+    /// The CRC the last block said it had: checked once its output is given.
+    #[cfg(feature = "open")]
+    pub(crate) fn block_crc(&self) -> u32 {
+        self.s.stored_block_crc
+    }
+
     /// `total_in`: the bytes read so far.
     pub fn total_in(&self) -> u64 {
         self.s.total_in
@@ -1002,6 +1068,9 @@ fn bz_decompress(s: &mut DState, output: &mut OutBuffer<'_>, input: &mut InBuffe
                 s.calculated_combined_crc = s.calculated_combined_crc.rotate_left(1);
                 s.calculated_combined_crc ^= s.calculated_block_crc;
                 s.state = BZ_X_BLKHDR_1;
+                if s.stop_after_block {
+                    return BZ_BLOCK_DONE;
+                }
             } else {
                 return BZ_OK;
             }

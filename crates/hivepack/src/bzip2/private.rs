@@ -12,6 +12,11 @@ pub(crate) const BZ_RUN_OK: i32 = 1;
 pub(crate) const BZ_FLUSH_OK: i32 = 2;
 pub(crate) const BZ_FINISH_OK: i32 = 3;
 pub(crate) const BZ_STREAM_END: i32 = 4;
+/// Not libbzip2's: a block's output was all given, and its decoder stops
+/// before the next block's magic, as asked ([`DState::stop_after_block`]).
+///
+/// [`DState::stop_after_block`]: crate::bzip2::decompress::DState
+pub(crate) const BZ_BLOCK_DONE: i32 = 5;
 pub(crate) const BZ_SEQUENCE_ERROR: i32 = -1;
 pub(crate) const BZ_PARAM_ERROR: i32 = -2;
 pub(crate) const BZ_MEM_ERROR: i32 = -3;
