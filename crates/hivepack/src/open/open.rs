@@ -25,7 +25,8 @@ pub struct Limits {
     pub zstd_window_log_max: u32,
     /// What xz, lzip and .lzma's decoders may use: 1 GiB by default. `xz
     /// -9` needs 65 MiB. With [`Opener::threads`], xz's threads are lowered
-    /// to fit it, as liblzma lowers them, one always allowed.
+    /// to fit it, as liblzma lowers them, one always allowed, and pbzx's
+    /// chunks in flight hold no more than it.
     pub xz_memlimit: u64,
     /// What bzip2's decoder may use in threads ([`Opener::threads`]): they
     /// are lowered until they fit, about 20.5 MiB each, and one, the
@@ -97,6 +98,8 @@ pub struct Opener<F> {
     identities: Vec<BoxedIdentity>,
     limits: Limits,
     threads: Threads,
+    /// What the threads may hold in all, besides each decoder's limit.
+    threads_memory: u64,
     /// The file key of each age layer decrypted, the outermost first.
     file_keys: Vec<FileKey>,
     /// What the first open found, which the next must find again.
@@ -129,6 +132,7 @@ where
             identities: Vec::new(),
             limits: Limits::default(),
             threads: Threads::One,
+            threads_memory: u64::MAX,
             file_keys: Vec::new(),
             found: None,
         }
@@ -163,13 +167,24 @@ where
     /// bzip2 streams one after the other, as pbzip2 and [`CompressMt`] write
     /// them, a stream in each, and a stream of more than 2 MiB, as `bzip2`
     /// writes a file, a block in each, as far as [`Limits::bzip2_memlimit`]
-    /// allows; the other layers, and the Blocks without their sizes, on the
-    /// caller's thread. What is read is the same either way, errors too.
+    /// allows; pbzx's chunks, each an xz stream, a chunk in each, as far as
+    /// [`Limits::xz_memlimit`] allows; the other layers, and the Blocks
+    /// without their sizes, on the caller's thread. What is read is the same
+    /// either way, errors too.
     ///
     /// [`Stream::stream_encoder_mt`]: crate::xz::Stream::stream_encoder_mt
     /// [`CompressMt`]: crate::bzip2::CompressMt
     pub fn threads(mut self, threads: Threads) -> Opener<F> {
         self.threads = threads;
+        self
+    }
+
+    /// What the decoders' threads may hold in all, under the limits of
+    /// each: xz's and bzip2's threads are lowered to fit it, and pbzx's
+    /// chunks in flight held to it, one thread always allowed.
+    #[cfg_attr(not(feature = "extract"), allow(dead_code))]
+    pub(crate) fn threads_memory(mut self, bytes: u64) -> Opener<F> {
+        self.threads_memory = bytes;
         self
     }
 
@@ -183,6 +198,7 @@ where
             xz_memlimit: self.limits.xz_memlimit,
             bzip2_memlimit: self.limits.bzip2_memlimit,
             threads: self.threads.count(),
+            threads_memory: self.threads_memory,
         };
         let mut reader: Box<dyn Read + Send + 'a> = Box::new((self.open)()?);
         let full_name = self.name.clone();

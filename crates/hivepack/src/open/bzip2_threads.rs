@@ -167,6 +167,13 @@ pub(super) struct Rest<R> {
     eof: bool,
 }
 
+impl<R> Rest<R> {
+    /// `inner` after `error`, if it gave one, or after its end (`eof`).
+    pub(super) fn new(error: Option<io::Error>, inner: R, eof: bool) -> Rest<R> {
+        Rest { error, inner, eof }
+    }
+}
+
 impl<R: Read> Read for Rest<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if let Some(e) = self.error.take() {

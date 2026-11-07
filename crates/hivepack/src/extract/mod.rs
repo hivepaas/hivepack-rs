@@ -35,7 +35,8 @@
 //! - **Threads**: a ZIP archive's files, a RAR archive's that is not solid,
 //!   and a 7z archive's folders can be written several at once, each in a
 //!   thread of its own, and a tar or cpio archive's by threads while it is
-//!   read ([`Options::threads`]); what is written is the same.
+//!   read, a XAR package's payloads decoded in threads too
+//!   ([`Options::threads`]); what is written is the same.
 //! - **Marks of origin**: the archive's Mark of the Web on Windows, or its
 //!   quarantine on macOS ([`Origin`]), is carried to every file written.
 //!
