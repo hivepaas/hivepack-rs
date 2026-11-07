@@ -312,6 +312,11 @@ impl Bzip2Codec {
             d: crate::bzip2::Decompress::new(false),
         }
     }
+
+    /// With `d`, a decoder already within a stream.
+    pub(super) fn within(d: crate::bzip2::Decompress) -> Bzip2Codec {
+        Bzip2Codec { d }
+    }
 }
 
 impl Codec for Bzip2Codec {

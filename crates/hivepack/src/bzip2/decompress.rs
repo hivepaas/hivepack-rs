@@ -56,8 +56,8 @@ pub(crate) struct DState {
     pub(crate) rand: Rand,
 
     // The buffer for bit stream reading.
-    bs_buff: u32,
-    bs_live: i32,
+    pub(crate) bs_buff: u32,
+    pub(crate) bs_live: i32,
 
     // Misc administratium.
     pub(crate) block_size_100k: i32,
@@ -118,6 +118,11 @@ pub(crate) struct DState {
     // for the output.
     pub(crate) total_in: u64,
     pub(crate) total_out: u64,
+
+    /// Not libbzip2's: once a block's output is all given, `bz_decompress`
+    /// returns `BZ_BLOCK_DONE` before reading the next block's magic, for a
+    /// thread that decodes one block.
+    pub(crate) stop_after_block: bool,
 }
 
 impl DState {
@@ -164,6 +169,7 @@ impl DState {
             save: Save::default(),
             total_in: 0,
             total_out: 0,
+            stop_after_block: false,
         })
     }
 

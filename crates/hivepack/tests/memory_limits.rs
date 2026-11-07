@@ -404,6 +404,17 @@ fn bzip2_read_case(threads: u32) {
         bound as f64 / MIB
     );
     assert!(actual <= bound, "{actual} held, bound {bound}");
+    // One stream, as `bzip2 -9` writes a file: a block in each thread.
+    let mut one = vec![0; data.len() + data.len() / 50 + 1000];
+    let len = hivepack::bzip2::buff_to_buff_compress(&mut one, &data, 9, 30).unwrap();
+    one.truncate(len);
+    let (actual, _) = measure(|| open_bzip2(&one, threads, Limits::default()));
+    println!(
+        "bzip2 of one stream read, {threads} threads: {:.1} MiB held, bound {:.1} MiB",
+        actual as f64 / MIB,
+        bound as f64 / MIB
+    );
+    assert!(actual <= bound, "one stream: {actual} held, bound {bound}");
 }
 
 #[test]
