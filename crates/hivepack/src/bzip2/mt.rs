@@ -531,11 +531,19 @@ pub(crate) struct Pool {
     /// Set when the pool is dropped: the jobs not started are not run.
     stop: Arc<AtomicBool>,
     handles: Vec<JoinHandle<()>>,
+    /// What its threads are named.
+    name: &'static str,
 }
 
 impl Pool {
     /// A pool of `threads` at most, or none with one.
     pub(crate) fn new(threads: usize) -> Pool {
+        Pool::named(threads, "hivepack-bzip2")
+    }
+
+    /// A pool of `threads` at most, or none with one, its threads named
+    /// `name`.
+    pub(crate) fn named(threads: usize, name: &'static str) -> Pool {
         let (sender, receiver) = mpsc::channel();
         Pool {
             max: if threads > 1 { threads } else { 0 },
@@ -543,6 +551,7 @@ impl Pool {
             receiver: Arc::new(Mutex::new(receiver)),
             stop: Arc::new(AtomicBool::new(false)),
             handles: Vec::new(),
+            name,
         }
     }
 
@@ -588,7 +597,7 @@ impl Pool {
     fn start(&mut self) {
         let receiver = Arc::clone(&self.receiver);
         let spawned = std::thread::Builder::new()
-            .name("hivepack-bzip2".into())
+            .name(self.name.into())
             .spawn(move || {
                 loop {
                     let job = receiver

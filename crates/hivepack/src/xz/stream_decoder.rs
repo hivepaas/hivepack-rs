@@ -417,3 +417,33 @@ impl NextCoder for StreamDecoder {
         Some(Ret::Ok)
     }
 }
+
+/// Not in liblzma: what [`StreamDecoder`] counts against its limit for the
+/// first Block of the Stream that `stream` starts, its filters'
+/// `lzma_raw_decoder_memusage`, or [`MEMUSAGE_BASE`] for a Stream of no
+/// Block; none if that Stream Header or Block Header cannot be read from
+/// `stream`, or names an unknown filter.
+#[cfg(feature = "open")]
+pub(crate) fn first_block_memusage(stream: &[u8]) -> Option<u64> {
+    let mut flags = StreamFlags::new();
+    let header = stream.get(..STREAM_HEADER_SIZE)?;
+    if stream_flags::header_decode(&mut flags, header) != Ret::Ok {
+        return None;
+    }
+    let first = *stream.get(STREAM_HEADER_SIZE)?;
+    if first == INDEX_INDICATOR {
+        return Some(MEMUSAGE_BASE);
+    }
+    let mut block = Block::new();
+    block.version = 1;
+    block.header_size = header_size_decode(first);
+    block.check = flags.check;
+    let end = STREAM_HEADER_SIZE + block.header_size as usize;
+    if block.header_decode(stream.get(STREAM_HEADER_SIZE..end)?) != Ret::Ok {
+        return None;
+    }
+    match raw_decoder_memusage(&block.filters) {
+        u64::MAX => None,
+        memusage => Some(memusage),
+    }
+}
