@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use hivepack::extract::{
-    ErrorKind, Limits, LinkOutside, Links, NameError, OnLinksOutside, OnRefused, Options, Progress,
-    Summary, extract_tar,
+    ErrorKind, Limits, LinkOutside, Links, NameError, OnLinksOutside, OnRefused, Options, Owners,
+    Progress, Summary, extract_tar,
 };
 
 /// The time the test entries have.
@@ -1107,4 +1107,226 @@ fn portable() -> hivepack::extract::Options {
     let mut options = hivepack::extract::Options::default();
     options.name_rules = hivepack::extract::NameRules::Portable;
     options
+}
+
+/// The extended attribute `name` of the file at `path`, if it has one.
+#[cfg(target_os = "linux")]
+fn xattr_of(path: &Path, name: &str) -> Option<Vec<u8>> {
+    let mut value = vec![0u8; 256];
+    let n = rustix::fs::lgetxattr(path, name, &mut value[..]).ok()?;
+    value.truncate(n);
+    Some(value)
+}
+
+/// A tar archive kept for a backup: a folder and a file, each with an owner and
+/// group, and extended attributes, `security.capability` among the file's.
+#[cfg(target_os = "linux")]
+fn kept_for_a_backup(uid: u32, gid: u32) -> Vec<u8> {
+    kept_for_a_backup_named(uid, gid, "someone", "")
+}
+
+/// [`kept_for_a_backup`], its entries' owner and group named `user` and `group`.
+#[cfg(target_os = "linux")]
+fn kept_for_a_backup_named(uid: u32, gid: u32, user: &str, group: &str) -> Vec<u8> {
+    use hivepack::tar::{Header, Records, TYPE_DIR, TYPE_REG, Writer};
+    use std::io::Write;
+    let records = |pairs: &[(&str, &[u8])]| -> Records {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.as_bytes().to_vec(), v.to_vec()))
+            .collect()
+    };
+    let mut tw = Writer::new(Vec::new());
+    tw.write_header(&Header {
+        typeflag: TYPE_DIR,
+        name: b"d/".to_vec(),
+        mode: 0o755,
+        uid: i64::from(uid),
+        gid: i64::from(gid),
+        uname: user.as_bytes().to_vec(),
+        gname: group.as_bytes().to_vec(),
+        xattrs: records(&[("user.folder", b"kept")]),
+        ..Header::default()
+    })
+    .unwrap();
+    tw.write_header(&Header {
+        typeflag: TYPE_REG,
+        name: b"d/f".to_vec(),
+        mode: 0o644,
+        size: 5,
+        uid: i64::from(uid),
+        gid: i64::from(gid),
+        uname: user.as_bytes().to_vec(),
+        gname: group.as_bytes().to_vec(),
+        xattrs: records(&[
+            ("user.file", b"b\x00inary"),
+            ("security.capability", b"\x01\x00\x00\x02"),
+        ]),
+        ..Header::default()
+    })
+    .unwrap();
+    tw.write_all(b"hello").unwrap();
+    tw.close().unwrap();
+    tw.into_inner()
+}
+
+/// Owners and extended attributes are restored when asked, never
+/// `security.capability`; otherwise what is extracted is the user's, bare. A
+/// group the user is in is given; the owner, the user's own.
+#[cfg(target_os = "linux")]
+#[test]
+fn owners_and_attributes_are_restored_when_asked() {
+    use std::os::unix::fs::MetadataExt;
+    let s = Scratch::new();
+    let probe = s.path().join("probe");
+    std::fs::write(&probe, "").unwrap();
+    if rustix::fs::setxattr(&probe, "user.probe", b"x", rustix::fs::XattrFlags::empty()).is_err() {
+        eprintln!("skipping: this file system takes no extended attributes");
+        return;
+    }
+    let mine = std::fs::metadata(&probe).unwrap();
+    // A group of the user's other than the one files get, if there is one.
+    let other_gid = rustix::process::getgroups()
+        .unwrap_or_default()
+        .into_iter()
+        .map(rustix::process::Gid::as_raw)
+        .find(|&g| g != mine.gid())
+        .unwrap_or(mine.gid());
+    let archive = kept_for_a_backup(mine.uid(), other_gid);
+
+    let bare = s.path().join("bare");
+    extract(&archive, &bare, &options(|_| {})).unwrap();
+    assert_eq!(xattr_of(&bare.join("d/f"), "user.file"), None);
+    assert_eq!(xattr_of(&bare.join("d"), "user.folder"), None);
+    assert_eq!(
+        std::fs::metadata(bare.join("d/f")).unwrap().gid(),
+        mine.gid()
+    );
+
+    let kept = s.path().join("kept");
+    let restoring = options(|o| {
+        o.owners = Owners::ByNumber;
+        o.xattrs = true;
+    });
+    extract(&archive, &kept, &restoring).unwrap();
+    let f = kept.join("d/f");
+    assert_eq!(std::fs::read(&f).unwrap(), b"hello");
+    assert_eq!(
+        xattr_of(&f, "user.file").as_deref(),
+        Some(&b"b\x00inary"[..])
+    );
+    assert_eq!(xattr_of(&f, "security.capability"), None);
+    assert_eq!(
+        xattr_of(&kept.join("d"), "user.folder").as_deref(),
+        Some(&b"kept"[..])
+    );
+    let meta = std::fs::metadata(&f).unwrap();
+    assert_eq!((meta.uid(), meta.gid()), (mine.uid(), other_gid));
+    assert_eq!(std::fs::metadata(kept.join("d")).unwrap().gid(), other_gid);
+    // The time and permissions after them, as the archive has them.
+    assert_eq!(meta.mode() & 0o777, 0o644);
+
+    // The same with files written in threads.
+    let threaded = s.path().join("threaded");
+    let in_threads = options(|o| {
+        o.owners = Owners::ByNumber;
+        o.xattrs = true;
+        o.threads = hivepack::Threads::of(4);
+    });
+    extract(&archive, &threaded, &in_threads).unwrap();
+    let f = threaded.join("d/f");
+    assert_eq!(
+        xattr_of(&f, "user.file").as_deref(),
+        Some(&b"b\x00inary"[..])
+    );
+    assert_eq!(std::fs::metadata(&f).unwrap().gid(), other_gid);
+
+    // An owner the user may not give away is left as it is, and counted.
+    let refused = s.path().join("refused");
+    let summary = extract(
+        &kept_for_a_backup(mine.uid() + 1, mine.gid()),
+        &refused,
+        &restoring,
+    )
+    .unwrap();
+    if !rustix::process::geteuid().is_root() {
+        assert_eq!(
+            std::fs::metadata(refused.join("d/f")).unwrap().uid(),
+            mine.uid()
+        );
+        assert_eq!(summary.owners_left, 2);
+    }
+}
+
+/// What `id` says of the user running the tests: `-un`, `-gn`.
+#[cfg(target_os = "linux")]
+fn id(flag: &str) -> String {
+    let out = std::process::Command::new("id").arg(flag).output().unwrap();
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+/// By name, the system's user and group of those names, whatever numbers the
+/// archive has; names it does not know, the archive's numbers. By number, the
+/// names aside. An owner refused still gives its group, if it is the user's.
+#[cfg(target_os = "linux")]
+#[test]
+fn owners_are_given_by_name_or_by_number() {
+    use std::os::unix::fs::MetadataExt;
+    let s = Scratch::new();
+    let probe = s.path().join("probe");
+    std::fs::write(&probe, "").unwrap();
+    let mine = std::fs::metadata(&probe).unwrap();
+    let root = rustix::process::geteuid().is_root();
+    let other_gid = rustix::process::getgroups()
+        .unwrap_or_default()
+        .into_iter()
+        .map(rustix::process::Gid::as_raw)
+        .find(|&g| g != mine.gid())
+        .unwrap_or(mine.gid());
+    let owned = |dir: &Path| {
+        let f = std::fs::metadata(dir.join("d/f")).unwrap();
+        let d = std::fs::metadata(dir.join("d")).unwrap();
+        assert_eq!((f.uid(), f.gid()), (d.uid(), d.gid()));
+        (f.uid(), f.gid())
+    };
+    // Another's numbers, under the user's names: from another system.
+    let moved = kept_for_a_backup_named(mine.uid() + 1, other_gid, &id("-un"), &id("-gn"));
+
+    let by_name = s.path().join("by-name");
+    let summary = extract(&moved, &by_name, &options(|o| o.owners = Owners::ByName)).unwrap();
+    assert_eq!(owned(&by_name), (mine.uid(), mine.gid()));
+    assert_eq!(summary.owners_left, 0);
+
+    let by_number = s.path().join("by-number");
+    let summary = extract(
+        &moved,
+        &by_number,
+        &options(|o| o.owners = Owners::ByNumber),
+    )
+    .unwrap();
+    if root {
+        assert_eq!(owned(&by_number), (mine.uid() + 1, other_gid));
+        assert_eq!(summary.owners_left, 0);
+    } else {
+        // The owner left, the group given.
+        assert_eq!(owned(&by_number), (mine.uid(), other_gid));
+        assert_eq!(summary.owners_left, 2);
+    }
+
+    // Names this system does not have: the numbers.
+    let unknown = s.path().join("unknown");
+    let summary = extract(
+        &kept_for_a_backup_named(mine.uid(), other_gid, "no-such-user-hp", "no-such-group-hp"),
+        &unknown,
+        &options(|o| o.owners = Owners::ByName),
+    )
+    .unwrap();
+    assert_eq!(owned(&unknown), (mine.uid(), other_gid));
+    assert_eq!(summary.owners_left, 0);
+
+    // Not asked: the user's.
+    let bare = s.path().join("bare");
+    let summary = extract(&moved, &bare, &options(|_| {})).unwrap();
+    assert_eq!(owned(&bare), (mine.uid(), mine.gid()));
+    assert_eq!(summary.owners_left, 0);
 }

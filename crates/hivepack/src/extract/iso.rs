@@ -141,6 +141,8 @@ fn read_headers<R: Read>(r: R, run: &Run<'_>, options: &Options) -> Result<First
             data: None,
             mode: rock_ridge.then_some(h.mode & 0o7777),
             mtime: system_time(h.mod_time),
+            owner: None,
+            xattrs: Vec::new(),
         });
         // The data, unless the checks are to stop it for its size.
         if kind == Kind::File

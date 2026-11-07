@@ -83,7 +83,7 @@ crypto = [
 
 deflate = []
 
-extract = ["zip", "tar", "iso", "cpio", "xar", "open", "udf", "sevenz", "dep:cap-std", "dep:cap-fs-ext", "dep:rustix"]
+extract = ["zip", "tar", "iso", "cpio", "xar", "open", "udf", "sevenz", "dep:cap-std", "dep:cap-fs-ext", "dep:nix", "dep:rustix"]
 
 iso = ["deflate"]
 
@@ -139,10 +139,14 @@ cap-fs-ext = { workspace = true, optional = true }
 # `ulimit`'s limits (getrlimit), for `memory`.
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { workspace = true, optional = true, features = ["process"] }
+# Users and groups by name, for `extract`'s owners.
+nix = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Extended attributes, for `extract`.
 rustix = { workspace = true, optional = true }
+# Users and groups by name, for `extract`'s owners.
+nix = { workspace = true, optional = true }
 # The system's page counts, for `memory`.
 libc = { workspace = true, optional = true }
 

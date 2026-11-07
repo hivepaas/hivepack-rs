@@ -13,6 +13,8 @@
 
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, SystemTimeSpec};
@@ -22,13 +24,26 @@ use cap_std::fs::{Dir, File, OpenOptions};
 use crate::extract::error::{Error, ErrorKind};
 use crate::extract::name::NameError;
 use crate::extract::origin::Origin;
-use crate::extract::plan::{Item, Links, Options};
+use crate::extract::plan::{Item, Links, Options, Owners};
 use crate::extract::zip::{set_modified, set_permissions};
 
 /// The destination, open, and the mark of origin of what is written in it.
 pub(crate) struct Destination<'a> {
     root: Dir,
     origin: Option<&'a Origin>,
+    /// Shared with the destinations within, and the threads writing.
+    owning: Arc<Owning>,
+}
+
+/// What giving files their owners keeps as it goes: the names this system was
+/// asked for, and how many owners were left.
+#[derive(Default)]
+struct Owning {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    users: std::sync::Mutex<std::collections::HashMap<Vec<u8>, Option<u32>>>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    groups: std::sync::Mutex<std::collections::HashMap<Vec<u8>, Option<u32>>>,
+    left: AtomicU64,
 }
 
 impl<'a> Destination<'a> {
@@ -37,7 +52,11 @@ impl<'a> Destination<'a> {
     pub(crate) fn open(path: &Path, origin: Option<&'a Origin>) -> io::Result<Destination<'a>> {
         std::fs::create_dir_all(path)?;
         let root = Dir::open_ambient_dir(path, ambient_authority())?;
-        Ok(Destination { root, origin })
+        Ok(Destination {
+            root,
+            origin,
+            owning: Arc::default(),
+        })
     }
 
     /// The directory at `components`, as a destination of its own, opened
@@ -47,6 +66,7 @@ impl<'a> Destination<'a> {
         Ok(Destination {
             root: self.directory(components)?,
             origin: self.origin,
+            owning: Arc::clone(&self.owning),
         })
     }
 
@@ -174,6 +194,113 @@ impl<'a> Destination<'a> {
     }
 }
 
+/// Whether `options` asks something restored that `item` keeps.
+fn wants_kept(item: &Item, options: &Options) -> bool {
+    (options.owners != Owners::Ignore && item.owner.is_some())
+        || (options.xattrs && !item.xattrs.is_empty())
+}
+
+/// The id this system has for the user, or group, `name`, looked up once:
+/// none for no name, one not UTF-8, or one the system does not know.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn id_named(
+    names: &std::sync::Mutex<std::collections::HashMap<Vec<u8>, Option<u32>>>,
+    name: &[u8],
+    look_up: fn(&str) -> Option<u32>,
+) -> Option<u32> {
+    if name.is_empty() {
+        return None;
+    }
+    let mut names = names
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *names
+        .entry(name.to_vec())
+        .or_insert_with(|| std::str::from_utf8(name).ok().and_then(look_up))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn user_named(name: &str) -> Option<u32> {
+    Some(nix::unistd::User::from_name(name).ok()??.uid.as_raw())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn group_named(name: &str) -> Option<u32> {
+    Some(nix::unistd::Group::from_name(name).ok()??.gid.as_raw())
+}
+
+/// Restores on `handle`, a file or folder open, what `item` keeps and `options`
+/// asks: its extended attributes, then its owner, as GNU tar does. What the file
+/// system or the user's rights do not take is left as it is; an owner left is
+/// counted in `owning`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn restore_kept(
+    handle: &impl std::os::fd::AsFd,
+    item: &Item,
+    options: &Options,
+    owning: &Owning,
+) -> Result<(), ErrorKind> {
+    use rustix::io::Errno;
+    use std::os::unix::ffi::OsStrExt;
+    // Not taken: the file system has none, the user may not, or it is not one
+    // the system knows (a Linux name on macOS, an ACL of another system).
+    let left = |e: Errno| {
+        matches!(
+            e,
+            Errno::NOTSUP | Errno::PERM | Errno::ACCESS | Errno::INVAL | Errno::NOSPC
+        )
+    };
+    if options.xattrs {
+        for (name, value) in &item.xattrs {
+            // Rights for a program, as a setuid bit gives, which are never
+            // restored.
+            if name.as_slice() == b"security.capability" || name.contains(&0) {
+                continue;
+            }
+            let name = std::ffi::OsStr::from_bytes(name);
+            match rustix::fs::fsetxattr(handle, name, value, rustix::fs::XattrFlags::empty()) {
+                Ok(()) => {}
+                Err(e) if left(e) => {}
+                Err(e) => return Err(ErrorKind::Io(e.into())),
+            }
+        }
+    }
+    let Some(owner) = item.owner.as_ref() else {
+        return Ok(());
+    };
+    let (uid, gid) = match options.owners {
+        Owners::Ignore => return Ok(()),
+        Owners::ByName => (
+            id_named(&owning.users, &owner.user, user_named).unwrap_or(owner.uid),
+            id_named(&owning.groups, &owner.group, group_named).unwrap_or(owner.gid),
+        ),
+        Owners::ByNumber => (owner.uid, owner.gid),
+    };
+    let (uid, gid) = (
+        rustix::fs::Uid::from_raw(uid),
+        rustix::fs::Gid::from_raw(gid),
+    );
+    match rustix::fs::fchown(handle, Some(uid), Some(gid)) {
+        Ok(()) => {}
+        // The owner not the user's to give, the group may be: one of theirs.
+        Err(e) if left(e) => {
+            match rustix::fs::fchown(handle, None, Some(gid)) {
+                Ok(()) => {}
+                Err(e) if left(e) => {}
+                Err(e) => return Err(ErrorKind::Io(e.into())),
+            }
+            owning.left.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(e) => return Err(ErrorKind::Io(e.into())),
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn restore_kept<H>(_: &H, _: &Item, _: &Options, _: &Owning) -> Result<(), ErrorKind> {
+    Ok(())
+}
+
 /// The error of `component` in `dir`, which did not open as a directory with
 /// `e`: a link, or a file, where a directory was to be.
 fn not_a_directory(dir: &Dir, component: &str, e: io::Error) -> ErrorKind {
@@ -209,6 +336,17 @@ pub(crate) trait Target: Sized {
         options: &Options,
     ) -> Result<Self::File<'_>, ErrorKind>;
 
+    /// The directory at `components`, made: what [`Options::owners`] and
+    /// [`Options::xattrs`] restore of `item`. Nothing, but in a folder.
+    fn restore_directory(
+        &self,
+        _components: &[String],
+        _item: &Item,
+        _options: &Options,
+    ) -> Result<(), ErrorKind> {
+        Ok(())
+    }
+
     /// The file, its data written: its mark of origin, time and permissions.
     fn finish_file(
         &self,
@@ -219,6 +357,12 @@ pub(crate) trait Target: Sized {
 
     /// The file at `components`, whose data failed, not left.
     fn remove_file(&self, components: &[String]);
+
+    /// How many files and folders kept their owner or group, not given:
+    /// [`Summary::owners_left`](crate::extract::Summary::owners_left).
+    fn owners_left(&self) -> u64 {
+        0
+    }
 
     /// The symbolic link `item`, at `components`, to `target`, relative, with `/`
     /// for separator; `to_dir` says whether it leads to a directory.
@@ -331,6 +475,26 @@ impl Target for Destination<'_> {
         Destination::within(self, components)
     }
 
+    fn restore_directory(
+        &self,
+        components: &[String],
+        item: &Item,
+        options: &Options,
+    ) -> Result<(), ErrorKind> {
+        if !wants_kept(item, options) {
+            return Ok(());
+        }
+        // Opened from its parent, to read and not through a link: a handle of
+        // `directory`'s may be one for paths alone (`O_PATH` on Linux), which
+        // takes no attributes.
+        let (last, parents) = split(components)?;
+        let parent = Destination::directory(self, parents)?;
+        let mut how = OpenOptions::new();
+        how.read(true).follow(FollowSymlinks::No);
+        let dir = parent.open_with(last, &how).map_err(ErrorKind::Io)?;
+        restore_kept(&dir, item, options, &self.owning)
+    }
+
     fn create_file(
         &self,
         _: &Item,
@@ -349,6 +513,9 @@ impl Target for Destination<'_> {
         item: &Item,
         options: &Options,
     ) -> Result<(), ErrorKind> {
+        // What the archive kept for a backup before the mark, which its
+        // attributes never stand for.
+        restore_kept(&file, item, options, &self.owning)?;
         // The mark first: writing a stream can change the file's time.
         if let Some(origin) = self.origin {
             origin.write_file(&file).map_err(ErrorKind::Origin)?;
@@ -359,6 +526,10 @@ impl Target for Destination<'_> {
         set_permissions(&file, item.mode, options.permissions)?;
         let mut file = file;
         file.flush().map_err(ErrorKind::Io)
+    }
+
+    fn owners_left(&self) -> u64 {
+        self.owning.left.load(Ordering::Relaxed)
     }
 
     fn remove_file(&self, components: &[String]) {
