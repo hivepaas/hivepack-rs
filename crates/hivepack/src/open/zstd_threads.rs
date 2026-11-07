@@ -301,6 +301,32 @@ mod tests {
         assert!(threads(&one_frame, 3, 27) == (data, None));
     }
 
+    /// `CompressFrames`'s frames, and its seek table, a skippable frame,
+    /// are all taken from the threads.
+    #[test]
+    fn compress_frames_are_taken_from_the_threads() {
+        use crate::zstd::{CompressFrames, EndDirective, FramesOptions, InBuffer, OutBuffer};
+        let data = text(300_000, 5);
+        let options = FramesOptions {
+            frame_size: 40_000,
+            ..FramesOptions::default()
+        };
+        let mut frames = CompressFrames::new(&options).unwrap();
+        let mut file = vec![0; crate::zstd::compress_bound(data.len()).unwrap() + 4096];
+        let mut output = OutBuffer::new(&mut file);
+        let mut input = InBuffer::new(&data);
+        while frames
+            .compress_stream(&mut output, &mut input, EndDirective::End)
+            .unwrap()
+            != 0
+        {}
+        let n = output.pos;
+        file.truncate(n);
+        let mut reader = zstd_threads(&file[..], 3, 27, 1 << 30);
+        assert!(read_all(&mut reader) == (data, None));
+        assert!(!reader.is_serial());
+    }
+
     #[test]
     fn damage_anywhere_comes_out_as_one_thread_reads_it() {
         let file = frames(&text(80_000, 5), 10_000);

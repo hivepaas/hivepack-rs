@@ -1226,6 +1226,42 @@ fn zstd_frames_decode_in_threads_as_in_one() {
     }
 }
 
+/// What `zstd::CompressFrames` writes, its seek table after the frames, is
+/// read in threads as in one: the data, and the seek table, a skippable
+/// frame, passed over.
+#[test]
+fn zstd_compress_frames_decode_in_threads() {
+    use hivepack::zstd::{
+        CompressFrames, EndDirective, FramesOptions, InBuffer, OutBuffer, compress_bound,
+    };
+    let tar = sample_tar();
+    for seek_table in [true, false] {
+        let options = FramesOptions {
+            frame_size: 8 << 10,
+            threads: Threads::of(2),
+            seek_table,
+            ..FramesOptions::default()
+        };
+        let mut frames = CompressFrames::new(&options).unwrap();
+        let mut file = vec![0; compress_bound(tar.len()).unwrap() + 4096];
+        let mut output = OutBuffer::new(&mut file);
+        let mut input = InBuffer::new(&tar);
+        while frames
+            .compress_stream(&mut output, &mut input, EndDirective::End)
+            .unwrap()
+            != 0
+        {}
+        let n = output.pos;
+        file.truncate(n);
+        for threads in [Threads::One, Threads::of(2), Threads::of(8)] {
+            assert!(
+                read_with(&file, threads, Limits::default()) == (tar.clone(), None),
+                "seek table {seek_table}, {threads:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn xz_blocks_decode_in_threads_as_in_one() {
     let tar = sample_tar();
