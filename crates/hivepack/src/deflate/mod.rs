@@ -7,7 +7,9 @@
 //! and gzip headers; so do the checksums ([`crc32`], [`adler32`]).
 //! [`InflateBack9`] decodes Deflate64, method 9 of ZIP archives, as zlib's
 //! `contrib/infback9` does, and [`Inflate9`] decodes it as `infback9` does
-//! but a piece at a time, as [`Inflate`] decodes deflate. The rules the
+//! but a piece at a time, as [`Inflate`] decodes deflate. [`DeflateMt`],
+//! which is not part of the port, compresses in threads as pigz does, into
+//! one stream of [`Deflate`]'s blocks. The rules the
 //! port follows, and how it is checked, are in the repository:
 //! `docs/deflate.md` and `docs/safety.md`.
 //!
@@ -55,6 +57,7 @@ mod inflate;
 mod inflate9;
 mod inftree9;
 mod inftrees;
+mod mt;
 mod trees;
 mod zutil;
 
@@ -75,6 +78,7 @@ pub use deflate::{
 pub use infback9::{Back9, BackIn, BackOut, InflateBack9};
 pub use inflate::{GzHeader, InBuffer, Inflate, OutBuffer};
 pub use inflate9::Inflate9;
+pub use mt::{BLOCK_SIZE, DeflateMt, MtOptions};
 pub use zutil::{Error, ErrorCode, Flush, MAX_WBITS, Result, Status};
 
 /// The zlib release this crate follows, as zlib's `ZLIB_VERSION` gives it.

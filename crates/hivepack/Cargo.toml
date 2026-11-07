@@ -273,6 +273,11 @@ path = "tests/deflate_oracle.rs"
 required-features = ["deflate"]
 
 [[test]]
+name = "deflate_threads"
+path = "tests/deflate_threads.rs"
+required-features = ["deflate"]
+
+[[test]]
 name = "deflate_zlib"
 path = "tests/deflate_zlib.rs"
 required-features = ["deflate"]
@@ -415,7 +420,7 @@ required-features = ["bzip2", "memory", "open", "sevenz", "xz", "zip", "zstd"]
 [[test]]
 name = "memory_limits"
 path = "tests/memory_limits.rs"
-required-features = ["bzip2", "open", "sevenz", "zstd"]
+required-features = ["bzip2", "deflate", "open", "sevenz", "zstd"]
 
 [[test]]
 name = "open_age"

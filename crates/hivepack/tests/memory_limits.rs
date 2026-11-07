@@ -1,7 +1,8 @@
 //! The memory the multi-threaded coders take, against what their estimates
 //! say: 7z's LZMA2 in blocks (`WriteOptions::memory_usage`), zstd's workers
-//! (`CCtx::estimate_memory`), bzip2's `CompressMt` (`MtOptions::memory_usage`)
-//! and bzip2's threads in `Opener`. An allocator that counts what is
+//! (`CCtx::estimate_memory`), bzip2's `CompressMt` (`MtOptions::memory_usage`),
+//! deflate's `DeflateMt` (`deflate::MtOptions::memory_usage`) and bzip2's
+//! threads in `Opener`. An allocator that counts what is
 //! allocated gives the most each held at once: it must be no more than the
 //! estimate, and the estimate no more than twice it. Under a memory limit,
 //! the threads are lowered, what is made is the same, and it takes no more
@@ -30,6 +31,10 @@ use std::time::{Duration, Instant};
 use hivepack::Threads;
 use hivepack::bzip2::{
     Action, CompressMt, InBuffer as BzIn, MtOptions, OutBuffer as BzOut, Status,
+};
+use hivepack::deflate::{
+    DeflateMt, Flush, InBuffer as GzIn, MtOptions as GzOptions, OutBuffer as GzOut,
+    Status as GzStatus,
 };
 use hivepack::open::{Limits, Opener};
 use hivepack::sevenz::{Lzma2Blocks, Method, NewEntry, WriteOptions, Writer};
@@ -586,6 +591,74 @@ fn bzip2_threads() {
         bzip2_case(threads);
     }
     bzip2_read_case(4);
+}
+
+/// `data` through `DeflateMt` with `options`, 1 MiB at a time in and out,
+/// as a hash.
+fn deflate_mt(data: &[u8], options: &GzOptions) -> u64 {
+    let mut c = DeflateMt::new(options).unwrap();
+    let mut out = vec![0u8; 1 << 20];
+    let mut hash = Hash::default();
+    let mut at = 0;
+    loop {
+        let end = (at + (1 << 20)).min(data.len());
+        let mut input = GzIn::new(&data[at..end]);
+        let mut output = GzOut::new(&mut out);
+        let flush = if end == data.len() {
+            Flush::Finish
+        } else {
+            Flush::NoFlush
+        };
+        let status = c.deflate(&mut output, &mut input, flush).unwrap();
+        at += input.pos;
+        let n = output.pos;
+        hash.write_all(&out[..n]).unwrap();
+        if status == GzStatus::StreamEnd {
+            return hash.sum;
+        }
+    }
+}
+
+/// Deflate in threads: its compressors, two blocks for each thread and
+/// their output; under a limit, fewer threads, the same stream, and no more
+/// than the limit held.
+#[test]
+fn deflate_threads() {
+    let _one = lock();
+    let data = text(16 << 20, 23);
+    for (level, threads) in [(1, 1), (6, 4), (9, 8)] {
+        let options = GzOptions {
+            level,
+            threads: Threads::of(threads),
+            ..GzOptions::default()
+        };
+        let estimate = options.memory_usage(threads).unwrap();
+        let (actual, _) = measure(|| deflate_mt(&data, &options));
+        check(
+            &format!("deflate level {level}, {threads} threads"),
+            actual,
+            estimate,
+        );
+    }
+    let wide = GzOptions {
+        threads: Threads::of(8),
+        ..GzOptions::default()
+    };
+    let want = deflate_mt(&data, &GzOptions::default());
+    for threads in [1, 3, 8] {
+        let limit = wide.memory_usage(threads).unwrap();
+        let options = GzOptions {
+            memory_limit: limit,
+            ..wide
+        };
+        assert_eq!(options.threads_used(), Ok(threads));
+        let (actual, got) = measure(|| deflate_mt(&data, &options));
+        assert_eq!(got, want, "{threads} threads");
+        assert!(
+            actual <= limit,
+            "{threads} threads: {actual} held, {limit} allowed"
+        );
+    }
 }
 
 #[test]

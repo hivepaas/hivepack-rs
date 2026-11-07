@@ -103,6 +103,29 @@ It was 0.92–0.94× as first ported. The codes of a block are now decoded in a 
 | x-ray | 233 MB/s (0.89×) | 223 MB/s (0.85×) | 262 MB/s |
 
 Its literals are written in the loop that decodes the length codes, while there is room, without going through a mode of their own; that took it from 0.75–0.91×. Masking the root table's index, to spare a bounds check, made it slower and was left out. On mostly literals it is still below the 0.95× target: a fast loop as `inflate.c` has would be the next step.
+## Deflate in threads, beside the port
+
+zlib compresses on one thread. `DeflateMt` (`deflate/mt.rs`) compresses in threads as pigz does, and is not part of the port: nothing in it changes what `Deflate` does.
+
+- **One stream.** The input is cut into blocks of 128 KiB (`MtOptions::block_size`), and each is compressed by a `Deflate` of raw deflate, reset for it, with the 32 KiB of input before it as its dictionary (`Deflate::set_dictionary`), so that it may refer back to them as one stream would. A block is ended on a byte as pigz 2.8 ends one: `Flush::Block`, then empty fixed blocks of 10 bits (`Deflate::prime`) until the bits left make whole bytes, or a sync marker (`Flush::SyncFlush`) where an odd number of bits left cannot; the last block is finished (`Flush::Finish`). The blocks one after the other are one deflate stream, in one gzip member with its CRC-32, combined from each block's (`crc32_combine`), and its size: what every gzip reader reads. `MtOptions::raw` leaves out gzip's header and trailer, as a ZIP entry has it.
+- **The same output whatever the threads.** Blocks end where their size says, and where a flush or the end is asked for, never where the threads would: the stream depends on the input, the options and where the flushes are, and is the same with `Threads::One`, which compresses each block in the call that fills it, as with many. A full block is given to a thread only once more input says it is not the last, as pigz reads ahead to know; so at the default block size and without flushes the stream is pigz's, byte for byte, at every level, and its header too but for the operating system, which is the one zlib's build would write (pigz writes Unix's).
+- **Flushes.** `Flush::SyncFlush` ends the current block on a byte, so that what was given can be decompressed; `Flush::FullFlush` ends it with a sync marker, and the block after it takes no dictionary, so that a reader can start there. A flush with nothing given since the last writes nothing, where zlib writes an empty stored block. `Flush::PartialFlush`, `Flush::Block` and `Flush::Trees`, which say where zlib's own blocks end, are refused.
+- **Memory.** With more than one thread, two blocks for each thread are in flight at most, and a call waits for the oldest when it can go no further without. Each thread keeps its `Deflate`, 256 KiB of zlib's buffers; each block holds its input, the 32 KiB before it and room for what it compresses to: 0.84 MiB a thread at the default block size. `MtOptions::memory_limit` lowers the threads until `MtOptions::memory_usage` fits it, one always allowed, and the stream is the same ([memory.md](memory.md#deflate-in-threads)).
+- **What it costs.** A block's start has only the 32 KiB before it, which is all a deflate stream can refer back to anyway, and its Huffman codes are chosen for its own data: on 546 MB of mixed files, the stream is smaller than zlib's one stream, by 0.12% at level 1, 0.03% at 6 and 0.04% at 9. One thread is 5% slower than `Deflate` at level 1, for the dictionary each block takes in.
+- **Reading.** A gzip member is one stream, which one thread decodes from its start: reading it is no faster.
+
+`tests/deflate_threads.rs` compresses inputs of no bytes up to several blocks, at levels 0, 1, 6 and 9, with every strategy and blocks of other sizes, with 1, 2, 8 and all threads, in one call and a little at a time through buffers down to one byte, and compares them byte for byte; reads them back with the port's inflate and `gzip -d`; checks the header and the trailer, raw deflate as the member's stream, flushes after which what was given decompresses, and after a full flush, needs nothing before it; and compares the streams with `pigz -n` at levels 1, 2, 6 and 9 where it is installed. `tests/memory_limits.rs` measures what it holds against its estimate.
+
+On an AMD Ryzen 9 9950X (16 cores, 32 threads), November 2026, 546 MB of mixed files (a tar of source code, documents, binaries and media) compressed from memory, one round; `pigz` 2.8 with its own threads, on zlib 1.3.1:
+
+| Level | `Deflate`, one stream | `DeflateMt`, 1 thread | 8 | 16 | 32 | `pigz -p 32` |
+|---|---|---|---|---|---|---|
+| 1 | 3.85 s, 234,013,219 B | 4.06 s | 0.54 s | | 0.22 s | 0.21 s |
+| 6 | 10.94 s, 215,844,640 B | 11.16 s | 1.47 s | 0.78 s | 0.53 s | 0.50 s |
+| 9 | 30.43 s, 214,970,712 B | 30.74 s | 4.31 s | | 1.56 s | 1.42 s |
+
+`DeflateMt`'s streams are 233,725,171, 215,781,426 and 214,892,302 bytes, whatever the threads, and pigz's the same but for its header's file name.
+
 ## Progress
 
 | zlib | Port | Status | Checked against zlib by |
@@ -116,6 +139,7 @@ Its literals are written in the loop that decodes the length codes, while there 
 | `trees.{h,c}` | `trees.rs` | done | `trees.h`'s tables; every block of `tests/deflate.rs` and `tests/oracle.rs` |
 | `deflate.{h,c}` | `deflate.rs` | done | `tests/deflate.rs`, byte for byte, call by call; `tests/oracle.rs`, for every function, strategy, memory level and flush |
 | `compress.c`, `uncompr.c` | | later | |
+| Compressing in threads (pigz's way, zlib has none) | `mt.rs` | done | `tests/deflate_threads.rs`: the same stream whatever the threads, pigz 2.8's byte for byte |
 | `contrib/infback9`: `infback9.{h,c}`, `inftree9.{h,c}`, `inffix9.h`, `inflate9.h` (Deflate64) | `infback9.rs`, `inftree9.rs`, `inffix9.rs` | done | `tests/deflate64.rs`, through the oracle; `inffix9.h` rebuilt |
 | Deflate64 a piece at a time (hivepack's own, from `inflate.c` and `infback9.c`) | `inflate9.rs` | done | `tests/deflate64.rs`: the same ends, messages and output as `infback9.c` |
 

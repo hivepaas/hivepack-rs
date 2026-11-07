@@ -64,7 +64,7 @@ const Z_DEFLATED: u32 = 8;
 
 /// `OS_CODE`: the operating system zlib writes in a gzip header, which is
 /// chosen when it is built, as here.
-const OS_CODE: u8 = if cfg!(windows) {
+pub(crate) const OS_CODE: u8 = if cfg!(windows) {
     10
 } else if cfg!(target_vendor = "apple") {
     19

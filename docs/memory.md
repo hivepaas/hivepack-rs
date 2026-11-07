@@ -19,6 +19,7 @@ Lowering the threads is always safe: every coder gives the same output whatever 
 | zstd with workers | `zstd::CCtx::set_workers_memory_limit(limit)` | `CCtx::estimate_memory(nb_workers)` | `CCtx::nb_workers_within_limit()` |
 | bzip2 in threads | `bzip2::MtOptions::memory_limit` | `MtOptions::memory_usage(threads)` | `MtOptions::threads_used()` |
 | zstd in frames | `zstd::FramesOptions::memory_limit` | `FramesOptions::memory_usage(threads)` | `FramesOptions::threads_used()` |
+| Deflate in threads | `deflate::MtOptions::memory_limit` | `MtOptions::memory_usage(threads)` | `MtOptions::threads_used()` |
 
 What they take, from the estimates, in MiB:
 
@@ -33,6 +34,7 @@ What they take, from the estimates, in MiB:
 | bzip2 level 9 | 18.4 | 15.8 |
 | zstd level 3, frames of 32 MiB | 134 | 69 |
 | zstd level 19, frames of 32 MiB | 220 | 155 |
+| Deflate, blocks of 128 KiB, every level | 2.1 | 0.84 |
 
 zstd's workers do not cost the same each: the job table, which holds a copy of the output of each job not yet written out, grows by powers of 2 (4 places for 1 worker, 8 for 2 to 5, 16 for 6 to 13, 32 for 14 to 29), each place the output of a job. Level 3 takes 69 MiB with one worker, 120 with 2, 157 with 4 and 572 with 16; level 19 373, 656, 964 and 3,588.
 
@@ -87,6 +89,16 @@ memory_usage(n) = n × (C + F + B) + F + B + 1 MiB
 ```
 
 It is an upper bound: a frame's room is taken at `B` and given back down to its size once made, and what the system has not had written is not taken. 546 MB of mixed files at level 19 in 32 threads, 17 frames, peak at 1.8 GiB besides the input and the output, under the estimate's 5 GiB.
+
+### Deflate in threads
+
+`DeflateMt` ([deflate.md](deflate.md#deflate-in-threads-beside-the-port)) holds two blocks in flight for each thread, and the one being filled. With `I` the input of a block (128 KiB) and the 32 KiB before it, `O` the room for what it compresses to (zlib's bound for raw deflate, and 64 bytes for its end), and `D` a compressor (zlib's 256 KiB at window bits 15 and memory level 8, counted at 288 KiB with the port's state), which each thread keeps:
+
+```
+memory_usage(n) = n × (D + 2 × (I + O)) + I + O + 1 MiB
+```
+
+The level does not change it. `tests/memory_limits.rs` measures 1.8, 4.1 and 6.8 MiB held for 1, 4 and 8 threads, against estimates of 2.1, 4.7 and 8.0 MiB, the test's own buffer of 1 MiB counted.
 
 ## Readers
 
