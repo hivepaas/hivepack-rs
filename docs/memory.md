@@ -18,6 +18,7 @@ Lowering the threads is always safe: every coder gives the same output whatever 
 | 7z, LZMA2 in blocks | `sevenz::WriteOptions::memory_limit` | `WriteOptions::memory_usage(threads)` | `WriteOptions::threads_used()` |
 | zstd with workers | `zstd::CCtx::set_workers_memory_limit(limit)` | `CCtx::estimate_memory(nb_workers)` | `CCtx::nb_workers_within_limit()` |
 | bzip2 in threads | `bzip2::MtOptions::memory_limit` | `MtOptions::memory_usage(threads)` | `MtOptions::threads_used()` |
+| zstd in frames | `zstd::FramesOptions::memory_limit` | `FramesOptions::memory_usage(threads)` | `FramesOptions::threads_used()` |
 
 What they take, from the estimates, in MiB:
 
@@ -30,6 +31,8 @@ What they take, from the estimates, in MiB:
 | zstd level 3, jobs of 8 MiB | 69 (none: 4.5) | 18.5, and more where the job table grows |
 | zstd level 19, jobs of 32 MiB | 373 (none: 90) | 153, and more where the job table grows |
 | bzip2 level 9 | 18.4 | 15.8 |
+| zstd level 3, frames of 32 MiB | 134 | 69 |
+| zstd level 19, frames of 32 MiB | 220 | 155 |
 
 zstd's workers do not cost the same each: the job table, which holds a copy of the output of each job not yet written out, grows by powers of 2 (4 places for 1 worker, 8 for 2 to 5, 16 for 6 to 13, 32 for 14 to 29), each place the output of a job. Level 3 takes 69 MiB with one worker, 120 with 2, 157 with 4 and 572 with 16; level 19 373, 656, 964 and 3,588.
 
@@ -74,6 +77,16 @@ The limit (`CCtx::set_workers_memory_limit`) lowers each frame's workers, from t
 ```
 memory_usage(n) = n × (P + C + 2 × O) + P + O + 1 MiB
 ```
+
+### zstd in frames
+
+`CompressFrames` ([porting.md](porting.md#zstd-in-frames-beside-the-port)) holds a frame in flight for each thread, and the one being filled. With `F` the input of a frame (32 MiB), `B = ZSTD_compressBound(F)` the room for its frame, and `C` a context for a frame of `F` bytes as `CCtx::estimate_memory(0)` counts it (each thread keeps one):
+
+```
+memory_usage(n) = n × (C + F + B) + F + B + 1 MiB
+```
+
+It is an upper bound: a frame's room is taken at `B` and given back down to its size once made, and what the system has not had written is not taken. 546 MB of mixed files at level 19 in 32 threads, 17 frames, peak at 1.8 GiB besides the input and the output, under the estimate's 5 GiB.
 
 ## Readers
 

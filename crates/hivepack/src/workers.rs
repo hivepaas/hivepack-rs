@@ -1,6 +1,7 @@
 //! Jobs done in threads, their results taken in the order the jobs were
 //! given: 7z's LZMA2 blocks, compressed by the writer and decompressed by a
-//! folder's decoder, and ZIP entries compressed ahead of the one written.
+//! folder's decoder, ZIP entries compressed ahead of the one written, and
+//! zstd's frames compressed apart (`zstd::CompressFrames`).
 //! Not from the LZMA SDK, which has no threads in its 7z decoder, nor from
 //! libzip, which has none.
 //!
@@ -82,6 +83,7 @@ where
 
     /// The threads made.
     #[cfg(test)]
+    #[cfg_attr(not(feature = "sevenz"), allow(dead_code))]
     pub(crate) fn threads(&self) -> usize {
         self.threads
     }
@@ -136,6 +138,21 @@ where
             self.threads += 1;
         }
         made.is_ok()
+    }
+
+    /// The result of the oldest job not taken if it is there, without
+    /// waiting for it.
+    #[cfg_attr(not(feature = "zstd"), allow(dead_code))]
+    pub(crate) fn try_take(&mut self) -> Option<O> {
+        if self.taken == self.given {
+            return None;
+        }
+        while let Ok((number, out)) = self.done.try_recv() {
+            self.early.insert(number, out);
+        }
+        let out = self.early.remove(&self.taken)?;
+        self.taken += 1;
+        Some(out.unwrap_or_else(self.lost))
     }
 
     /// The result of the oldest job not taken, waited for; none if every
