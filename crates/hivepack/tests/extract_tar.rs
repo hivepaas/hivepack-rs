@@ -1258,11 +1258,15 @@ fn owners_and_attributes_are_restored_when_asked() {
     }
 }
 
-/// What `id` says of the user running the tests: `-un`, `-gn`.
+/// The names of the user `uid` and the group `gid`, as the system looks them
+/// up: none where it has no name for either, as in a container run under a
+/// user it does not list (`cross`'s).
 #[cfg(target_os = "linux")]
-fn id(flag: &str) -> String {
-    let out = std::process::Command::new("id").arg(flag).output().unwrap();
-    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+fn names_of(uid: u32, gid: u32) -> Option<(String, String)> {
+    use nix::unistd::{Gid, Group, Uid, User};
+    let user = User::from_uid(Uid::from_raw(uid)).ok()??.name;
+    let group = Group::from_gid(Gid::from_raw(gid)).ok()??.name;
+    Some((user, group))
 }
 
 /// By name, the system's user and group of those names, whatever numbers the
@@ -1290,12 +1294,22 @@ fn owners_are_given_by_name_or_by_number() {
         (f.uid(), f.gid())
     };
     // Another's numbers, under the user's names: from another system.
-    let moved = kept_for_a_backup_named(mine.uid() + 1, other_gid, &id("-un"), &id("-gn"));
+    let names = names_of(mine.uid(), mine.gid());
+    let (user, group) = names
+        .as_ref()
+        .map_or(("no-such-user-hp", "no-such-group-hp"), |(u, g)| {
+            (u.as_str(), g.as_str())
+        });
+    let moved = kept_for_a_backup_named(mine.uid() + 1, other_gid, user, group);
 
-    let by_name = s.path().join("by-name");
-    let summary = extract(&moved, &by_name, &options(|o| o.owners = Owners::ByName)).unwrap();
-    assert_eq!(owned(&by_name), (mine.uid(), mine.gid()));
-    assert_eq!(summary.owners_left, 0);
+    if names.is_some() {
+        let by_name = s.path().join("by-name");
+        let summary = extract(&moved, &by_name, &options(|o| o.owners = Owners::ByName)).unwrap();
+        assert_eq!(owned(&by_name), (mine.uid(), mine.gid()));
+        assert_eq!(summary.owners_left, 0);
+    } else {
+        eprintln!("skipping by name: the system has no name for the user or the group");
+    }
 
     let by_number = s.path().join("by-number");
     let summary = extract(
