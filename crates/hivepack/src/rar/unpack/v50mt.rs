@@ -45,45 +45,64 @@ use super::{
 };
 
 /// A block larger than this is decoded on the caller's thread, so that what
-/// is held ahead stays small; RAR's blocks are far smaller.
-const LARGEST_BLOCK: i64 = 4 << 20;
+/// is held ahead stays small; RAR's blocks are far smaller (RAR 7 writes
+/// them of 20 to 50 KiB), and UnRAR decodes those past 128 KiB on its own.
+const LARGEST_BLOCK: i64 = 512 << 10;
 /// What is read ahead at a time.
 const READ_SIZE: usize = 1 << 20;
-/// The packed data of the blocks handed to threads and not yet taken, at
-/// most, whatever the threads: what they decode is held to
-/// [`HELD_PER_BYTE`] times it.
-const IN_FLIGHT: usize = 8 << 20;
-/// What a block decoded ahead may hold for each byte of its packed data:
-/// 2 for a literal, 24 for a match. Past it, the block is decoded on the
-/// caller's thread.
-const HELD_PER_BYTE: usize = 6;
+/// The packed data of the blocks handed to threads and not yet written, at
+/// most, whatever the threads, and a block: what they decode is held to
+/// [`HELD_PER_BYTE`] times it. Some 10 blocks or more, as many as four
+/// threads take to keep up with the caller's.
+const IN_FLIGHT: usize = 512 << 10;
+/// What a block decoded ahead may hold for each byte of its packed data,
+/// as allocated: 2 for a literal, 16 for a match, and what its vectors
+/// have grown by. Past it, the block is decoded on the caller's thread.
+/// Silesia's blocks take 6 for each byte, and 18 at most; a log's, 27, and
+/// 88 at most.
+const HELD_PER_BYTE: usize = 64;
 /// Bytes of packed data given to a thread past its block's end, for a last
 /// symbol that runs over it, as `Unpack5` reads one.
 const PAST_END: u64 = 64;
 
+#[cfg(test)]
+std::thread_local! {
+    /// The blocks handed to threads on this thread, and those taken.
+    static COUNTED: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
 /// What a block's codes said, in order: literals counted here, their bytes in
-/// [`Decoded::lits`].
+/// [`Decoded::lits`], and filters there, in [`Decoded::filters`]. The bits
+/// a symbol took fit a byte.
 #[derive(Clone, Copy)]
 enum Op {
     Literals(u32),
     Match {
         length: u32,
         distance: usize,
-        bits: u32,
+        bits: u8,
     },
-    Filter {
-        main_bits: u32,
-        raw: RawFilter,
-        bits: u32,
-    },
+    Filter,
     FullRep {
-        bits: u32,
+        bits: u8,
     },
     Rep {
         dist_num: u8,
         length: u32,
-        bits: u32,
+        bits: u8,
     },
+}
+
+// Small, for what a block of matches holds: 16 bytes on 64 bits.
+const _: () = assert!(std::mem::size_of::<Op>() <= 16);
+
+/// A filter decoded ahead: the bits its symbol took, what it says, and the
+/// bits that took.
+#[derive(Clone, Copy)]
+struct AheadFilter {
+    main_bits: u32,
+    raw: RawFilter,
+    bits: u32,
 }
 
 /// A block decoded ahead: each symbol, with the bits it took.
@@ -94,6 +113,35 @@ pub(super) struct Decoded {
     lits: Vec<u8>,
     lit_bits: Vec<u8>,
     ops: Vec<Op>,
+    filters: Vec<AheadFilter>,
+}
+
+impl Decoded {
+    /// Room for a symbol more, each vector that is full grown first, if
+    /// that keeps what they allocate within `most`: whether there is. A
+    /// symbol adds one to each at most.
+    fn room(&mut self, most: usize) -> bool {
+        fn grown<T>(v: &Vec<T>) -> usize {
+            let c = v.capacity();
+            let c = if v.len() == c { c + c.max(64) } else { c };
+            c * std::mem::size_of::<T>()
+        }
+        fn grow<T>(v: &mut Vec<T>) {
+            if v.len() == v.capacity() {
+                v.reserve_exact(v.capacity().max(64));
+            }
+        }
+        if grown(&self.lits) + grown(&self.lit_bits) + grown(&self.ops) + grown(&self.filters)
+            > most
+        {
+            return false;
+        }
+        grow(&mut self.lits);
+        grow(&mut self.lit_bits);
+        grow(&mut self.ops);
+        grow(&mut self.filters);
+        true
+    }
 }
 
 /// A block's symbols taken in place of decoding them, each moving the bits
@@ -102,6 +150,7 @@ pub(super) struct Replay {
     decoded: Decoded,
     op: usize,
     lit: usize,
+    filter: usize,
     lits_left: u32,
 }
 
@@ -154,19 +203,17 @@ impl Replay {
                     distance,
                     bits,
                 } => {
-                    inp.addbits(bits);
+                    inp.addbits(u32::from(bits));
                     Symbol::Match { length, distance }
                 }
-                Op::Filter {
-                    main_bits,
-                    raw,
-                    bits,
-                } => {
-                    inp.addbits(main_bits);
-                    Symbol::Filter(Some((raw, bits)))
+                Op::Filter => {
+                    let filter = *self.decoded.filters.get(self.filter)?;
+                    self.filter += 1;
+                    inp.addbits(filter.main_bits);
+                    Symbol::Filter(Some((filter.raw, filter.bits)))
                 }
                 Op::FullRep { bits } => {
-                    inp.addbits(bits);
+                    inp.addbits(u32::from(bits));
                     Symbol::FullRep
                 }
                 Op::Rep {
@@ -174,7 +221,7 @@ impl Replay {
                     length,
                     bits,
                 } => {
-                    inp.addbits(bits);
+                    inp.addbits(u32::from(bits));
                     Symbol::Rep {
                         dist_num: usize::from(dist_num),
                         length,
@@ -226,6 +273,7 @@ fn decode_block(job: Job) -> (Decoded, mpsc::Sender<Decoded>) {
         lits: Vec::new(),
         lit_bits: Vec::new(),
         ops: Vec::new(),
+        filters: Vec::new(),
     };
     loop {
         let at = i64::from(inp.in_addr);
@@ -233,12 +281,19 @@ fn decode_block(job: Job) -> (Decoded, mpsc::Sender<Decoded>) {
             break;
         }
         let before = bits_at(&inp);
-        if before >= real_bits {
+        if before >= real_bits || !decoded.room(most) {
             decoded.whole = false;
             break;
         }
         let symbol = decode_symbol(&tables, &mut inp);
         let taken = (bits_at(&inp) - before) as u32;
+        // Codes of 15 bits at most, a length's 9 bits more and a distance's
+        // 38: a byte holds them, and the block is left to the caller's
+        // thread were it not so.
+        let Ok(bits) = u8::try_from(taken) else {
+            decoded.whole = false;
+            break;
+        };
         match symbol {
             Symbol::Literal(byte) => {
                 decoded.lits.push(byte);
@@ -251,28 +306,28 @@ fn decode_block(job: Job) -> (Decoded, mpsc::Sender<Decoded>) {
             Symbol::Match { length, distance } => decoded.ops.push(Op::Match {
                 length,
                 distance,
-                bits: taken,
+                bits,
             }),
             Symbol::Filter(_) => {
                 let middle = bits_at(&inp);
                 let raw = read_filter_bits(&mut inp);
-                decoded.ops.push(Op::Filter {
+                decoded.ops.push(Op::Filter);
+                decoded.filters.push(AheadFilter {
                     main_bits: taken,
                     raw,
                     bits: (bits_at(&inp) - middle) as u32,
                 });
             }
-            Symbol::FullRep => decoded.ops.push(Op::FullRep { bits: taken }),
+            Symbol::FullRep => decoded.ops.push(Op::FullRep { bits }),
             Symbol::Rep { dist_num, length } => decoded.ops.push(Op::Rep {
                 dist_num: dist_num as u8,
                 length,
-                bits: taken,
+                bits,
             }),
         }
         // What a symbol reads past what it takes makes no difference to it:
         // only the bits it takes have to be packed data.
-        let held = decoded.lits.len() * 2 + decoded.ops.len() * std::mem::size_of::<Op>();
-        if bits_at(&inp) > real_bits || held > most {
+        if bits_at(&inp) > real_bits {
             decoded.whole = false;
             break;
         }
@@ -307,8 +362,11 @@ pub(super) struct Speculation {
     pending: VecDeque<Pending>,
     /// How many blocks are scanned ahead of the caller's thread.
     depth: usize,
-    /// The packed data of `pending`'s blocks handed to threads.
+    /// The packed data of `pending`'s blocks handed to threads, and of the
+    /// block taken last, which the caller's thread may still be writing.
     in_flight: usize,
+    /// The packed data of the block taken last, in `in_flight`.
+    taken: usize,
 }
 
 impl Speculation {
@@ -325,6 +383,7 @@ impl Speculation {
             pending: VecDeque::new(),
             depth: 2 * workers + 2,
             in_flight: 0,
+            taken: 0,
         }
     }
 
@@ -338,9 +397,11 @@ impl Speculation {
         data_bits: i64,
         lengths: Option<&TableLengths>,
     ) -> Option<Replay> {
+        // The block taken before is written.
+        self.in_flight -= std::mem::take(&mut self.taken);
         self.fill(io);
         let front = self.pending.pop_front()?;
-        self.in_flight -= front.bytes;
+        self.taken = front.bytes;
         if front.header_at != header_at || front.data_bits != data_bits {
             // Damaged data has taken the blocks elsewhere than their
             // headers say: the rest is decoded on the caller's thread.
@@ -352,10 +413,15 @@ impl Speculation {
             return None;
         }
         let decoded = result.recv().ok()?;
+        #[cfg(test)]
+        if decoded.whole {
+            COUNTED.set((COUNTED.get().0, COUNTED.get().1 + 1));
+        }
         decoded.whole.then_some(Replay {
             decoded,
             op: 0,
             lit: 0,
+            filter: 0,
             lits_left: 0,
         })
     }
@@ -363,6 +429,7 @@ impl Speculation {
     fn stop(&mut self) {
         self.pending.clear();
         self.in_flight = 0;
+        self.taken = 0;
         self.scan_at = None;
     }
 
@@ -374,6 +441,21 @@ impl Speculation {
         {
             self.scan(io);
         }
+    }
+
+    /// Reads on until `at`, keeping nothing before it: a block not handed to
+    /// a thread is read through, as what is read ahead is read in order.
+    fn skip_to(&mut self, io: &mut dyn UnpIo, at: u64) {
+        let at = at.min(self.size);
+        while !self.read_done && self.base + (self.ahead.len() as u64) < at {
+            self.base += self.ahead.len() as u64;
+            self.ahead.clear();
+            let want = (at - self.base).min(READ_SIZE as u64);
+            self.read_until(io, self.base + want);
+        }
+        let gone = (at.saturating_sub(self.base) as usize).min(self.ahead.len());
+        self.ahead.drain(..gone);
+        self.base += gone as u64;
     }
 
     /// Reads ahead until `end`, or the end of the packed data.
@@ -411,6 +493,9 @@ impl Speculation {
         let Some(header_at) = self.scan_at else {
             return;
         };
+        if header_at > self.base + self.ahead.len() as u64 {
+            self.skip_to(io, header_at);
+        }
         self.read_until(io, header_at + 8);
         let (header, real) = self.copy(header_at, header_at + 8);
         let Some(header) = parse_header(&header, real) else {
@@ -466,6 +551,8 @@ impl Speculation {
                 reply,
             };
             if self.jobs.send(job).is_ok() {
+                #[cfg(test)]
+                COUNTED.set((COUNTED.get().0 + 1, COUNTED.get().1));
                 pending.bytes = held;
                 self.in_flight += held;
                 pending.lengths = Some(lengths);
@@ -477,7 +564,7 @@ impl Speculation {
             (!header.last).then_some(block_start + u64::try_from(header.block_size).unwrap_or(0));
         // What is behind the scan is no longer needed.
         if let Some(at) = self.scan_at
-            && at > self.base + (8 << 20)
+            && at > self.base + (1 << 20)
         {
             let gone = ((at - self.base) as usize).min(self.ahead.len());
             self.ahead.drain(..gone);
@@ -656,5 +743,41 @@ impl Unpack {
             drop(spec);
             result
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rar::{Archive, Extract};
+
+    /// Every block handed to a thread is taken where nothing is damaged: a
+    /// bound on what a block may hold too low for what RAR writes would leave
+    /// the blocks to the caller's thread, as fast as one thread.
+    #[test]
+    fn good_blocks_are_all_taken() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../testdata/rar/rar5-m3.rar"
+        );
+        let data = std::fs::read(path).unwrap();
+        let mut arc = Archive::open_with_password(&data[..], true, "").unwrap();
+        let mut extract = Extract::new();
+        extract.threads = 3;
+        extract.threads_from = 0;
+        COUNTED.set((0, 0));
+        loop {
+            let size = arc.read_header().unwrap();
+            if !extract
+                .current_file(&mut arc, size, &mut |_| Ok(()))
+                .unwrap()
+            {
+                break;
+            }
+            assert!(!extract.broken_file);
+        }
+        let (handed, taken) = COUNTED.get();
+        assert!(handed > 20, "{handed} blocks handed");
+        assert_eq!(taken, handed);
     }
 }
