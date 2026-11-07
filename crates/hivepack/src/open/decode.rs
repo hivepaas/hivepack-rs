@@ -234,8 +234,18 @@ impl<R: Read, C: Codec> Read for Decoder<R, C> {
 }
 
 /// zstd: a context that goes on from one frame to the next.
-struct ZstdCodec {
+pub(super) struct ZstdCodec {
     dctx: crate::zstd::DCtx,
+}
+
+impl ZstdCodec {
+    /// With windows of at most `2^window_log_max` bytes.
+    pub(super) fn new(window_log_max: u32) -> io::Result<ZstdCodec> {
+        let mut dctx = crate::zstd::DCtx::new();
+        dctx.set_parameter(crate::zstd::DParameter::WindowLogMax(window_log_max))
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+        Ok(ZstdCodec { dctx })
+    }
 }
 
 impl Codec for ZstdCodec {
@@ -671,10 +681,13 @@ impl<R: Read> Read for RpmLayer<R> {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DecodeLimits {
     pub(crate) zstd_window_log_max: u32,
+    /// What zstd's frames in threads may hold.
+    pub(crate) zstd_memlimit: u64,
     pub(crate) xz_memlimit: u64,
     /// What bzip2's threads may take.
     pub(crate) bzip2_memlimit: u64,
-    /// The threads xz's, bzip2's and pbzx's decoders may use, at least one.
+    /// The threads zstd's, xz's, bzip2's and pbzx's decoders may use, at
+    /// least one.
     pub(crate) threads: u32,
     /// What their threads may hold in all, under the limits above.
     pub(crate) threads_memory: u64,
@@ -689,12 +702,18 @@ pub(crate) fn decoder<'a, R: Read + Send + 'a>(
     let invalid = |e: String| io::Error::new(io::ErrorKind::InvalidInput, e);
     Ok(match layer {
         Layer::Zstd => {
-            let mut dctx = crate::zstd::DCtx::new();
-            dctx.set_parameter(crate::zstd::DParameter::WindowLogMax(
-                limits.zstd_window_log_max,
-            ))
-            .map_err(|e| invalid(e.to_string()))?;
-            Box::new(Decoder::new(inner, ZstdCodec { dctx }, layer))
+            let codec = ZstdCodec::new(limits.zstd_window_log_max)?;
+            if limits.threads > 1 {
+                // Its frames one after the other, a frame in each thread.
+                Box::new(crate::open::zstd_threads::zstd_threads(
+                    inner,
+                    limits.threads,
+                    limits.zstd_window_log_max,
+                    limits.zstd_memlimit.min(limits.threads_memory),
+                ))
+            } else {
+                Box::new(Decoder::new(inner, codec, layer))
+            }
         }
         Layer::Gzip => {
             let z = crate::deflate::Inflate::new(16 + 15).map_err(|e| invalid(e.to_string()))?;
@@ -740,7 +759,7 @@ pub(crate) fn decoder<'a, R: Read + Send + 'a>(
         }
         // Its chunks, each an xz stream of its own, a chunk in each thread,
         // as many as fit the limit.
-        Layer::Pbzx if limits.threads > 1 => Box::new(crate::open::pbzx_threads::PbzxThreads::new(
+        Layer::Pbzx if limits.threads > 1 => Box::new(crate::open::pbzx_threads::pbzx_threads(
             inner,
             limits.threads,
             limits.xz_memlimit,
