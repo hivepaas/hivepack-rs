@@ -394,8 +394,11 @@ pub struct Options {
     /// on the way (7-Zip's in threads,
     /// [`Lzma2Blocks`](crate::sevenz::Lzma2Blocks)) a block in each. A XAR
     /// package's payloads are decoded in that many threads (pbzx's chunks
-    /// among them), besides those writing their files. What is written is
-    /// the same.
+    /// among them), besides those writing their files. Where RAR's files are
+    /// written one at a time (a solid archive, or one file), an entry of RAR 5
+    /// or 7 has its Huffman blocks decoded ahead in that many threads
+    /// ([`Extract::threads`](crate::rar::Extract::threads)). What is written
+    /// is the same.
     pub threads: Threads,
     /// The memory the threads may take, where each holds what it decompresses
     /// with: RAR's ([`extract_rar`](crate::extract::extract_rar)), whose every
