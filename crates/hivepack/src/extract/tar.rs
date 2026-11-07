@@ -26,6 +26,7 @@ use crate::extract::plan::{Item, Kind, Links, OnDamaged, OnRefused, Options, che
 use crate::extract::plan::{LinkTo, link_to, named, settle, settle_links, skips_links};
 use crate::extract::progress::Run;
 use crate::extract::sink::{Sink, SinkState};
+use crate::extract::writers::{Writers, with_writers, writer_threads};
 use crate::extract::zip::{Summary, open_destination, set_dir_times};
 
 /// GNU's volume label, which names the archive, not a file.
@@ -370,6 +371,17 @@ pub(crate) fn plan_links<S>(
 /// refused ([`ErrorKind::Special`]); global PAX headers and GNU volume
 /// labels are the archive's, not entries. A sparse file's holes stay holes
 /// where the file system has them, and count against the limits.
+///
+/// With [`Options::threads`], the archive is read on the caller's thread, and
+/// the directories and files are made by the others, as many at once: each
+/// file's data read whole and handed to the next thread free, 32 MiB at most
+/// held ([`Options::memory_limit`] if less); a file larger than an eighth of
+/// that, or sparse, is written on the caller's thread. A hard link waits for
+/// the files handed before it to be written, and symbolic links are created
+/// once every thread is done. What is written is the same, and so is the
+/// summary. The first error stops the other threads, which remove the files
+/// they were writing, and is the one returned; files after it in the archive
+/// may have been written.
 pub fn extract_tar<R: Read, F: FnMut() -> io::Result<R>>(
     open: F,
     destination: &Path,
@@ -386,6 +398,8 @@ pub fn extract_tar<R: Read, F: FnMut() -> io::Result<R>>(
 
 /// Extracts the tar archive that `open` gives into `sink`, with the checks and
 /// in the order of [`extract_tar`], reading it twice as it does: see [`Sink`].
+/// The sink is given one entry at a time, on the caller's thread, whatever
+/// [`Options::threads`] says.
 pub fn extract_tar_to<R: Read, F: FnMut() -> io::Result<R>>(
     open: F,
     sink: &mut dyn Sink,
@@ -402,7 +416,6 @@ fn extract_into<R: Read, F: FnMut() -> io::Result<R>, T: Target>(
     make: impl FnOnce() -> Result<T, Error>,
     options: &Options,
 ) -> Result<Summary, Error> {
-    let limits = &options.limits;
     let run = Run::new(options);
 
     let first = open().map_err(|e| Error::global(ErrorKind::Io(e)))?;
@@ -432,95 +445,24 @@ fn extract_into<R: Read, F: FnMut() -> io::Result<R>, T: Target>(
 
     // The second reading.
     let second = open().map_err(|e| Error::global(ErrorKind::Io(e)))?;
-    let mut tr = Reader::new(second);
-    for (index, entry) in entries.iter().enumerate() {
-        run.check().map_err(Error::global)?;
-        let h = match tr.next() {
-            Ok(Some(h)) => h,
-            Ok(None) => return Err(Error::global(ErrorKind::Changed)),
-            Err(e) => return Err(Error::global(ErrorKind::Tar(e))),
-        };
-        if Seen::of(&h) != entry.seen {
-            return Err(Error::new(index as u64, &h.name, ErrorKind::Changed));
+    let reading = Reading {
+        entries: &entries,
+        items: &items,
+        kept: &kept_indexes,
+        plans: &plans,
+        cut,
+    };
+    let files = kept.iter().filter(|item| item.kind == Kind::File).count() as u64;
+    let writers = destination
+        .folder()
+        .and_then(|folder| Some((folder, writer_threads(options, files)?)));
+    match writers {
+        Some((folder, writing)) => {
+            with_writers(folder, &run, options, &writing, |writers| {
+                reading.write(second, folder, &run, options, &mut summary, Some(writers))
+            })?;
         }
-        let Some(at) = entry.item else {
-            continue;
-        };
-        let item = &items[at];
-        if !kept_indexes.contains(&item.index) || created_later(item) {
-            continue;
-        }
-        let Ok(name) = &item.name else {
-            continue;
-        };
-        let error = |kind| item.error(kind);
-        let components = &name.components;
-        if item.kind == Kind::Dir {
-            destination.directory(item, components).map_err(error)?;
-            summary.directories += 1;
-            run.entry_done();
-            continue;
-        }
-        match plans.get(&item.index) {
-            Some(LinkPlan::Hard(target)) if !destination.copies_hard_links(options) => {
-                destination
-                    .hard_link(item, components, target)
-                    .map_err(error)?;
-                summary.files += 1;
-                run.entry_done();
-                continue;
-            }
-            _ => {}
-        }
-        let remaining = limits.max_total_size.saturating_sub(summary.bytes);
-        let written = match plans.get(&item.index) {
-            Some(LinkPlan::SymlinkAsFile) => write_from(
-                &mut &entry.target[..],
-                item,
-                entry.target.len() as u64,
-                &destination,
-                remaining,
-                false,
-                &run,
-                options,
-            ),
-            Some(LinkPlan::Hard(target)) => {
-                // A copy of the file it names, with Links::AsFile.
-                copy_of(&destination, target, item, remaining, &run, options)
-            }
-            _ => {
-                let holes = tr.is_sparse();
-                write_from(
-                    &mut tr,
-                    item,
-                    item.size,
-                    &destination,
-                    remaining,
-                    holes,
-                    &run,
-                    options,
-                )
-            }
-        };
-        if let Some(written) = written? {
-            summary.files += 1;
-            summary.bytes += written;
-        }
-        run.entry_done();
-    }
-    // The second reading must end where the first did.
-    match tr.next() {
-        Ok(None) if !cut => read_rest(tr.into_inner(), &run, options)?,
-        Ok(None) => return Err(Error::global(ErrorKind::Changed)),
-        Ok(Some(h)) => {
-            return Err(Error::new(
-                entries.len() as u64,
-                &h.name,
-                ErrorKind::Changed,
-            ));
-        }
-        Err(e) if cut => cut_short(&entries, ErrorKind::Tar(e), &run)?,
-        Err(e) => return Err(Error::global(ErrorKind::Tar(e))),
+        None => reading.write(second, &destination, &run, options, &mut summary, None)?,
     }
 
     for &item in kept.iter().filter(|item| created_later(item)) {
@@ -541,6 +483,159 @@ fn extract_into<R: Read, F: FnMut() -> io::Result<R>, T: Target>(
     set_dir_times(&destination, &kept, &run)?;
     summary.damaged = run.take_damaged();
     Ok(summary)
+}
+
+/// What the first reading found and the checks kept, for the second reading.
+struct Reading<'p> {
+    entries: &'p [Entry<Seen>],
+    items: &'p [Item],
+    /// The entries to write.
+    kept: &'p std::collections::HashSet<u64>,
+    plans: &'p HashMap<u64, LinkPlan>,
+    /// Whether the stream is cut short after the entries.
+    cut: bool,
+}
+
+impl<'p> Reading<'p> {
+    fn created_later(&self, item: &Item) -> bool {
+        matches!(self.plans.get(&item.index), Some(LinkPlan::Symlink(..)))
+    }
+
+    /// The second reading, of `r`: each entry written into `destination` but
+    /// the symbolic links, the files by `writers` where there are, or here.
+    fn write<R: Read, T: Target>(
+        &self,
+        r: R,
+        destination: &T,
+        run: &Run<'_>,
+        options: &Options,
+        summary: &mut Summary,
+        writers: Option<&Writers<'p>>,
+    ) -> Result<(), Error> {
+        let limits = &options.limits;
+        let entries = self.entries;
+        let mut tr = Reader::new(r);
+        for (index, entry) in entries.iter().enumerate() {
+            run.check().map_err(Error::global)?;
+            let h = match tr.next() {
+                Ok(Some(h)) => h,
+                Ok(None) => return Err(Error::global(ErrorKind::Changed)),
+                Err(e) => return Err(Error::global(ErrorKind::Tar(e))),
+            };
+            if Seen::of(&h) != entry.seen {
+                return Err(Error::new(index as u64, &h.name, ErrorKind::Changed));
+            }
+            let Some(at) = entry.item else {
+                continue;
+            };
+            let item = &self.items[at];
+            if !self.kept.contains(&item.index) || self.created_later(item) {
+                continue;
+            }
+            let Ok(name) = &item.name else {
+                continue;
+            };
+            let error = |kind| item.error(kind);
+            let components = &name.components;
+            if item.kind == Kind::Dir {
+                match writers {
+                    Some(writers) => writers.directory(item),
+                    None => {
+                        destination.directory(item, components).map_err(error)?;
+                        run.entry_done();
+                    }
+                }
+                summary.directories += 1;
+                continue;
+            }
+            let plan = self.plans.get(&item.index);
+            if let (Some(LinkPlan::Hard(_)), Some(writers)) = (plan, writers) {
+                // Its file is to be there, if a thread has it.
+                writers.wait(item)?;
+            }
+            match plan {
+                Some(LinkPlan::Hard(target)) if !destination.copies_hard_links(options) => {
+                    destination
+                        .hard_link(item, components, target)
+                        .map_err(error)?;
+                    summary.files += 1;
+                    run.entry_done();
+                    continue;
+                }
+                _ => {}
+            }
+            let remaining = limits.max_total_size.saturating_sub(summary.bytes);
+            let written = match plan {
+                Some(LinkPlan::SymlinkAsFile) => write_from(
+                    &mut &entry.target[..],
+                    item,
+                    entry.target.len() as u64,
+                    destination,
+                    remaining,
+                    false,
+                    run,
+                    options,
+                ),
+                Some(LinkPlan::Hard(target)) => {
+                    // A copy of the file it names, with Links::AsFile.
+                    copy_of(destination, target, item, remaining, run, options)
+                }
+                _ => {
+                    let holes = tr.is_sparse();
+                    match writers.filter(|_| !holes) {
+                        Some(writers) => {
+                            match writers.file(&mut tr, item, item.size, remaining, true)? {
+                                // Counted as written: if it is not, the
+                                // extraction fails.
+                                None => {
+                                    summary.files += 1;
+                                    summary.bytes += item.size;
+                                    continue;
+                                }
+                                Some(mut replay) => write_from(
+                                    &mut replay,
+                                    item,
+                                    item.size,
+                                    destination,
+                                    remaining,
+                                    false,
+                                    run,
+                                    options,
+                                ),
+                            }
+                        }
+                        None => write_from(
+                            &mut tr,
+                            item,
+                            item.size,
+                            destination,
+                            remaining,
+                            holes,
+                            run,
+                            options,
+                        ),
+                    }
+                }
+            };
+            if let Some(written) = written? {
+                summary.files += 1;
+                summary.bytes += written;
+            }
+            run.entry_done();
+        }
+        // The second reading must end where the first did.
+        match tr.next() {
+            Ok(None) if !self.cut => read_rest(tr.into_inner(), run, options),
+            Ok(None) => Err(Error::global(ErrorKind::Changed)),
+            Ok(Some(h)) => Err(Error::new(
+                entries.len() as u64,
+                &h.name,
+                ErrorKind::Changed,
+            )),
+            Err(e) if self.cut => cut_short(entries, ErrorKind::Tar(e), run),
+            Err(e) => Err(Error::global(ErrorKind::Tar(e))),
+        }
+    }
 }
 
 /// The bytes the second reading is to write: the files' data, and with

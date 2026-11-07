@@ -261,7 +261,10 @@ fn xar_error(kind: ErrorKind) -> ErrorKind {
 /// before anything is written: a package's files under each component's
 /// `Payload`, its scripts under `Scripts`, a `.xip` file's under `Content`.
 /// The limits count all of them. An error in a payload names its entry, and
-/// the path in the payload after the payload's.
+/// the path in the payload after the payload's. With [`Options::threads`],
+/// a payload's files are written by threads while it is read, as
+/// `extract_cpio` writes them; the XAR archive's own files on the caller's
+/// thread.
 ///
 /// Besides tar's rules: an entry libarchive gives with a warning (a name
 /// that is not UTF-8) is refused ([`ErrorKind::XarEntry`]), or left out
@@ -378,6 +381,7 @@ fn extract_into<R: Read + Send, F: FnMut() -> io::Result<R>, T: Target>(
         run: &run,
         options,
         data_error: |e| ErrorKind::Xar(crate::xar::Error::from(e)),
+        writers: None,
     };
 
     // The second reading.

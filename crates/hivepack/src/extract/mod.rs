@@ -33,8 +33,8 @@
 //!   ([`Options::time_limit`]), stopped from another thread ([`Cancel`]),
 //!   and followed ([`Options::progress`]).
 //! - **Threads**: a ZIP archive's files can be written several at once, each
-//!   in a thread of its own ([`Options::threads`]); what is written is the
-//!   same.
+//!   in a thread of its own ([`Options::threads`]), and a tar or cpio
+//!   archive's by threads while it is read; what is written is the same.
 //! - **Marks of origin**: the archive's Mark of the Web on Windows, or its
 //!   quarantine on macOS ([`Origin`]), is carried to every file written.
 //!
@@ -90,6 +90,7 @@ mod sink;
 mod tar;
 mod udf;
 mod unicode;
+mod writers;
 mod xar;
 mod zip;
 

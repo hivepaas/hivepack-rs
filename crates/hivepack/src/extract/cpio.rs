@@ -34,6 +34,7 @@ use crate::extract::tar::named_of;
 use crate::extract::tar::{
     Entry, LinkPlan, bytes_to_write, copy_of, cut_short, plan_links, read_rest, write_with,
 };
+use crate::extract::writers::{Writers, with_writers, writer_threads};
 use crate::extract::zip::{Summary, open_destination, set_dir_times};
 
 /// An entry's error, by its index and its path.
@@ -214,6 +215,12 @@ fn read_headers<R: Read>(r: R, run: &Run<'_>, options: &Options) -> Result<First
 /// libarchive's extraction leaves it; the file is written when that data
 /// comes, and its names linked to it. An archive cut short, or without
 /// `TRAILER!!!`, fails the first reading.
+///
+/// With [`Options::threads`], the files are written by threads while the
+/// archive is read on the caller's thread, as
+/// [`extract_tar`](crate::extract::extract_tar) does: what is written is the
+/// same, and so is the summary; after an error, files after it in the
+/// archive may have been written.
 pub fn extract_cpio<R: Read, F: FnMut() -> io::Result<R>>(
     open: F,
     destination: &Path,
@@ -230,6 +237,8 @@ pub fn extract_cpio<R: Read, F: FnMut() -> io::Result<R>>(
 
 /// Extracts the cpio archive that `open` gives into `sink`, with the checks and
 /// in the order of [`extract_cpio`], reading it twice as it does: see [`Sink`].
+/// The sink is given one entry at a time, on the caller's thread, whatever
+/// [`Options::threads`] says.
 pub fn extract_cpio_to<R: Read, F: FnMut() -> io::Result<R>>(
     open: F,
     sink: &mut dyn Sink,
@@ -347,7 +356,8 @@ pub(crate) fn plan<R: Read>(r: R, run: &Run<'_>, options: &Options) -> Result<Pl
 
 /// The second reading of the archive `r`, which must be the one `plan`
 /// read: its entries written into `destination`, then its symbolic links
-/// and its directories' times.
+/// and its directories' times. With [`Options::threads`], into a folder, the
+/// files are written by threads while `r` is read on this thread.
 pub(crate) fn write<R: Read, T: Target>(
     r: R,
     plan: &mut Plan,
@@ -369,109 +379,43 @@ pub(crate) fn write<R: Read, T: Target>(
     } = plan;
     let kept: Vec<&Item> = kept.iter().map(|&at| &items[at]).collect();
     let created_later = |item: &Item| matches!(plans.get(&item.index), Some(LinkPlan::Symlink(..)));
-    let writer = Writer {
-        destination,
-        plans,
-        run,
-        options,
-        data_error: |e| ErrorKind::Cpio(crate::cpio::Error::from(e)),
+    let reading = Reading {
+        entries,
+        items,
+        first_of,
+        kept: kept_indexes,
+        cut: *cut,
     };
-    let second = r;
-    // The second reading.
-    let mut cpio = Reader::new(second);
-    for (index, entry) in entries.iter().enumerate() {
-        let index = index as u64;
-        run.check().map_err(Error::global)?;
-        let h = match cpio.next() {
-            Ok(Some(h)) => h,
-            Ok(None) => return Err(Error::global(ErrorKind::Changed)),
-            Err(e) => return Err(Error::global(ErrorKind::Cpio(e))),
-        };
-        if h != entry.seen {
-            return Err(entry_error(index, &h, ErrorKind::Changed));
+    let files = kept.iter().filter(|item| item.kind == Kind::File).count() as u64;
+    let writers = destination
+        .folder()
+        .and_then(|folder| Some((folder, writer_threads(options, files)?)));
+    let data_error = |e| ErrorKind::Cpio(crate::cpio::Error::from(e));
+    match writers {
+        Some((folder, writing)) => {
+            with_writers(folder, run, options, &writing, |writers| {
+                let writer = Writer {
+                    destination: folder,
+                    plans,
+                    run,
+                    options,
+                    data_error,
+                    writers: Some(writers),
+                };
+                reading.write(r, groups, &writer, summary)
+            })?;
         }
-        // The data of a file with several names, which its first name is
-        // written with, whichever of them it comes with.
-        if let Some(target) = first_of.get(&index).copied().or(Some(index))
-            && let Some(group) = groups.get_mut(&target)
-            && group.data == Some(index)
-        {
-            let first_entry = &entries[target as usize];
-            if let Some(at) = first_entry.item
-                && items[at].kind == Kind::File
-                && kept_indexes.contains(&target)
-            {
-                writer.file(&mut cpio, &items[at], h.size, summary)?;
-                for &waiting in &group.waiting {
-                    writer.hard_link(&items[waiting], summary)?;
-                }
-                group.waiting.clear();
-            }
-            group.written = true;
+        None => {
+            let writer = Writer {
+                destination,
+                plans,
+                run,
+                options,
+                data_error,
+                writers: None,
+            };
+            reading.write(r, groups, &writer, summary)?;
         }
-        let Some(at) = entry.item else {
-            continue;
-        };
-        let item = &items[at];
-        if !kept_indexes.contains(&item.index) || created_later(item) {
-            continue;
-        }
-        let Ok(name) = &item.name else {
-            continue;
-        };
-        let error = |kind| item.error(kind);
-        if item.kind == Kind::Dir {
-            destination
-                .directory(item, &name.components)
-                .map_err(error)?;
-            summary.directories += 1;
-            run.entry_done();
-            continue;
-        }
-        match plans.get(&item.index) {
-            Some(LinkPlan::Hard(_)) => {
-                match first_of
-                    .get(&index)
-                    .and_then(|target| groups.get_mut(target))
-                {
-                    Some(group) if !group.written => group.waiting.push(at),
-                    _ => writer.hard_link(item, summary)?,
-                }
-                continue;
-            }
-            Some(LinkPlan::SymlinkAsFile) => {
-                writer.file(
-                    &mut &entry.target[..],
-                    item,
-                    entry.target.len() as u64,
-                    summary,
-                )?;
-                continue;
-            }
-            _ => {}
-        }
-        match groups.get(&index) {
-            // Written with its data, which comes with a later name.
-            Some(group) if group.data.is_some() => {}
-            // A file with several names and no data at all.
-            Some(_) => {
-                writer.file(&mut io::empty(), item, 0, summary)?;
-                if let Some(group) = groups.get_mut(&index) {
-                    group.written = true;
-                }
-            }
-            None => writer.file(&mut cpio, item, item.size, summary)?,
-        }
-    }
-    // The second reading must end where the first did.
-    match cpio.next() {
-        Ok(None) if !*cut => read_rest(cpio.into_inner(), run, options)?,
-        Ok(None) => return Err(Error::global(ErrorKind::Changed)),
-        Ok(Some(h)) => {
-            return Err(entry_error(entries.len() as u64, &h, ErrorKind::Changed));
-        }
-        Err(e) if *cut => cut_short(entries, ErrorKind::Cpio(e), run)?,
-        Err(e) => return Err(Error::global(ErrorKind::Cpio(e))),
     }
 
     for &item in kept.iter().filter(|item| created_later(item)) {
@@ -493,40 +437,207 @@ pub(crate) fn write<R: Read, T: Target>(
     Ok(())
 }
 
-/// What a second reading writes with.
-pub(crate) struct Writer<'a, T> {
+/// What the first reading found and the checks kept, for the second reading.
+struct Reading<'p> {
+    entries: &'p [Entry<Header>],
+    items: &'p [Item],
+    first_of: &'p HashMap<u64, u64>,
+    /// The entries to write.
+    kept: &'p HashSet<u64>,
+    /// Whether the stream is cut short after the entries.
+    cut: bool,
+}
+
+impl<'p> Reading<'p> {
+    /// The second reading, of `r`: each entry written with `writer` but the
+    /// symbolic links.
+    fn write<R: Read, T: Target>(
+        &self,
+        r: R,
+        groups: &mut HashMap<u64, Group>,
+        writer: &Writer<'_, 'p, T>,
+        summary: &mut Summary,
+    ) -> Result<(), Error> {
+        let Reading {
+            entries,
+            items,
+            first_of,
+            kept: kept_indexes,
+            cut,
+        } = *self;
+        let (plans, run, options) = (writer.plans, writer.run, writer.options);
+        let created_later =
+            |item: &Item| matches!(plans.get(&item.index), Some(LinkPlan::Symlink(..)));
+        let mut cpio = Reader::new(r);
+        for (index, entry) in entries.iter().enumerate() {
+            let index = index as u64;
+            run.check().map_err(Error::global)?;
+            let h = match cpio.next() {
+                Ok(Some(h)) => h,
+                Ok(None) => return Err(Error::global(ErrorKind::Changed)),
+                Err(e) => return Err(Error::global(ErrorKind::Cpio(e))),
+            };
+            if h != entry.seen {
+                return Err(entry_error(index, &h, ErrorKind::Changed));
+            }
+            // The data of a file with several names, which its first name is
+            // written with, whichever of them it comes with.
+            if let Some(target) = first_of.get(&index).copied().or(Some(index))
+                && let Some(group) = groups.get_mut(&target)
+                && group.data == Some(index)
+            {
+                let first_entry = &entries[target as usize];
+                if let Some(at) = first_entry.item
+                    && items[at].kind == Kind::File
+                    && kept_indexes.contains(&target)
+                {
+                    writer.file(&mut cpio, &items[at], h.size, summary)?;
+                    for &waiting in &group.waiting {
+                        writer.hard_link(&items[waiting], summary)?;
+                    }
+                    group.waiting.clear();
+                }
+                group.written = true;
+            }
+            let Some(at) = entry.item else {
+                continue;
+            };
+            let item = &items[at];
+            if !kept_indexes.contains(&item.index) || created_later(item) {
+                continue;
+            }
+            if item.name.is_err() {
+                continue;
+            }
+            if item.kind == Kind::Dir {
+                writer.directory(item, summary)?;
+                continue;
+            }
+            match plans.get(&item.index) {
+                Some(LinkPlan::Hard(_)) => {
+                    match first_of
+                        .get(&index)
+                        .and_then(|target| groups.get_mut(target))
+                    {
+                        Some(group) if !group.written => group.waiting.push(at),
+                        _ => writer.hard_link(item, summary)?,
+                    }
+                    continue;
+                }
+                Some(LinkPlan::SymlinkAsFile) => {
+                    writer.file(
+                        &mut &entry.target[..],
+                        item,
+                        entry.target.len() as u64,
+                        summary,
+                    )?;
+                    continue;
+                }
+                _ => {}
+            }
+            match groups.get(&index) {
+                // Written with its data, which comes with a later name.
+                Some(group) if group.data.is_some() => {}
+                // A file with several names and no data at all.
+                Some(_) => {
+                    writer.file(&mut io::empty(), item, 0, summary)?;
+                    if let Some(group) = groups.get_mut(&index) {
+                        group.written = true;
+                    }
+                }
+                None => writer.file(&mut cpio, item, item.size, summary)?,
+            }
+        }
+        // The second reading must end where the first did.
+        match cpio.next() {
+            Ok(None) if !cut => read_rest(cpio.into_inner(), run, options)?,
+            Ok(None) => return Err(Error::global(ErrorKind::Changed)),
+            Ok(Some(h)) => {
+                return Err(entry_error(entries.len() as u64, &h, ErrorKind::Changed));
+            }
+            Err(e) if cut => cut_short(entries, ErrorKind::Cpio(e), run)?,
+            Err(e) => return Err(Error::global(ErrorKind::Cpio(e))),
+        }
+        Ok(())
+    }
+}
+
+/// What a second reading writes with: the threads writing files, if there
+/// are, whose items live for `'w`.
+pub(crate) struct Writer<'a, 'w, T> {
     pub(crate) destination: &'a T,
     pub(crate) plans: &'a HashMap<u64, LinkPlan>,
     pub(crate) run: &'a Run<'a>,
     pub(crate) options: &'a Options,
     /// The archive's error, from a read of an entry's data that failed.
     pub(crate) data_error: fn(io::Error) -> ErrorKind,
+    pub(crate) writers: Option<&'a Writers<'w>>,
 }
 
-impl<T: Target> Writer<'_, T> {
+impl<'w, T: Target> Writer<'_, 'w, T> {
+    /// Makes the directory `item`.
+    pub(crate) fn directory(&self, item: &'w Item, summary: &mut Summary) -> Result<(), Error> {
+        let name = item
+            .name
+            .as_ref()
+            .map_err(|e| item.error(ErrorKind::Name(*e)))?;
+        match self.writers {
+            Some(writers) => writers.directory(item),
+            None => {
+                self.destination
+                    .directory(item, &name.components)
+                    .map_err(|kind| item.error(kind))?;
+                self.run.entry_done();
+            }
+        }
+        summary.directories += 1;
+        Ok(())
+    }
+
     /// Writes `item` as a file of the `size` bytes `r` gives.
     pub(crate) fn file(
         &self,
         r: &mut impl Read,
-        item: &Item,
+        item: &'w Item,
         size: u64,
         summary: &mut Summary,
     ) -> Result<(), Error> {
-        let remaining = self
-            .options
-            .limits
-            .max_total_size
-            .saturating_sub(summary.bytes);
-        if let Some(written) = write_data(
-            r,
-            item,
-            size,
-            self.destination,
-            remaining,
-            self.run,
-            self.options,
-            self.data_error,
-        )? {
+        let limits = &self.options.limits;
+        let remaining = limits.max_total_size.saturating_sub(summary.bytes);
+        let written = match self.writers {
+            // Within the limits, as `write_data` checks them first.
+            Some(writers) if size <= limits.max_entry_size && size <= remaining => {
+                match writers.file(r, item, size, remaining, false)? {
+                    // Counted as written: if it is not, the extraction fails.
+                    None => {
+                        summary.files += 1;
+                        summary.bytes += size;
+                        return Ok(());
+                    }
+                    Some(mut replay) => write_data(
+                        &mut replay,
+                        item,
+                        size,
+                        self.destination,
+                        remaining,
+                        self.run,
+                        self.options,
+                        self.data_error,
+                    ),
+                }
+            }
+            _ => write_data(
+                r,
+                item,
+                size,
+                self.destination,
+                remaining,
+                self.run,
+                self.options,
+                self.data_error,
+            ),
+        };
+        if let Some(written) = written? {
             summary.files += 1;
             summary.bytes += written;
         }
@@ -538,6 +649,10 @@ impl<T: Target> Writer<'_, T> {
     /// written: a copy of it, with [`Links::AsFile`](crate::extract::Links::AsFile).
     pub(crate) fn hard_link(&self, item: &Item, summary: &mut Summary) -> Result<(), Error> {
         let error = |kind| item.error(kind);
+        if let Some(writers) = self.writers {
+            // Its file is to be there, if a thread has it.
+            writers.wait(item)?;
+        }
         let Some(LinkPlan::Hard(target)) = self.plans.get(&item.index) else {
             return Err(error(ErrorKind::HardLinkTarget));
         };
