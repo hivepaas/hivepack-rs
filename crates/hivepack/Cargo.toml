@@ -508,6 +508,11 @@ path = "tests/xz_raw_again.rs"
 required-features = ["xz"]
 
 [[test]]
+name = "zip_data_descriptor"
+path = "tests/zip_data_descriptor.rs"
+required-features = ["zip"]
+
+[[test]]
 name = "zip_deflate64"
 path = "tests/zip_deflate64.rs"
 required-features = ["deflate", "zip"]
