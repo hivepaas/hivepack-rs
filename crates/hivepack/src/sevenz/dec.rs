@@ -37,7 +37,7 @@ use crate::sevenz::bcj2::{self, Bcj2Dec, Delta};
 use crate::sevenz::bra;
 use crate::sevenz::error::{Error, Result};
 use crate::sevenz::lzma_dec::LzmaDec;
-use crate::sevenz::lzma2_mt::Lzma2Mt;
+use crate::sevenz::lzma2_mt::{Lzma2Mt, Lzma2Threads};
 use crate::sevenz::ppmd7::{self, ByteIn, Ppmd7};
 
 /// `k_Copy`.
@@ -452,14 +452,14 @@ fn lzma_decoder(props: &[u8], out_size: u64, lzma2: bool, limit: &mut u64) -> Re
 }
 
 impl MainCoder {
-    /// The coder of `method_id`, which may use up to `threads` threads.
+    /// The coder of `method_id`, which may use the threads `lzma2` says.
     fn new(
         method_id: u32,
         props: &[u8],
         input: PackReader,
         out_size: u64,
         limit: &mut u64,
-        threads: u32,
+        lzma2: Lzma2Threads,
     ) -> Result<Self> {
         let in_size = input.remaining();
         let method = match method_id {
@@ -477,8 +477,8 @@ impl MainCoder {
                 }
                 _ => Main::Lzma(Box::new(lzma_decoder(props, out_size, false, limit)?)),
             },
-            K_LZMA2 if threads > 1 => {
-                Main::Lzma2Mt(Box::new(Lzma2Mt::new(props, out_size, threads, limit)?))
+            K_LZMA2 if lzma2.threads > 1 => {
+                Main::Lzma2Mt(Box::new(Lzma2Mt::new(props, out_size, lzma2, limit)?))
             }
             K_LZMA2 => Main::Lzma(Box::new(lzma_decoder(props, out_size, true, limit)?)),
             K_PPMD => Main::Ppmd(ppmd_decoder(props, limit)?, false),
@@ -1204,23 +1204,113 @@ impl Graph<'_> {
             if input.remaining() != out_size {
                 return Err(Error::Data);
             }
-            let inner = MainCoder::new(K_COPY, &[], input, out_size, &mut self.limit, 1)?;
+            let inner = MainCoder::new(
+                K_COPY,
+                &[],
+                input,
+                out_size,
+                &mut self.limit,
+                Lzma2Threads::one(),
+            )?;
             return Ok(Node::Filter(
                 Box::new(filter),
                 Box::new(Node::Main(Box::new(inner))),
             ));
         }
-        let threads = self.decoding.threads;
-        let main = MainCoder::new(
-            c.method_id,
-            props,
-            input,
-            out_size,
-            &mut self.limit,
-            threads,
-        )?;
+        let lzma2 = self.decoding.lzma2();
+        let main = MainCoder::new(c.method_id, props, input, out_size, &mut self.limit, lzma2)?;
         Ok(Node::Main(Box::new(main)))
     }
+}
+
+/// What folder `fo`'s decoder takes at most, with one thread, its coders'
+/// dictionaries and models no more than `limit` (`Options::decoder_memory_limit`),
+/// past which it fails:
+/// each dictionary or model as `FolderDecoder::new` charges it, the states of
+/// LZMA's coders (its probabilities, which `lc + lp` say), BZip2's 4 MiB and
+/// Zstandard's window, counted no larger than the folder's output, as a frame
+/// that says its size takes; 128 KiB for each coder's input and buffers, and 1
+/// MiB for the rest: filters', BCJ2's and AES's buffers, and those of the
+/// thread that reads the folder. With `blocks`, each LZMA2 coder is decoded in
+/// threads (`lzma2_mt.rs`), which read up to 64 MiB of its input ahead, no more
+/// than the folder's packed size: counted too, beside its jobs, which hold what
+/// is given them. An estimate for threads that decode folders at once, not a
+/// check: a folder that is not decoded counts its 1 MiB.
+#[cfg(feature = "extract")]
+pub(crate) fn folder_memory(p: &Ar, fo: usize, limit: u64, blocks: bool) -> u64 {
+    const FIXED: u64 = 1 << 20;
+    const EACH: u64 = 2 * PACK_BUF_SIZE as u64;
+    // Bits past `lc + lp` that LZMA's literal probabilities take, and the
+    // rest of its state.
+    let lzma_state = |bits: u32| ((2 * 0x300u64) << bits.min(12)) + (64 << 10);
+    let (Some(&start), Some(&end)) = (p.fo_coders_offsets.get(fo), p.fo_coders_offsets.get(fo + 1))
+    else {
+        return FIXED;
+    };
+    let Some(data) = p.coders_data.get(start..end) else {
+        return FIXED;
+    };
+    let Ok(folder) = arc_in::get_next_folder_item(&mut Sd::new(data)) else {
+        return FIXED;
+    };
+    let unpack_sizes = p
+        .fo_to_coder_unpack_sizes
+        .get(fo)
+        .and_then(|&at| p.coder_unpack_sizes.get(at as usize..))
+        .unwrap_or_default();
+    let stream = |fo: usize| p.fo_start_pack_stream_index.get(fo).copied();
+    let position = |s: u32| p.pack_positions.get(s as usize).copied();
+    let packed = match (
+        stream(fo).and_then(position),
+        stream(fo + 1).and_then(position),
+    ) {
+        (Some(start), Some(end)) => end.saturating_sub(start),
+        _ => 0,
+    };
+    let read_ahead = packed.min(crate::sevenz::lzma2_mt::PACKED_MOST as u64);
+    let mut ahead: u64 = 0;
+    let mut coders: u64 = 0;
+    for (ci, c) in folder.coders[..folder.num_coders as usize]
+        .iter()
+        .enumerate()
+    {
+        let props = data
+            .get(c.props_offset..c.props_offset + usize::from(c.props_size))
+            .unwrap_or_default();
+        let out = unpack_sizes.get(ci).copied().unwrap_or(0);
+        let dict = |size: u64| size.min(out).max(4096);
+        let coder = match c.method_id {
+            K_LZMA => lzma_props(props).map_or(0, |(lc, lp, _, size)| {
+                dict(u64::from(size)) + lzma_state(lc + lp)
+            }),
+            K_LZMA2 => match props {
+                &[prop] if prop <= 40 => {
+                    let size = if prop == 40 {
+                        u64::from(u32::MAX)
+                    } else {
+                        u64::from((2 | (u32::from(prop) & 1)) << (u32::from(prop) / 2 + 11))
+                    };
+                    if blocks {
+                        ahead = ahead.saturating_add(read_ahead);
+                    }
+                    dict(size) + lzma_state(4)
+                }
+                _ => 0,
+            },
+            K_PPMD => match props {
+                &[_, a, b, c, d] => u64::from(u32::from_le_bytes([a, b, c, d])) + (64 << 10),
+                _ => 0,
+            },
+            K_BZIP2 => 4 << 20,
+            K_ZSTD => out.min(1 << zstd_window_log_max(limit)) + (1 << 20),
+            _ => 0,
+        };
+        coders = coders.saturating_add(coder).saturating_add(EACH);
+    }
+    // More fails to decode.
+    FIXED
+        .saturating_add(coders.min(limit))
+        .saturating_add(ahead)
 }
 
 /// A folder's decoder, `SzAr_DecodeFolder`, as a reader of its unpacked
@@ -1318,14 +1408,18 @@ impl FolderDecoder {
                 }
                 let (pos, in_size) = pack(si);
                 // The MAIN stream is the large one.
-                let threads = if ci == 2 { decoding.threads } else { 1 };
+                let lzma2 = if ci == 2 {
+                    decoding.lzma2()
+                } else {
+                    Lzma2Threads::one()
+                };
                 mains.push(MainCoder::new(
                     folder.coders[ci].method_id,
                     props(ci),
                     PackReader::new(pos, in_size),
                     unpack_size,
                     &mut limit,
-                    threads,
+                    lzma2,
                 )?);
             }
             let (jump_size, call_size, main_size) =
@@ -1361,7 +1455,7 @@ impl FolderDecoder {
                 PackReader::new(pos, in_size),
                 out_size,
                 &mut limit,
-                decoding.threads,
+                decoding.lzma2(),
             )?;
             let main = Node::Main(Box::new(main));
             if folder.num_coders == 2 {

@@ -74,6 +74,8 @@ pub use writer::{Filter, Lzma2Blocks, Method, NewEntry, RandomSource, WriteOptio
 use aes7z::{Decoding, MAX_KEY_CYCLES};
 use arc_in::ArEx;
 use dec::FolderDecoder;
+#[cfg(feature = "extract")]
+pub(crate) use lzma2_mt::{Lzma2Threads, Spare};
 
 use crate::threads::Threads;
 
@@ -222,21 +224,43 @@ impl<R: Read + Seek> Archive<R> {
         self.decoding.threads = threads.count();
     }
 
-    /// The threads LZMA2 is decoded in from the next folder on, at least one,
-    /// for those it was.
+    /// How LZMA2 is decoded in threads from the next folder on, at least one,
+    /// for how it was.
     #[cfg(feature = "extract")]
-    pub(crate) fn swap_thread_count(&mut self, threads: u32) -> u32 {
-        std::mem::replace(&mut self.decoding.threads, threads.max(1))
+    pub(crate) fn swap_lzma2(&mut self, lzma2: Lzma2Threads) -> Lzma2Threads {
+        let before = self.decoding.lzma2();
+        self.decoding.threads = lzma2.threads.max(1);
+        self.decoding.jobs = lzma2.jobs;
+        self.decoding.spare = lzma2.spare;
+        before
     }
 
-    /// The error for file `index`'s CRC not matching.
-    fn crc_error(&self, index: usize) -> Error {
-        let folder = self.db.file_to_folder[index] as usize;
-        if self.encrypted.get(folder).copied().unwrap_or(false) {
-            Error::WrongPassword
-        } else {
-            Error::Crc
-        }
+    /// The most a folder's dictionaries and models may take
+    /// ([`Options::decoder_memory_limit`]).
+    #[cfg(feature = "extract")]
+    pub(crate) fn decoder_memory_limit(&self) -> u64 {
+        self.decoding.limit
+    }
+
+    /// What folder `folder`'s decoder takes at most, LZMA2 in blocks if
+    /// `blocks`: see `dec::folder_memory`.
+    #[cfg(feature = "extract")]
+    pub(crate) fn folder_memory(&self, folder: usize, blocks: bool) -> u64 {
+        dec::folder_memory(&self.db.db, folder, self.decoding.limit, blocks)
+    }
+
+    /// The archive's folders, to be read apart, each from a reader of its own,
+    /// and the archive's reader.
+    #[cfg(feature = "extract")]
+    pub(crate) fn apart(&mut self) -> (Folders<'_>, &mut R) {
+        (
+            Folders {
+                db: &self.db,
+                encrypted: &self.encrypted,
+                decoding: std::sync::Mutex::new(&mut self.decoding),
+            },
+            &mut self.reader,
+        )
     }
 
     /// The number of files.
@@ -260,26 +284,7 @@ impl<R: Read + Seek> Archive<R> {
     ///
     /// If `index` is not below [`len`](Self::len).
     pub fn entry(&self, index: usize) -> Entry {
-        let db = &self.db;
-        let name_utf16 = db.file_name_utf16(index);
-        let folder = db.file_to_folder[index];
-        Entry {
-            index,
-            name: String::from_utf16_lossy(&name_utf16),
-            name_utf16,
-            size: db.file_size(index),
-            is_dir: db.is_dir(index),
-            crc: db.crcs.check(index).then(|| db.crcs.vals[index]),
-            attributes: db.attribs.check(index).then(|| db.attribs.vals[index]),
-            mtime: db.mtime.check(index).then(|| db.mtime.vals[index]),
-            ctime: db.ctime.check(index).then(|| db.ctime.vals[index]),
-            folder: (folder != u32::MAX).then_some(folder as usize),
-            encrypted: self
-                .encrypted
-                .get(folder as usize)
-                .copied()
-                .unwrap_or(false),
-        }
+        entry_of(&self.db, &self.encrypted, index)
     }
 
     /// The files, in order.
@@ -374,19 +379,77 @@ impl<R: Read + Seek> Archive<R> {
         }
         let file = &data[offset as usize..(offset + size) as usize];
         if db.crcs.check(index) && crc(file) != db.crcs.vals[index] {
-            return Err(self.crc_error(index));
+            return Err(crc_error(db, &self.encrypted, index));
         }
         Ok(file.to_vec())
     }
 
     /// A reader of the files, one after another.
     pub fn files(&mut self) -> Files<'_, R> {
+        let len = self.len();
         Files {
             archive: self,
-            next: 0,
-            current: None,
-            folder: None,
+            walk: Walk::new(0..len),
         }
+    }
+}
+
+/// File `index` of `db`, whose folders `encrypted` says are encrypted.
+fn entry_of(db: &ArEx, encrypted: &[bool], index: usize) -> Entry {
+    let name_utf16 = db.file_name_utf16(index);
+    let folder = db.file_to_folder[index];
+    Entry {
+        index,
+        name: String::from_utf16_lossy(&name_utf16),
+        name_utf16,
+        size: db.file_size(index),
+        is_dir: db.is_dir(index),
+        crc: db.crcs.check(index).then(|| db.crcs.vals[index]),
+        attributes: db.attribs.check(index).then(|| db.attribs.vals[index]),
+        mtime: db.mtime.check(index).then(|| db.mtime.vals[index]),
+        ctime: db.ctime.check(index).then(|| db.ctime.vals[index]),
+        folder: (folder != u32::MAX).then_some(folder as usize),
+        encrypted: encrypted.get(folder as usize).copied().unwrap_or(false),
+    }
+}
+
+/// The error for file `index`'s CRC not matching.
+fn crc_error(db: &ArEx, encrypted: &[bool], index: usize) -> Error {
+    let folder = db.file_to_folder[index] as usize;
+    if encrypted.get(folder).copied().unwrap_or(false) {
+        Error::WrongPassword
+    } else {
+        Error::Crc
+    }
+}
+
+/// What reading files takes of an archive: its description, a reader of it,
+/// and the decoders of its folders.
+trait Parts {
+    type Reader: Read + Seek;
+    fn db(&self) -> &ArEx;
+    fn encrypted(&self) -> &[bool];
+    fn reader(&mut self) -> &mut Self::Reader;
+    fn decoder(&mut self, folder: usize) -> Result<FolderDecoder>;
+}
+
+impl<R: Read + Seek> Parts for Archive<R> {
+    type Reader = R;
+
+    fn db(&self) -> &ArEx {
+        &self.db
+    }
+
+    fn encrypted(&self) -> &[bool] {
+        &self.encrypted
+    }
+
+    fn reader(&mut self) -> &mut R {
+        &mut self.reader
+    }
+
+    fn decoder(&mut self, folder: usize) -> Result<FolderDecoder> {
+        FolderDecoder::new(&self.db.db, folder, self.db.data_pos, &mut self.decoding)
     }
 }
 
@@ -399,48 +462,50 @@ struct Current {
     expected: Option<u32>,
 }
 
-/// The files of an archive, one after another: [`next`](Files::next)
-/// moves to the next file, whose data the reader then reads. Each folder is
-/// decoded once, in pieces; a file's CRC is checked when its data is read
-/// to its end, and its folder's checks when the folder's last file is.
-pub struct Files<'a, R> {
-    archive: &'a mut Archive<R>,
+/// Files read one after another, from `next` up to `end`: what [`Files`]
+/// does, given the [`Parts`] at each step.
+struct Walk {
     next: usize,
+    end: usize,
     current: Option<Current>,
     /// The folder being read, and its index.
     folder: Option<(usize, FolderDecoder)>,
 }
 
-impl<R: Read + Seek> Files<'_, R> {
-    /// The next file, the rest of the current one's data skipped; none at
-    /// the end.
-    ///
-    /// Not an `Iterator`: the file's data is read from `Files` itself,
-    /// until the next call.
-    #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> Result<Option<Entry>> {
-        if self.current.is_some() {
-            io::copy(self, &mut io::sink()).map_err(io_to_error)?;
+impl Walk {
+    fn new(files: std::ops::Range<usize>) -> Walk {
+        Walk {
+            next: files.start,
+            end: files.end,
+            current: None,
+            folder: None,
         }
-        if self.next >= self.archive.len() {
-            self.end_folder()?;
+    }
+
+    /// [`Files::next`].
+    fn next(&mut self, parts: &mut impl Parts) -> Result<Option<Entry>> {
+        if self.current.is_some() {
+            // The rest of the current file, read as `io::copy` reads it.
+            let mut buf = [0u8; 8192];
+            while self.read_current(parts, &mut buf)? != 0 {}
+        }
+        if self.next >= self.end {
+            self.end_folder(parts)?;
             return Ok(None);
         }
         let index = self.next;
         self.next += 1;
-        let entry = self.archive.entry(index);
+        let entry = entry_of(parts.db(), parts.encrypted(), index);
         if let Some(fo) = entry.folder {
             if self.folder.as_ref().is_none_or(|(f, _)| *f != fo) {
-                self.end_folder()?;
-                let db = &self.archive.db;
-                let decoding = &mut self.archive.decoding;
-                self.folder = Some((fo, FolderDecoder::new(&db.db, fo, db.data_pos, decoding)?));
+                self.end_folder(parts)?;
+                self.folder = Some((fo, parts.decoder(fo)?));
             }
             // Skip what is between: the folder's data no file holds.
-            let db = &self.archive.db;
+            let db = parts.db();
             let start =
                 db.unpack_positions[index] - db.unpack_positions[db.folder_to_file[fo] as usize];
-            self.skip_to(start)?;
+            self.skip_to(parts, start)?;
         }
         self.current = Some(Current {
             index,
@@ -452,30 +517,26 @@ impl<R: Read + Seek> Files<'_, R> {
     }
 
     /// The folder read up to `pos`.
-    fn skip_to(&mut self, pos: u64) -> Result<()> {
+    fn skip_to(&mut self, parts: &mut impl Parts, pos: u64) -> Result<()> {
         let Some((_, folder)) = self.folder.as_mut() else {
             return Ok(());
         };
         let mut buf = [0u8; 8192];
         while folder.position() < pos {
             let n = ((pos - folder.position()) as usize).min(buf.len());
-            if folder.read(&mut self.archive.reader, &mut buf[..n])? == 0 {
+            if folder.read(parts.reader(), &mut buf[..n])? == 0 {
                 return Err(Error::Data);
             }
         }
         Ok(())
     }
 
-    /// Leaves the folder of the current file, whose data failed to read: the
-    /// files after it in that folder, whose data comes after what failed, are
-    /// not given, and the next is the first of another folder. The indexes of
-    /// those left.
-    pub fn skip_folder(&mut self) -> std::ops::Range<usize> {
+    /// [`Files::skip_folder`].
+    fn skip_folder(&mut self, db: &ArEx) -> std::ops::Range<usize> {
         let start = self.next;
         self.current = None;
         if let Some((fo, _)) = self.folder.take() {
-            let db = &self.archive.db;
-            while self.next < self.archive.len() && db.file_to_folder[self.next] as usize == fo {
+            while self.next < self.end && db.file_to_folder[self.next] as usize == fo {
                 self.next += 1;
             }
         }
@@ -483,7 +544,7 @@ impl<R: Read + Seek> Files<'_, R> {
     }
 
     /// The current folder read to its end, and checked.
-    fn end_folder(&mut self) -> Result<()> {
+    fn end_folder(&mut self, parts: &mut impl Parts) -> Result<()> {
         let Some((_, mut folder)) = self.folder.take() else {
             return Ok(());
         };
@@ -491,18 +552,17 @@ impl<R: Read + Seek> Files<'_, R> {
         let mut buf = [0u8; 8192];
         loop {
             let n = ((size - folder.position()) as usize).clamp(1, buf.len());
-            if folder.read(&mut self.archive.reader, &mut buf[..n])? == 0 {
+            if folder.read(parts.reader(), &mut buf[..n])? == 0 {
                 return Ok(());
             }
         }
     }
 
-    /// The index of the current file, if any.
-    pub fn index(&self) -> Option<usize> {
+    fn index(&self) -> Option<usize> {
         self.current.as_ref().map(|c| c.index)
     }
 
-    fn read_current(&mut self, buf: &mut [u8]) -> Result<usize> {
+    fn read_current(&mut self, parts: &mut impl Parts, buf: &mut [u8]) -> Result<usize> {
         let Some(current) = self.current.as_mut() else {
             return Ok(0);
         };
@@ -510,14 +570,15 @@ impl<R: Read + Seek> Files<'_, R> {
             if let Some(expected) = current.expected.take()
                 && current.crc != expected
             {
-                return Err(self.archive.crc_error(current.index));
+                return Err(crc_error(parts.db(), parts.encrypted(), current.index));
             }
             // The folder's checks, once its last file is read.
-            let is_last = self.next >= self.archive.len()
-                || self.archive.db.file_to_folder[self.next]
-                    != self.archive.db.file_to_folder[current.index];
-            if is_last && self.archive.db.file_to_folder[current.index] != u32::MAX {
-                self.end_folder()?;
+            let db = parts.db();
+            let folder = db.file_to_folder[current.index];
+            let is_last =
+                self.next >= db.num_files as usize || db.file_to_folder[self.next] != folder;
+            if is_last && folder != u32::MAX {
+                self.end_folder(parts)?;
             }
             return Ok(0);
         }
@@ -525,7 +586,7 @@ impl<R: Read + Seek> Files<'_, R> {
             return Err(Error::Fail);
         };
         let n = (current.left.min(buf.len() as u64)) as usize;
-        let n = folder.read(&mut self.archive.reader, &mut buf[..n])?;
+        let n = folder.read(parts.reader(), &mut buf[..n])?;
         if n == 0 {
             return Err(Error::Data);
         }
@@ -535,10 +596,37 @@ impl<R: Read + Seek> Files<'_, R> {
     }
 }
 
-fn io_to_error(e: io::Error) -> Error {
-    match e.get_ref().and_then(|e| e.downcast_ref::<Error>()) {
-        Some(&e) => e,
-        None => Error::Read,
+/// The files of an archive, one after another: [`next`](Files::next)
+/// moves to the next file, whose data the reader then reads. Each folder is
+/// decoded once, in pieces; a file's CRC is checked when its data is read
+/// to its end, and its folder's checks when the folder's last file is.
+pub struct Files<'a, R> {
+    archive: &'a mut Archive<R>,
+    walk: Walk,
+}
+
+impl<R: Read + Seek> Files<'_, R> {
+    /// The next file, the rest of the current one's data skipped; none at
+    /// the end.
+    ///
+    /// Not an `Iterator`: the file's data is read from `Files` itself,
+    /// until the next call.
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> Result<Option<Entry>> {
+        self.walk.next(&mut *self.archive)
+    }
+
+    /// Leaves the folder of the current file, whose data failed to read: the
+    /// files after it in that folder, whose data comes after what failed, are
+    /// not given, and the next is the first of another folder. The indexes of
+    /// those left.
+    pub fn skip_folder(&mut self) -> std::ops::Range<usize> {
+        self.walk.skip_folder(&self.archive.db)
+    }
+
+    /// The index of the current file, if any.
+    pub fn index(&self) -> Option<usize> {
+        self.walk.index()
     }
 }
 
@@ -547,6 +635,99 @@ impl<R: Read + Seek> Read for Files<'_, R> {
         if buf.is_empty() {
             return Ok(0);
         }
-        Ok(self.read_current(buf)?)
+        Ok(self.walk.read_current(&mut *self.archive, buf)?)
+    }
+}
+
+/// An archive's folders, to be read apart, in threads, each from a reader of
+/// its own: [`Archive::apart`]. The threads take turns at the decoding's
+/// state as they start a folder, so that a key is made once for all.
+#[cfg(feature = "extract")]
+pub(crate) struct Folders<'a> {
+    db: &'a ArEx,
+    encrypted: &'a [bool],
+    decoding: std::sync::Mutex<&'a mut Decoding>,
+}
+
+#[cfg(feature = "extract")]
+impl<'a> Folders<'a> {
+    /// Files `files`, a run of those of one folder or of none, as [`Files`]
+    /// reads them, from `reader`; past the last, none.
+    pub(crate) fn files<S: Read + Seek>(
+        &self,
+        files: std::ops::Range<usize>,
+        reader: S,
+    ) -> FolderFiles<'_, 'a, S> {
+        FolderFiles {
+            parts: Lent {
+                folders: self,
+                reader,
+            },
+            walk: Walk::new(files),
+        }
+    }
+}
+
+/// [`Folders`] lent to a thread, with its reader.
+#[cfg(feature = "extract")]
+struct Lent<'f, 'a, S> {
+    folders: &'f Folders<'a>,
+    reader: S,
+}
+
+#[cfg(feature = "extract")]
+impl<S: Read + Seek> Parts for Lent<'_, '_, S> {
+    type Reader = S;
+
+    fn db(&self) -> &ArEx {
+        self.folders.db
+    }
+
+    fn encrypted(&self) -> &[bool] {
+        self.folders.encrypted
+    }
+
+    fn reader(&mut self) -> &mut S {
+        &mut self.reader
+    }
+
+    fn decoder(&mut self, folder: usize) -> Result<FolderDecoder> {
+        let db = self.folders.db;
+        let mut decoding = self
+            .folders
+            .decoding
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        FolderDecoder::new(&db.db, folder, db.data_pos, &mut decoding)
+    }
+}
+
+/// Some files of an archive, read as [`Files`] reads them: [`Folders::files`].
+#[cfg(feature = "extract")]
+pub(crate) struct FolderFiles<'f, 'a, S> {
+    parts: Lent<'f, 'a, S>,
+    walk: Walk,
+}
+
+#[cfg(feature = "extract")]
+impl<S: Read + Seek> FolderFiles<'_, '_, S> {
+    /// [`Files::next`].
+    pub(crate) fn next(&mut self) -> Result<Option<Entry>> {
+        self.walk.next(&mut self.parts)
+    }
+
+    /// [`Files::skip_folder`].
+    pub(crate) fn skip_folder(&mut self) -> std::ops::Range<usize> {
+        self.walk.skip_folder(self.parts.folders.db)
+    }
+}
+
+#[cfg(feature = "extract")]
+impl<S: Read + Seek> Read for FolderFiles<'_, '_, S> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        Ok(self.walk.read_current(&mut self.parts, buf)?)
     }
 }

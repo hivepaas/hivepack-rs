@@ -29,8 +29,12 @@
 //! least [`JOB_LEAST`] bytes, and gives each to a thread, which decodes it
 //! whole into memory; it then gives the output in order, to the filter after
 //! it if there is one. Jobs wait while those given and not yet read would
-//! take more than what is left of `Options::decoder_memory_limit`. A job
-//! that would hold more than it, or more than [`PACKED_MOST`] or
+//! take more than what is left of `Options::decoder_memory_limit`, or than
+//! what an extraction gives the folder of `extract::Options::memory_limit`
+//! ([`Lzma2Threads::jobs`]). Where an extraction decodes folders at once, each
+//! job in flight beyond the first takes one of the threads they share
+//! ([`Spare`]), and the others wait for one. A job that would hold more than
+//! the memory, or more than [`PACKED_MOST`] or
 //! [`UNPACKED_MOST`], as a long stream with no resets does, is decoded on the
 //! caller's thread as it is read, as one decoder would, and so is the rest of
 //! the stream. So is the last job when none is before it: a stream that is
@@ -45,6 +49,8 @@
 
 use std::collections::VecDeque;
 use std::io::{Read, Seek};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::xz::{Action, Filter, InBuffer, LzmaOptions, OutBuffer, Status, Stream};
 
@@ -59,6 +65,61 @@ pub(crate) const JOB_LEAST: u64 = 1 << 18;
 pub(crate) const PACKED_MOST: usize = 64 << 20;
 /// The most bytes a job decodes to.
 pub(crate) const UNPACKED_MOST: u64 = 1 << 30;
+
+/// How an LZMA2 coder may decode in threads: in up to `threads`, its jobs
+/// holding no more than `jobs` bytes beside what is left of the folder's limit,
+/// and, where folders are decoded at once, those beyond the first in flight
+/// each taking one of the `spare` threads they share.
+#[derive(Clone, Debug)]
+pub(crate) struct Lzma2Threads {
+    pub(crate) threads: u32,
+    pub(crate) jobs: u64,
+    pub(crate) spare: Option<Arc<Spare>>,
+}
+
+impl Lzma2Threads {
+    /// One thread, the caller's.
+    pub(crate) fn one() -> Lzma2Threads {
+        Lzma2Threads {
+            threads: 1,
+            jobs: 0,
+            spare: None,
+        }
+    }
+}
+
+/// The threads that folders decoded at once share, besides one each, for
+/// their LZMA2 blocks: as one folder ends, the others take its thread.
+#[derive(Debug)]
+pub(crate) struct Spare(AtomicU32);
+
+impl Spare {
+    /// `threads` of them.
+    #[cfg(any(feature = "extract", test))]
+    pub(crate) fn new(threads: u32) -> Arc<Spare> {
+        Arc::new(Spare(AtomicU32::new(threads)))
+    }
+
+    /// One of them, if one is free.
+    fn take(&self) -> bool {
+        let mut free = self.0.load(Ordering::Acquire);
+        while free > 0 {
+            match self
+                .0
+                .compare_exchange_weak(free, free - 1, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return true,
+                Err(now) => free = now,
+            }
+        }
+        false
+    }
+
+    /// `n` given back, or given.
+    pub(crate) fn give(&self, n: u32) {
+        self.0.fetch_add(n, Ordering::AcqRel);
+    }
+}
 
 /// How a job ends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -225,13 +286,31 @@ pub(crate) struct Lzma2Mt {
     serial: Option<Box<Stream>>,
     /// The stream has ended, its output all read.
     ended: bool,
+    /// The threads shared with other folders, and how many of them are taken:
+    /// each job in flight beyond the first takes one.
+    spare: Option<Arc<Spare>>,
+    taken: u32,
+}
+
+impl Drop for Lzma2Mt {
+    fn drop(&mut self) {
+        if let Some(spare) = &self.spare {
+            spare.give(self.taken);
+        }
+    }
 }
 
 impl Lzma2Mt {
     /// The decoder of LZMA2 with these properties, into `out_size` bytes, in
-    /// up to `threads` threads. Its dictionary is charged to `limit` as the
-    /// one decoder's is, and the jobs take no more than what is left.
-    pub(crate) fn new(props: &[u8], out_size: u64, threads: u32, limit: &mut u64) -> Result<Self> {
+    /// the threads `lzma2` says. Its dictionary is charged to `limit` as the
+    /// one decoder's is, and the jobs take no more than what is left, nor
+    /// more than `lzma2.jobs`.
+    pub(crate) fn new(
+        props: &[u8],
+        out_size: u64,
+        lzma2: Lzma2Threads,
+        limit: &mut u64,
+    ) -> Result<Self> {
         // SzDecodeLzma2, Lzma2Dec_AllocateProbs, as `lzma_decoder` checks
         // them.
         if props.len() != 1 {
@@ -254,8 +333,8 @@ impl Lzma2Mt {
         Ok(Lzma2Mt {
             dict,
             serial_dict,
-            budget: *limit,
-            workers: Workers::new(threads, "sevenz-lzma2", decode_job, job_lost),
+            budget: (*limit).min(lzma2.jobs),
+            workers: Workers::new(lzma2.threads, "sevenz-lzma2", decode_job, job_lost),
             costs: VecDeque::new(),
             head: None,
             held: None,
@@ -266,7 +345,34 @@ impl Lzma2Mt {
             all_gathered: false,
             serial: None,
             ended: false,
+            spare: lzma2.spare,
+            taken: 0,
         })
+    }
+
+    /// Whether another job may be given: the first in flight always, those
+    /// after it if they have, or get, a thread of those shared.
+    fn may_give(&mut self) -> bool {
+        let Some(spare) = &self.spare else {
+            return true;
+        };
+        if self.workers.pending() <= self.taken as usize {
+            return true;
+        }
+        let took = spare.take();
+        self.taken += u32::from(took);
+        took
+    }
+
+    /// The shared threads no job in flight needs, given back.
+    fn give_back(&mut self) {
+        let needed = self.workers.pending().saturating_sub(1) as u32;
+        if let Some(spare) = &self.spare
+            && self.taken > needed
+        {
+            spare.give(self.taken - needed);
+            self.taken = needed;
+        }
     }
 
     /// The dictionary a job of `unpacked` bytes needs.
@@ -356,9 +462,16 @@ impl Lzma2Mt {
         }
     }
 
-    /// Gives the threads jobs, as many as there are threads and memory for.
+    /// Gives the threads jobs, as many as there are threads and memory for;
+    /// the shared threads not needed given back.
     fn pump<R: Read + Seek>(&mut self, input: &mut PackReader, r: &mut R) -> Result<()> {
-        while self.workers.pending() < self.workers.most() {
+        let pumped = self.pump_jobs(input, r);
+        self.give_back();
+        pumped
+    }
+
+    fn pump_jobs<R: Read + Seek>(&mut self, input: &mut PackReader, r: &mut R) -> Result<()> {
+        while self.workers.pending() < self.workers.most() && self.may_give() {
             let job = match self.held.take() {
                 Some(job) => job,
                 None if self.all_gathered => return Ok(()),
@@ -565,8 +678,24 @@ mod tests {
         limit: u64,
         piece: usize,
     ) -> (Result<Vec<u8>>, usize, bool) {
+        let lzma2 = Lzma2Threads {
+            threads,
+            jobs: u64::MAX,
+            spare: None,
+        };
+        decode_with(packed, size, lzma2, limit, piece)
+    }
+
+    /// [`decode`] with the threads `lzma2` says.
+    fn decode_with(
+        packed: &[u8],
+        size: u64,
+        lzma2: Lzma2Threads,
+        limit: u64,
+        piece: usize,
+    ) -> (Result<Vec<u8>>, usize, bool) {
         let mut limit = limit;
-        let mut mt = match Lzma2Mt::new(&[8], size, threads, &mut limit) {
+        let mut mt = match Lzma2Mt::new(&[8], size, lzma2, &mut limit) {
             Ok(mt) => mt,
             Err(e) => return (Err(e), 0, false),
         };
@@ -607,6 +736,34 @@ mod tests {
                 assert_eq!(made, 0);
             }
         }
+    }
+
+    /// Threads shared with other folders: a job in flight beyond the first
+    /// takes one, and gives it back; with none free, one job at a time.
+    #[test]
+    fn shared_threads() {
+        let data = text(3 << 20, 4);
+        let packed = blocks(&data, 300_000);
+        for free in [0, 2] {
+            let spare = Spare::new(free);
+            let lzma2 = Lzma2Threads {
+                threads: 8,
+                jobs: u64::MAX,
+                spare: Some(Arc::clone(&spare)),
+            };
+            let (got, made, _) = decode_with(&packed, data.len() as u64, lzma2, 1 << 32, 65536);
+            assert!(got == Ok(data.clone()), "{free} free");
+            assert!(made <= free as usize + 1, "{made} threads, {free} free");
+            assert_eq!(spare.0.load(Ordering::Acquire), free, "given back");
+        }
+        // Jobs held to `jobs` bytes wait for one another.
+        let lzma2 = Lzma2Threads {
+            threads: 8,
+            jobs: 1 << 20,
+            spare: None,
+        };
+        let (got, _, _) = decode_with(&packed, data.len() as u64, lzma2, 1 << 32, 65536);
+        assert!(got == Ok(data));
     }
 
     #[test]
