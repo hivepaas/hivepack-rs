@@ -5,7 +5,8 @@
 //! `Packages::AsFiles`, and what is not a cpio archive written as it is;
 //! and the checks before anything is written reaching into the payloads:
 //! names, the limits, a payload cut short, a checksum that does not match,
-//! an archive that changes between its readings.
+//! an archive that changes between its readings; and a payload decoded
+//! in threads as in one, held from a budget.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -260,6 +261,79 @@ fn a_xip_file_s_content_and_other_payloads() {
         read(&out.join("Payload/Example.app/Contents/Info.plist")),
         b"<plist/>\n"
     );
+}
+
+/// A `.xip` file's content extracts the same with threads, which decode
+/// its pbzx chunks and write its files, as with one: within a memory
+/// limit too, and a damaged chunk fails the same.
+#[test]
+fn a_payload_s_chunks_decode_in_threads_as_in_one() {
+    let text = |n: usize| -> Vec<u8> {
+        (0..n)
+            .map(|i| b"payload data, "[(i * 7 + i / 13) % 14])
+            .collect()
+    };
+    let (a, b) = (text(150_000), text(90_000));
+    let app = odc(&[
+        ("Big.app/", b""),
+        ("Big.app/a", &a),
+        ("Big.app/b", &b),
+        ("Big.app/c", b"small"),
+    ]);
+    let content = pbzx(&app);
+    let mut damaged = content.clone();
+    let at = damaged.len() * 2 / 3;
+    damaged[at] ^= 0x20;
+    let extracted = |content: &[u8], threads: u32, limit: Option<u64>| {
+        let xip = xar(&[("Content", content), ("Metadata", b"<plist/>\n")]);
+        let scratch = Scratch::new();
+        let out = scratch.out();
+        let mut options = portable();
+        options.threads = hivepack::Threads::of(threads);
+        options.memory_limit = limit;
+        match extract(&xip, &out, &options) {
+            Ok(_) => Ok((listing(&out), read(&out.join("Content/Big.app/a")))),
+            Err(e) => Err(e.to_string()),
+        }
+    };
+    let alone = extracted(&content, 1, None);
+    assert_eq!(alone.as_ref().map(|(_, a)| a.len()), Ok(a.len()));
+    for (threads, limit) in [(4, None), (3, Some(1 << 20))] {
+        assert!(
+            extracted(&content, threads, limit) == alone,
+            "{threads} {limit:?}"
+        );
+    }
+    let alone = extracted(&damaged, 1, None);
+    assert!(alone.is_err());
+    assert_eq!(extracted(&damaged, 4, None), alone);
+}
+
+/// The threads decoding a payload are held from the budget, room for two
+/// here, and given back.
+#[cfg(feature = "memory")]
+#[test]
+fn a_payload_s_threads_are_held_from_the_budget() {
+    use std::sync::{Arc, Mutex};
+    let data: Vec<u8> = (0..200_000).map(|i| (i % 251) as u8).collect();
+    let xip = xar(&[("Content", &pbzx(&odc(&[("data", &data)])))]);
+    let budget = hivepack::memory::Budget::new(100 << 20);
+    let during = Arc::new(Mutex::new(0u64));
+    let (record, held) = (Arc::clone(&during), budget.clone());
+    let mut options = portable();
+    options.threads = hivepack::Threads::of(8);
+    options.memory_budget = Some(budget.clone());
+    options.progress = Some(Arc::new(move |_: &hivepack::extract::Progress| {
+        let mut most = record.lock().unwrap();
+        *most = (*most).max(held.held());
+    }));
+    let scratch = Scratch::new();
+    let out = scratch.out();
+    extract(&xip, &out, &options).unwrap();
+    assert!(read(&out.join("Content/data")) == data);
+    let most = *during.lock().unwrap();
+    assert!(most > 0 && most <= 100 << 20, "{most}");
+    assert_eq!(budget.held(), 0);
 }
 
 /// What is checked before anything is written reaches into the payloads:

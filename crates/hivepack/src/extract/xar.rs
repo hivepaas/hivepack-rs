@@ -92,15 +92,69 @@ fn in_payload(index: u64, prefix: &[u8], e: Error) -> Error {
     }
 }
 
-/// `r`, the XAR reader at a payload's entry, opened through its layers.
-fn open_payload<R: Read + Send>(
-    r: &mut Reader<R>,
-) -> Result<(Vec<Layer>, Container, crate::open::Opened<'_>), ErrorKind> {
+/// What each thread decoding a payload's layers, besides the caller's, may
+/// hold: a pbzx chunk of 16 MiB as Apple writes them, what stores it, and
+/// its decoder's dictionary.
+#[cfg(feature = "memory")]
+const PAYLOAD_THREAD: u64 = 48 << 20;
+
+/// The threads a payload's layers are decoded in, and what they may hold.
+struct Decoding {
+    threads: u32,
+    memory: u64,
+    /// What they hold of [`Options::memory_budget`], until the reading is
+    /// done.
+    #[cfg(feature = "memory")]
+    _held: Option<crate::memory::Held>,
+}
+
+/// The threads of [`Options::threads`], what they hold counted as
+/// [`PAYLOAD_THREAD`] each besides the caller's: lowered to fit
+/// [`Options::memory_budget`], and what they hold no more than it lets nor
+/// than [`Options::memory_limit`].
+fn decoding(options: &Options) -> Decoding {
+    let wanted = options.threads.count();
+    let limit = options.memory_limit.unwrap_or(u64::MAX);
+    #[cfg(feature = "memory")]
+    if let Some(budget) = &options.memory_budget {
+        let (threads, held) = budget.hold_threads(wanted, payload_memory);
+        return Decoding {
+            threads,
+            memory: payload_memory(threads).min(limit),
+            _held: Some(held),
+        };
+    }
+    Decoding {
+        threads: wanted,
+        memory: limit,
+        #[cfg(feature = "memory")]
+        _held: None,
+    }
+}
+
+/// What `threads` decoding a payload hold, counted as [`PAYLOAD_THREAD`]
+/// each besides the caller's.
+#[cfg(feature = "memory")]
+fn payload_memory(threads: u32) -> u64 {
+    match threads {
+        0 | 1 => 0,
+        n => u64::from(n).saturating_mul(PAYLOAD_THREAD),
+    }
+}
+
+/// `r`, the XAR reader at a payload's entry, opened through its layers,
+/// decoded as `decoding` says.
+fn open_payload<'a, R: Read + Send>(
+    r: &'a mut Reader<R>,
+    decoding: &Decoding,
+) -> Result<(Vec<Layer>, Container, crate::open::Opened<'a>), ErrorKind> {
     let mut once = Some(r);
     let mut opener = Opener::new(move || {
         once.take()
             .ok_or_else(|| io::Error::other("a payload opened twice"))
-    });
+    })
+    .threads(crate::Threads::of(decoding.threads))
+    .threads_memory(decoding.memory);
     let opened = opener.open().map_err(|e| ErrorKind::Payload(e.into()))?;
     Ok((opened.layers().to_vec(), opened.container(), opened))
 }
@@ -114,6 +168,7 @@ fn read_headers<R: Read + Send>(
 ) -> Result<FirstReading, Error> {
     let mut xar = Reader::new(r);
     let mut first = FirstReading::default();
+    let decoding = decoding(options);
     loop {
         let index = first.entries.len() as u64;
         run.check().map_err(Error::global)?;
@@ -192,7 +247,7 @@ fn read_headers<R: Read + Send>(
         });
         if kind == Kind::File && options.packages == Packages::Expand && is_payload {
             let (layers, container, opened) =
-                open_payload(&mut xar).map_err(|kind| entry_error(index, &h, kind))?;
+                open_payload(&mut xar, &decoding).map_err(|kind| entry_error(index, &h, kind))?;
             if container == Container::Cpio {
                 let plan =
                     cpio::plan(opened, run, options).map_err(|e| in_payload(index, &raw, e))?;
@@ -264,9 +319,13 @@ fn xar_error(kind: ErrorKind) -> ErrorKind {
 /// `Payload`, its scripts under `Scripts`, a `.xip` file's under `Content`.
 /// The limits count all of them. An error in a payload names its entry, and
 /// the path in the payload after the payload's. With [`Options::threads`],
-/// a payload's files are written by threads while it is read, as
-/// `extract_cpio` writes them; the XAR archive's own files on the caller's
-/// thread.
+/// a payload's layers are decoded in as many threads as
+/// [`Opener::threads`](crate::open::Opener::threads) decodes them (pbzx's
+/// chunks, xz's Blocks, bzip2's blocks), what they hold no more than
+/// [`Options::memory_limit`] and 48 MiB a thread held from
+/// `Options::memory_budget`; and its files are written by threads while it
+/// is read, as `extract_cpio` writes them; the XAR archive's own files on
+/// the caller's thread.
 ///
 /// Besides tar's rules: an entry libarchive gives with a warning (a name
 /// that is not UTF-8) is refused ([`ErrorKind::XarEntry`]), or left out
@@ -389,6 +448,7 @@ fn extract_into<R: Read + Send, F: FnMut() -> io::Result<R>, T: Target>(
     // The second reading.
     let second = open().map_err(|e| Error::global(ErrorKind::Io(e)))?;
     let mut xar = Reader::new(second);
+    let decoding = decoding(options);
     for (index, entry) in entries.iter().enumerate() {
         let index = index as u64;
         run.check().map_err(Error::global)?;
@@ -423,7 +483,7 @@ fn extract_into<R: Read + Send, F: FnMut() -> io::Result<R>, T: Target>(
             let Some(payload) = &mut payloads[index as usize] else {
                 continue;
             };
-            let (layers, container, opened) = open_payload(&mut xar).map_err(error)?;
+            let (layers, container, opened) = open_payload(&mut xar, &decoding).map_err(error)?;
             if layers != payload.layers || container != Container::Cpio {
                 return Err(error(ErrorKind::Changed));
             }

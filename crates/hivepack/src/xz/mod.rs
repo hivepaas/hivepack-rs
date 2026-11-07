@@ -121,6 +121,9 @@ mod stream_encoder_mt;
 mod stream_flags;
 mod vli;
 
+#[cfg(feature = "open")]
+pub(crate) use stream_decoder::first_block_memusage;
+
 use core::fmt;
 
 pub use check::{CHECK_ID_MAX, Check};

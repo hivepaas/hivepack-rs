@@ -1116,6 +1116,51 @@ fn read_with(file: &[u8], threads: Threads, limits: Limits) -> (Vec<u8>, Option<
 }
 
 #[test]
+fn pbzx_chunks_decode_in_threads_as_in_one() {
+    let tar = sample_tar();
+    let file = pbzx(&tar, 8 << 10);
+    let mut damaged = file.clone();
+    let at = damaged.len() / 2;
+    damaged[at] ^= 0x40;
+    let mut cut = file.clone();
+    cut.truncate(file.len() * 2 / 3);
+    let mut after = file.clone();
+    after.extend(b"more");
+    let stored_and_xz = pbzx_of(
+        1 << 16,
+        &[
+            pbzx_chunk(0, &[]),
+            pbzx_chunk(20_000, &xz_no_check(&tar[..20_000])),
+            pbzx_chunk(30_000, &tar[20_000..50_000]),
+            pbzx_chunk((tar.len() - 50_000) as u64, &xz(&tar[50_000..])),
+        ],
+    );
+    let mut tight = Limits::default();
+    tight.xz_memlimit = 1 << 20;
+    let cases: [(&str, &[u8], Limits); 6] = [
+        ("chunks", &file, Limits::default()),
+        ("stored and compressed", &stored_and_xz, Limits::default()),
+        ("damaged", &damaged, Limits::default()),
+        ("cut short", &cut, Limits::default()),
+        ("bytes after", &after, Limits::default()),
+        ("past the memory limit", &file, tight),
+    ];
+    for (what, file, limits) in cases {
+        let alone = read_with(file, Threads::One, limits);
+        for threads in [Threads::of(2), Threads::of(8)] {
+            assert!(
+                read_with(file, threads, limits) == alone,
+                "{what}, {threads:?}: not as with one thread"
+            );
+        }
+        match what {
+            "chunks" | "stored and compressed" => assert!(alone == (tar.clone(), None), "{what}"),
+            _ => assert!(alone.1.is_some(), "{what} read through"),
+        }
+    }
+}
+
+#[test]
 fn xz_blocks_decode_in_threads_as_in_one() {
     let tar = sample_tar();
     let blocks = xz_blocks(&tar, 8 << 10);

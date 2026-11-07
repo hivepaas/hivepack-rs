@@ -392,8 +392,10 @@ pub struct Options {
     /// solid) are decoded at once, each by a thread that writes its files; the
     /// threads left over decompress LZMA2 whose stream resets its dictionary
     /// on the way (7-Zip's in threads,
-    /// [`Lzma2Blocks`](crate::sevenz::Lzma2Blocks)) a block in each. What is
-    /// written is the same.
+    /// [`Lzma2Blocks`](crate::sevenz::Lzma2Blocks)) a block in each. A XAR
+    /// package's payloads are decoded in that many threads (pbzx's chunks
+    /// among them), besides those writing their files. What is written is
+    /// the same.
     pub threads: Threads,
     /// The memory the threads may take, where each holds what it decompresses
     /// with: RAR's ([`extract_rar`](crate::extract::extract_rar)), whose every
@@ -402,9 +404,10 @@ pub struct Options {
     /// whose every thread has its folder's dictionaries and models, LZMA2's
     /// blocks decoded ahead taking what they leave. The threads are lowered
     /// until what they take, counted for the most each may hold, fits; one is
-    /// always allowed, as it takes what extracting without threads does. For tar and cpio, the data
-    /// read and handed to threads to write, 32 MiB at most, is held to it.
-    /// None by default. See
+    /// always allowed, as it takes what extracting without threads does. For
+    /// tar and cpio, the data read and handed to threads to write, 32 MiB at
+    /// most, is held to it; for a XAR package's payloads, what their decoders'
+    /// threads hold. None by default. See
     /// [docs/memory.md](https://github.com/hivepaas/hivepack-rs/blob/main/docs/memory.md#readers).
     pub memory_limit: Option<u64>,
     /// Where the memory of the threads is held from, once what they need is
