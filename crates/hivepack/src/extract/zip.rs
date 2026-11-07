@@ -138,6 +138,8 @@ fn item<R: ReadAt>(archive: &Archive<R>, i: u64, options: &Options) -> Result<It
         data,
         mode: unix_mode.map(|mode| mode & 0o7777),
         mtime,
+        owner: None,
+        xattrs: Vec::new(),
     })
 }
 
@@ -543,12 +545,12 @@ pub(crate) fn set_dir_times<T: Target>(
     kept: &[&Item],
     run: &Run<'_>,
 ) -> Result<(), Error> {
-    let mut dirs: Vec<(&[String], std::time::SystemTime, &Item)> = kept
+    let mut dirs: Vec<(&[String], Option<std::time::SystemTime>, &Item)> = kept
         .iter()
         .filter(|item| item.kind == Kind::Dir)
-        .filter_map(|&item| match (&item.name, item.mtime) {
-            (Ok(name), Some(mtime)) => Some((name.components.as_slice(), mtime, item)),
-            _ => None,
+        .filter_map(|&item| match &item.name {
+            Ok(name) => Some((name.components.as_slice(), item.mtime, item)),
+            Err(_) => None,
         })
         .collect();
     dirs.sort_by_key(|(components, _, _)| std::cmp::Reverse(components.len()));
@@ -558,7 +560,13 @@ pub(crate) fn set_dir_times<T: Target>(
         }
         let error = |kind| item.error(kind);
         run.check().map_err(error)?;
-        destination.set_time(components, mtime).map_err(error)?;
+        // Its owner and attributes before its time, which changing them may change.
+        destination
+            .restore_directory(components, item, run.options)
+            .map_err(error)?;
+        if let Some(mtime) = mtime {
+            destination.set_time(components, mtime).map_err(error)?;
+        }
     }
     Ok(())
 }

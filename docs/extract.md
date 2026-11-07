@@ -76,7 +76,7 @@ The defaults are a judgment, to be tuned on real archives; each can be raised.
 
 Every entry's data is checked at its end, its CRC-32, or for WinZip AES its authentication code, by `hivepack::zip`; a file whose data fails is removed, as is one cut off at a limit, and the extraction stops. Encrypted entries are read with `Options::password`.
 
-On Unix, a file gets the permission bits its entry has, masked as Python's `data` filter masks them: no setuid, setgid or sticky bit, nothing writable by group or others, and readable and writable by its owner. Owners, ACLs and extended attributes are not restored. Directories get the system's default permissions. Files and directories get the time their entry has, the directories once nothing more is written in them, the deepest first, without following a link. A time the system cannot hold (after January 2038 where `time_t` has 32 bits) is left: the file keeps the time it was written at.
+On Unix, a file gets the permission bits its entry has, masked as Python's `data` filter masks them: no setuid, setgid or sticky bit, nothing writable by group or others, and readable and writable by its owner. Owners, ACLs and extended attributes are not restored, unless `owners` and `xattrs` ask (below). Directories get the system's default permissions. Files and directories get the time their entry has, the directories once nothing more is written in them, the deepest first, without following a link. A time the system cannot hold (after January 2038 where `time_t` has 32 bits) is left: the file keeps the time it was written at.
 
 ## Marks of origin
 
@@ -115,6 +115,8 @@ Each rule that is not about writing outside the destination can be relaxed, by n
 | `on_refused` | `OnRefused::Stop` | `Skip`: an entry refused for its name, as a link or as the same path as another is left out, listed in `Summary::skipped` with its reason, and the rest extracted. The limits and overlapping data still stop the extraction: they are about the archive, not one entry |
 | `overwrite` | `false` | Files that are there are replaced, if they are files: opened without following a link and emptied. A link or a directory there still stops it |
 | `permissions` | `Permissions::Masked` | `Preserve`: the entry's bits but setuid, setgid and sticky. `Ignore`: the system's |
+| `owners` | `false` | On Linux and macOS, each file's and directory's owner and group, by number, as a tar archive kept them for a backup (GNU tar's `--same-owner --numeric-owner`): root gives them to anyone, others to themselves and their groups, and what is not allowed is left. Both 0 with no names is taken for none kept |
+| `xattrs` | `false` | On Linux and macOS, each file's and directory's extended attributes, Linux's ACLs among them, as a tar archive kept them (PAX's `SCHILY.xattr.`, GNU tar's `--xattrs`), before the mark of origin, which they never stand for. Never `security.capability`, which gives a program rights as setuid does; what the file system or the user's rights refuse is left out |
 | `limits` | see [Limits](#limits) | each raised or lowered |
 | `password` | none | the password encrypted entries are read with |
 | `origin` | none | the archive's mark of origin (`Origin::of`), carried to every file (see [Marks of origin](#marks-of-origin)) |

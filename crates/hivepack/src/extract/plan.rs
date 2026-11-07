@@ -326,6 +326,21 @@ pub struct Options {
     /// directories. Nothing is overwritten otherwise.
     pub overwrite: bool,
     pub permissions: Permissions,
+    /// Restores each file's and folder's owner and group, by number, as a tar
+    /// archive kept them for a backup (`uid`, `gid`), as GNU tar's
+    /// `--same-owner --numeric-owner` does, on Linux and macOS. Who may give a
+    /// file away (root, as a rule) gives it to anyone; others, to themselves and
+    /// their groups, and what is not allowed is left as it is. Off by default:
+    /// what is extracted is the user's. Other formats keep no owners.
+    pub owners: bool,
+    /// Restores each file's and folder's extended attributes, as a tar archive
+    /// kept them (PAX's `SCHILY.xattr.`), Linux's ACLs among them, as GNU tar's
+    /// `--xattrs` does, on Linux and macOS: before the mark of origin, which an
+    /// archive's attributes never stand for. Never `security.capability`, which
+    /// gives a program rights as a setuid bit does, and which is not kept for
+    /// the same reason; an attribute the file system or the user's rights do not
+    /// take is left out. Off by default.
+    pub xattrs: bool,
     /// How long the extraction may take, from when it starts; none by
     /// default. It stops with [`ErrorKind::TimeLimit`] once past it.
     pub time_limit: Option<Duration>,
@@ -395,6 +410,8 @@ impl std::fmt::Debug for Options {
         f.field("limits", &self.limits)
             .field("password", &self.password.as_ref().map(|_| ".."))
             .field("links", &self.links)
+            .field("owners", &self.owners)
+            .field("xattrs", &self.xattrs)
             .field("links_outside", &self.links_outside)
             .field(
                 "on_links_outside",
@@ -455,6 +472,12 @@ pub(crate) struct Item {
     /// Unix permission bits, if the archive has them
     pub mode: Option<u32>,
     pub mtime: Option<SystemTime>,
+    /// Its owner and group, by number, if the archive kept them for a backup
+    /// (a tar archive's, when not both 0): [`Options::owners`].
+    pub owner: Option<(u32, u32)>,
+    /// Its extended attributes, if the archive kept them (a tar archive's
+    /// `SCHILY.xattr.` records): [`Options::xattrs`].
+    pub xattrs: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 impl Item {

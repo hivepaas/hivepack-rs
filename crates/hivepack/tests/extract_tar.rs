@@ -1108,3 +1108,142 @@ fn portable() -> hivepack::extract::Options {
     options.name_rules = hivepack::extract::NameRules::Portable;
     options
 }
+
+/// The extended attribute `name` of the file at `path`, if it has one.
+#[cfg(target_os = "linux")]
+fn xattr_of(path: &Path, name: &str) -> Option<Vec<u8>> {
+    let mut value = vec![0u8; 256];
+    let n = rustix::fs::lgetxattr(path, name, &mut value[..]).ok()?;
+    value.truncate(n);
+    Some(value)
+}
+
+/// A tar archive kept for a backup: a folder and a file, each with an owner and
+/// group, and extended attributes, `security.capability` among the file's.
+#[cfg(target_os = "linux")]
+fn kept_for_a_backup(uid: u32, gid: u32) -> Vec<u8> {
+    use hivepack::tar::{Header, Records, TYPE_DIR, TYPE_REG, Writer};
+    use std::io::Write;
+    let records = |pairs: &[(&str, &[u8])]| -> Records {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.as_bytes().to_vec(), v.to_vec()))
+            .collect()
+    };
+    let mut tw = Writer::new(Vec::new());
+    tw.write_header(&Header {
+        typeflag: TYPE_DIR,
+        name: b"d/".to_vec(),
+        mode: 0o755,
+        uid: i64::from(uid),
+        gid: i64::from(gid),
+        uname: b"someone".to_vec(),
+        xattrs: records(&[("user.folder", b"kept")]),
+        ..Header::default()
+    })
+    .unwrap();
+    tw.write_header(&Header {
+        typeflag: TYPE_REG,
+        name: b"d/f".to_vec(),
+        mode: 0o644,
+        size: 5,
+        uid: i64::from(uid),
+        gid: i64::from(gid),
+        xattrs: records(&[
+            ("user.file", b"b\x00inary"),
+            ("security.capability", b"\x01\x00\x00\x02"),
+        ]),
+        ..Header::default()
+    })
+    .unwrap();
+    tw.write_all(b"hello").unwrap();
+    tw.close().unwrap();
+    tw.into_inner()
+}
+
+/// Owners and extended attributes are restored when asked, never
+/// `security.capability`; otherwise what is extracted is the user's, bare. A
+/// group the user is in is given; the owner, the user's own.
+#[cfg(target_os = "linux")]
+#[test]
+fn owners_and_attributes_are_restored_when_asked() {
+    use std::os::unix::fs::MetadataExt;
+    let s = Scratch::new();
+    let probe = s.path().join("probe");
+    std::fs::write(&probe, "").unwrap();
+    if rustix::fs::setxattr(&probe, "user.probe", b"x", rustix::fs::XattrFlags::empty()).is_err() {
+        eprintln!("skipping: this file system takes no extended attributes");
+        return;
+    }
+    let mine = std::fs::metadata(&probe).unwrap();
+    // A group of the user's other than the one files get, if there is one.
+    let other_gid = rustix::process::getgroups()
+        .unwrap_or_default()
+        .into_iter()
+        .map(rustix::process::Gid::as_raw)
+        .find(|&g| g != mine.gid())
+        .unwrap_or(mine.gid());
+    let archive = kept_for_a_backup(mine.uid(), other_gid);
+
+    let bare = s.path().join("bare");
+    extract(&archive, &bare, &options(|_| {})).unwrap();
+    assert_eq!(xattr_of(&bare.join("d/f"), "user.file"), None);
+    assert_eq!(xattr_of(&bare.join("d"), "user.folder"), None);
+    assert_eq!(
+        std::fs::metadata(bare.join("d/f")).unwrap().gid(),
+        mine.gid()
+    );
+
+    let kept = s.path().join("kept");
+    let restoring = options(|o| {
+        o.owners = true;
+        o.xattrs = true;
+    });
+    extract(&archive, &kept, &restoring).unwrap();
+    let f = kept.join("d/f");
+    assert_eq!(std::fs::read(&f).unwrap(), b"hello");
+    assert_eq!(
+        xattr_of(&f, "user.file").as_deref(),
+        Some(&b"b\x00inary"[..])
+    );
+    assert_eq!(xattr_of(&f, "security.capability"), None);
+    assert_eq!(
+        xattr_of(&kept.join("d"), "user.folder").as_deref(),
+        Some(&b"kept"[..])
+    );
+    let meta = std::fs::metadata(&f).unwrap();
+    assert_eq!((meta.uid(), meta.gid()), (mine.uid(), other_gid));
+    assert_eq!(std::fs::metadata(kept.join("d")).unwrap().gid(), other_gid);
+    // The time and permissions after them, as the archive has them.
+    assert_eq!(meta.mode() & 0o777, 0o644);
+
+    // The same with files written in threads.
+    let threaded = s.path().join("threaded");
+    let in_threads = options(|o| {
+        o.owners = true;
+        o.xattrs = true;
+        o.threads = hivepack::Threads::of(4);
+    });
+    extract(&archive, &threaded, &in_threads).unwrap();
+    let f = threaded.join("d/f");
+    assert_eq!(
+        xattr_of(&f, "user.file").as_deref(),
+        Some(&b"b\x00inary"[..])
+    );
+    assert_eq!(std::fs::metadata(&f).unwrap().gid(), other_gid);
+
+    // An owner the user may not give away is left as it is.
+    let refused = s.path().join("refused");
+    extract(
+        &kept_for_a_backup(mine.uid() + 1, mine.gid()),
+        &refused,
+        &restoring,
+    )
+    .unwrap();
+    if !rustix::process::geteuid().is_root() {
+        assert_eq!(
+            std::fs::metadata(refused.join("d/f")).unwrap().uid(),
+            mine.uid()
+        );
+    }
+}

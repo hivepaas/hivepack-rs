@@ -193,6 +193,12 @@ fn read_headers<R: Read>(r: R, run: &Run<'_>, options: &Options) -> Result<First
             data: None,
             mode: Some((h.mode & 0o7777) as u32),
             mtime: system_time(h.mod_time),
+            owner: owner_of(&h),
+            xattrs: h
+                .xattrs
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
         });
         entries.push(Entry {
             seen,
@@ -832,4 +838,11 @@ pub(crate) fn copy_of<T: Target>(
         run,
         options,
     )
+}
+
+/// The owner and group a tar entry keeps, by number, if it keeps one: both 0,
+/// as most archives to share have them, is none.
+fn owner_of(h: &crate::tar::Header) -> Option<(u32, u32)> {
+    let (uid, gid) = (u32::try_from(h.uid).ok()?, u32::try_from(h.gid).ok()?);
+    (uid != 0 || gid != 0 || !h.uname.is_empty() || !h.gname.is_empty()).then_some((uid, gid))
 }

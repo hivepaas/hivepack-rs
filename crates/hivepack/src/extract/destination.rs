@@ -174,6 +174,64 @@ impl<'a> Destination<'a> {
     }
 }
 
+/// Whether `options` asks something restored that `item` keeps.
+fn wants_kept(item: &Item, options: &Options) -> bool {
+    (options.owners && item.owner.is_some()) || (options.xattrs && !item.xattrs.is_empty())
+}
+
+/// Restores on `handle`, a file or folder open, what `item` keeps and `options`
+/// asks: its extended attributes, then its owner, as GNU tar does. What the file
+/// system or the user's rights do not take is left as it is.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn restore_kept(
+    handle: &impl std::os::fd::AsFd,
+    item: &Item,
+    options: &Options,
+) -> Result<(), ErrorKind> {
+    use rustix::io::Errno;
+    use std::os::unix::ffi::OsStrExt;
+    // Not taken: the file system has none, the user may not, or it is not one
+    // the system knows (a Linux name on macOS, an ACL of another system).
+    let left = |e: Errno| {
+        matches!(
+            e,
+            Errno::NOTSUP | Errno::PERM | Errno::ACCESS | Errno::INVAL | Errno::NOSPC
+        )
+    };
+    if options.xattrs {
+        for (name, value) in &item.xattrs {
+            // Rights for a program, as a setuid bit gives, which are never
+            // restored.
+            if name.as_slice() == b"security.capability" || name.contains(&0) {
+                continue;
+            }
+            let name = std::ffi::OsStr::from_bytes(name);
+            match rustix::fs::fsetxattr(handle, name, value, rustix::fs::XattrFlags::empty()) {
+                Ok(()) => {}
+                Err(e) if left(e) => {}
+                Err(e) => return Err(ErrorKind::Io(e.into())),
+            }
+        }
+    }
+    if let (true, Some((uid, gid))) = (options.owners, item.owner) {
+        let (uid, gid) = (
+            rustix::fs::Uid::from_raw(uid),
+            rustix::fs::Gid::from_raw(gid),
+        );
+        match rustix::fs::fchown(handle, Some(uid), Some(gid)) {
+            Ok(()) => {}
+            Err(e) if left(e) => {}
+            Err(e) => return Err(ErrorKind::Io(e.into())),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn restore_kept<H>(_: &H, _: &Item, _: &Options) -> Result<(), ErrorKind> {
+    Ok(())
+}
+
 /// The error of `component` in `dir`, which did not open as a directory with
 /// `e`: a link, or a file, where a directory was to be.
 fn not_a_directory(dir: &Dir, component: &str, e: io::Error) -> ErrorKind {
@@ -208,6 +266,17 @@ pub(crate) trait Target: Sized {
         size: Option<u64>,
         options: &Options,
     ) -> Result<Self::File<'_>, ErrorKind>;
+
+    /// The directory at `components`, made: what [`Options::owners`] and
+    /// [`Options::xattrs`] restore of `item`. Nothing, but in a folder.
+    fn restore_directory(
+        &self,
+        _components: &[String],
+        _item: &Item,
+        _options: &Options,
+    ) -> Result<(), ErrorKind> {
+        Ok(())
+    }
 
     /// The file, its data written: its mark of origin, time and permissions.
     fn finish_file(
@@ -331,6 +400,26 @@ impl Target for Destination<'_> {
         Destination::within(self, components)
     }
 
+    fn restore_directory(
+        &self,
+        components: &[String],
+        item: &Item,
+        options: &Options,
+    ) -> Result<(), ErrorKind> {
+        if !wants_kept(item, options) {
+            return Ok(());
+        }
+        // Opened from its parent, to read and not through a link: a handle of
+        // `directory`'s may be one for paths alone (`O_PATH` on Linux), which
+        // takes no attributes.
+        let (last, parents) = split(components)?;
+        let parent = Destination::directory(self, parents)?;
+        let mut how = OpenOptions::new();
+        how.read(true).follow(FollowSymlinks::No);
+        let dir = parent.open_with(last, &how).map_err(ErrorKind::Io)?;
+        restore_kept(&dir, item, options)
+    }
+
     fn create_file(
         &self,
         _: &Item,
@@ -349,6 +438,9 @@ impl Target for Destination<'_> {
         item: &Item,
         options: &Options,
     ) -> Result<(), ErrorKind> {
+        // What the archive kept for a backup before the mark, which its
+        // attributes never stand for.
+        restore_kept(&file, item, options)?;
         // The mark first: writing a stream can change the file's time.
         if let Some(origin) = self.origin {
             origin.write_file(&file).map_err(ErrorKind::Origin)?;

@@ -225,6 +225,8 @@ fn read_headers<R: Read + Send>(
             data: None,
             mode: Some(h.mode & 0o7777),
             mtime: system_time(h.mtime),
+            owner: None,
+            xattrs: Vec::new(),
         });
         entry.item = Some(first.items.len() - 1);
         first.entries.push(entry);

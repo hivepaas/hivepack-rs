@@ -183,6 +183,8 @@ fn walk<R: Read + Seek>(udf: &mut Udf<R>, run: &Run<'_>, options: &Options) -> R
                 data: None,
                 mode: Some(stat.mode & 0o7777),
                 mtime: system_time(stat.mtime),
+                owner: None,
+                xattrs: Vec::new(),
             });
             entry.item = Some(items.len() - 1);
             if kind == Kind::Dir {
