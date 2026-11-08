@@ -554,6 +554,8 @@ fn extract_once<R: Read, F: FnMut() -> io::Result<R>>(
     let staging = destination.staging(path).map_err(Error::global)?;
     let result = once(&mut open, &destination, &staging, &run, options);
     destination.remove_staging(staging);
+    // Its handle closed first: Windows removes no folder that is open.
+    drop(destination);
     if result.is_err() && made {
         let _ = std::fs::remove_dir(path);
     }
