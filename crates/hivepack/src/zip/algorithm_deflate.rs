@@ -1,12 +1,18 @@
 //! Deflate through hivepack::deflate, whose inflate and deflate give zlib's
 //! results and output: port of `zip_algorithm_deflate.c`.
 //!
+//! Differs from libzip, when asked (`Archive::set_deflate_in_blocks`): new
+//! data is deflated in blocks, as pigz cuts them, each compressed in a
+//! thread ([`DeflateMt`], raw), one deflate stream that any reader reads.
+//!
 //! Differs from libzip, which has no Deflate64: the same algorithm decodes
 //! Deflate64 (method 9) with `Inflate9`, which follows zlib's
 //! `contrib/infback9`, and reports its errors as zlib's (`ZIP_ER_ZLIB`).
 
+use crate::Threads;
 use crate::deflate::{
-    Deflate, ErrorCode as ZErrorCode, Flush, InBuffer, Inflate, Inflate9, OutBuffer, Status,
+    Deflate, DeflateMt, ErrorCode as ZErrorCode, Flush, InBuffer, Inflate, Inflate9, MtOptions,
+    OutBuffer, Status,
 };
 
 use crate::zip::error::{Error, ErrorCode};
@@ -30,22 +36,32 @@ pub(crate) fn maximum_compressed_size(uncompressed_size: u64) -> u64 {
     uncompressed_size.saturating_add(uncompressed_size.div_ceil(16384) * 5 + 6)
 }
 
+/// What deflates: zlib's one stream, or blocks in threads.
+enum Deflater {
+    One(Deflate),
+    Blocks(Box<DeflateMt>),
+}
+
 /// `struct ctx`, for compressing: the level, the stream, and the input it
-/// holds, a range of the compression source's buffer.
+/// holds, a range of the compression source's buffer. Not in libzip:
+/// `blocks`, the threads it deflates in blocks in, if it does.
 pub(crate) struct DeflateCompress {
     level: i32,
     mem_level: i32,
+    blocks: Option<Threads>,
     end_of_input: bool,
-    zstr: Option<Deflate>,
+    zstr: Option<Deflater>,
     next_in: usize,
     avail_in: usize,
 }
 
 impl DeflateCompress {
     /// `compress_allocate`: level 1 to 9 from `compression_flags`, else 9,
-    /// and torrentzip's `memLevel` for its flags.
-    pub(crate) fn new(compression_flags: u32) -> DeflateCompress {
+    /// and torrentzip's `memLevel` for its flags. With `blocks`, in blocks
+    /// in those threads, but for torrentzip, whose stream is zlib's.
+    pub(crate) fn new(compression_flags: u32, blocks: Option<Threads>) -> DeflateCompress {
         DeflateCompress {
+            blocks: blocks.filter(|_| compression_flags != TORRENTZIP_COMPRESSION_FLAGS),
             level: if (1..=9).contains(&compression_flags) {
                 compression_flags as i32
             } else {
@@ -78,8 +94,18 @@ impl DeflateCompress {
     pub(crate) fn start(&mut self) -> Result<(), Error> {
         self.next_in = 0;
         self.avail_in = 0;
-        // negative value to tell zlib not to write a header
-        match Deflate::new(self.level, -15, self.mem_level, 0) {
+        let made = match self.blocks {
+            Some(threads) => DeflateMt::new(&MtOptions {
+                level: self.level,
+                raw: true,
+                threads,
+                ..MtOptions::default()
+            })
+            .map(|blocks| Deflater::Blocks(Box::new(blocks))),
+            // negative value to tell zlib not to write a header
+            None => Deflate::new(self.level, -15, self.mem_level, 0).map(Deflater::One),
+        };
+        match made {
             Ok(zstr) => {
                 self.zstr = Some(zstr);
                 Ok(())
@@ -89,9 +115,12 @@ impl DeflateCompress {
     }
 
     /// `end`: `deflateEnd`, which fails if the stream was not finished.
+    /// Blocks end with nothing to fail.
     pub(crate) fn end(&mut self) -> Result<(), Error> {
-        match self.zstr.take().map(Deflate::end) {
-            Some(Err(e)) => Err(Error::new(ErrorCode::Zlib, e.code().number())),
+        match self.zstr.take() {
+            Some(Deflater::One(zstr)) => zstr
+                .end()
+                .map_err(|e| Error::new(ErrorCode::Zlib, e.code().number())),
             _ => Ok(()),
         }
     }
@@ -129,7 +158,21 @@ impl DeflateCompress {
         } else {
             Flush::NoFlush
         };
-        let ret = zstr.deflate(&mut output, &mut input, flush);
+        let ret = match zstr {
+            Deflater::One(zstr) => zstr.deflate(&mut output, &mut input, flush),
+            Deflater::Blocks(blocks) => {
+                // It returns once the input is read or the output full,
+                // where zlib says so with `Z_BUF_ERROR` on the next call.
+                let ret = blocks.deflate(&mut output, &mut input, flush);
+                let read = input.pos == input.src.len();
+                match ret {
+                    Ok(Status::Ok) if read && !self.end_of_input && output.pos < avail_out => {
+                        Err(crate::deflate::Error::new(ZErrorCode::Buf, None))
+                    }
+                    ret => ret,
+                }
+            }
+        };
         self.next_in += input.pos;
         self.avail_in -= input.pos;
         let length = output.pos;

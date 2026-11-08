@@ -55,6 +55,8 @@ pub struct Archive<R> {
     /// how many threads compress new data when the archive is written: not
     /// in libzip
     pub(crate) threads: Threads,
+    /// whether new data is deflated in blocks, as pigz does: not in libzip
+    pub(crate) deflate_blocks: bool,
 }
 
 /// What `_zip_read_eocd64` found.
@@ -181,6 +183,7 @@ impl<R: ReadAt> Archive<R> {
             default_password: None,
             random: None,
             threads: Threads::One,
+            deflate_blocks: false,
         };
         if flags.intersects(OpenFlags::RDONLY) {
             za.flags = za.flags | ArchiveFlags::RDONLY;

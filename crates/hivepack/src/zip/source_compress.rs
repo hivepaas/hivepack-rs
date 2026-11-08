@@ -2,6 +2,7 @@
 //! `zip_source_compress.c`, with deflate, bzip2, LZMA, XZ and Zstandard for algorithms,
 //! and PPMd and Deflate64 to decompress, which libzip does not read.
 
+use crate::Threads;
 use crate::zip::algorithm_bzip2::{self, Bzip2};
 use crate::zip::algorithm_deflate::{self, CompressionStatus, DeflateCompress, DeflateDecompress};
 use crate::zip::algorithm_ppmd::Ppmd;
@@ -160,10 +161,15 @@ pub(crate) fn get_compression_algorithm(method: u16) -> Option<DecompressAlgorit
 /// The compressing algorithm for `method` at `compression_flags`, if
 /// libzip has one: `_zip_get_compression_algorithm` for compressing, then
 /// its `compress_allocate`.
-fn get_compressing_algorithm(method: u16, compression_flags: u32) -> Option<CompressAlgorithm> {
+fn get_compressing_algorithm(
+    method: u16,
+    compression_flags: u32,
+    blocks: Option<Threads>,
+) -> Option<CompressAlgorithm> {
     match method {
         cm::DEFLATE => Some(CompressAlgorithm::Deflate(DeflateCompress::new(
             compression_flags,
+            blocks,
         ))),
         cm::BZIP2 => Some(CompressAlgorithm::Bzip2(Bzip2::compressor(
             compression_flags,
@@ -197,7 +203,7 @@ pub(crate) fn compression_method_supported(method: i32, compress: bool) -> bool 
     }
     let real_method = cm_actual(method);
     if compress {
-        get_compressing_algorithm(real_method, 0).is_some()
+        get_compressing_algorithm(real_method, 0, None).is_some()
     } else {
         get_compression_algorithm(real_method).is_some()
     }
@@ -415,9 +421,15 @@ pub(crate) struct Compress {
 impl Compress {
     /// Port of `compression_source_new` and `context_new` for compressing
     /// with `method` at `compression_flags`: fails with
-    /// `ZIP_ER_COMPNOTSUPP` if `method` has no algorithm.
-    pub(crate) fn new(method: i32, compression_flags: u32) -> Result<Compress> {
-        let Some(algorithm) = get_compressing_algorithm(cm_actual(method), compression_flags)
+    /// `ZIP_ER_COMPNOTSUPP` if `method` has no algorithm. Not in libzip:
+    /// with `blocks`, deflate is in blocks, in those threads.
+    pub(crate) fn new(
+        method: i32,
+        compression_flags: u32,
+        blocks: Option<Threads>,
+    ) -> Result<Compress> {
+        let Some(algorithm) =
+            get_compressing_algorithm(cm_actual(method), compression_flags, blocks)
         else {
             return Err(Error::new(ErrorCode::CompNotSupp, 0));
         };
