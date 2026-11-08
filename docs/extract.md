@@ -189,7 +189,7 @@ Each extractor has a twin that writes into a `Sink` in place of a folder: `extra
 
 A tar archive has no central directory: each header comes before its data, one after the other, often inside a compressor (`.tar.gz`, `.tar.zst`) or age (`.tar.zst.age`). To check every entry before anything is written, as for ZIP, `extract_tar` reads it twice, through a function that opens it again (and so decompresses or decrypts it again): first the headers, the data skipped, for every check of the plan; then the entries are written, each header compared with the first reading's, its type, name, link target and size, and an archive that is not the one checked stops (`ErrorKind::Changed`) at the first that differs, or where the readings end differently. Data cut short stops the first reading, before anything is written; a file whose data fails in the second is removed.
 
-Reading it once instead, into a private folder in the destination moved into place once every check has passed, is designed in [extract-once.md](extract-once.md).
+**Into a folder, the archive is read once** ([extract-once.md](extract-once.md)): each file's data is written as it comes into a private folder in the destination (`.hivepack-extracting-…`, mode 0700, hidden on Windows), named by its index; once the stream has ended, the entries are checked as above, what is in the destination already is looked at, and only then do they move into place, by hard link or rename. If anything fails before, the private folder goes, and nothing of the archive appears. A `.tar.gz` of 2 GB extracts in 4.5 s where reading it twice took 9.0 s. Into a sink, which has no folder to write into first, it is read twice as described above.
 
 What differs from ZIP:
 

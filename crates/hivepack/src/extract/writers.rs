@@ -48,9 +48,40 @@ struct Queue<'a> {
 
 /// A file to write, its data read whole, or a directory to make.
 struct Job<'a> {
-    item: &'a Item,
+    item: JobItem<'a>,
     /// The file's data; none for a directory.
     data: Option<Vec<u8>>,
+}
+
+/// The entry a job writes: one of the plan's, or one made as the archive is
+/// read, which the job keeps (a file written into the private folder of an
+/// archive read once).
+pub(crate) enum JobItem<'a> {
+    Borrowed(&'a Item),
+    Owned(Box<Item>),
+}
+
+impl std::ops::Deref for JobItem<'_> {
+    type Target = Item;
+
+    fn deref(&self) -> &Item {
+        match self {
+            JobItem::Borrowed(item) => item,
+            JobItem::Owned(item) => item,
+        }
+    }
+}
+
+impl<'a> From<&'a Item> for JobItem<'a> {
+    fn from(item: &'a Item) -> JobItem<'a> {
+        JobItem::Borrowed(item)
+    }
+}
+
+impl From<Item> for JobItem<'_> {
+    fn from(item: Item) -> Self {
+        JobItem::Owned(Box::new(item))
+    }
 }
 
 /// The threads writing files, and what the caller hands them.
@@ -219,7 +250,7 @@ impl<'a> Writers<'a> {
 
     /// Writes `job`'s file, as one thread writes it.
     fn write(&self, job: &Job<'_>) -> Result<(), Error> {
-        let (item, run) = (job.item, self.run);
+        let (item, run) = (&*job.item, self.run);
         let error = |kind| item.error(kind);
         run.check().map_err(error)?;
         match &job.data {
@@ -280,11 +311,11 @@ impl<'a> Writers<'a> {
     /// before it is, which make it.
     pub(crate) fn directory(&self, item: &'a Item) {
         self.room(0);
-        self.hand(item, None);
+        self.hand(item.into(), None);
     }
 
     /// Hands `item`'s file to a thread, its `data` read, in room taken.
-    fn hand(&self, item: &'a Item, data: Option<Vec<u8>>) {
+    fn hand(&self, item: JobItem<'a>, data: Option<Vec<u8>>) {
         let mut queue = lock(&self.queue);
         queue.busy += 1;
         queue.jobs.push_back(Job { item, data });
@@ -305,11 +336,12 @@ impl<'a> Writers<'a> {
     pub(crate) fn file<'r, R: Read>(
         &'r self,
         r: &'r mut R,
-        item: &'a Item,
+        item: impl Into<JobItem<'a>>,
         size: u64,
         remaining: u64,
         ends: bool,
     ) -> Result<Option<Replay<'r, 'a, R>>, Error> {
+        let item = item.into();
         let limits = &self.options.limits;
         let fits = size <= self.largest() && size <= limits.max_entry_size && size <= remaining;
         if !fits {

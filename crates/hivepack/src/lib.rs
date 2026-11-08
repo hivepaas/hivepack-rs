@@ -50,6 +50,8 @@ pub mod crypto;
 pub mod deflate;
 #[cfg(feature = "extract")]
 pub mod extract;
+#[cfg(feature = "extract")]
+mod hidden;
 #[cfg(feature = "iso")]
 pub mod iso;
 #[cfg(feature = "lz4")]

@@ -367,7 +367,9 @@ pub struct Options {
     /// A token that stops the extraction with [`ErrorKind::Cancelled`].
     pub cancel: Option<Cancel>,
     /// Told how far the extraction is: once the entries are checked, after
-    /// each piece of data written (at most 64 KiB), and after each entry.
+    /// each piece of data written (at most 64 KiB), and after each entry. A
+    /// tar archive read once into a folder writes its files' data before its
+    /// entries are checked: the totals are 0 until then.
     /// With [`Options::threads`], by the thread that wrote, one at a time.
     pub progress: Option<ProgressFn>,
     /// The archive's mark of origin ([`Origin::of`]), written on every file
@@ -898,7 +900,7 @@ fn clone_link_kind(kind: &ErrorKind) -> ErrorKind {
 }
 
 /// Whether `item` is one [`Options::select`] picks.
-fn picked(item: &Item, options: &Options) -> bool {
+pub(crate) fn picked(item: &Item, options: &Options) -> bool {
     match &options.select {
         Some(select) => item
             .name

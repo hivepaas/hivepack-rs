@@ -517,9 +517,10 @@ fn an_archive_that_changes_stops() {
     other[124 + 10] ^= 1;
     changed[at..at + 512].copy_from_slice(&header_with_sum(other));
     for threads in every_threads() {
+        // Into a folder it is read once: what the one reading reads is written.
         let scratch = Scratch::new();
         let mut reads = 0;
-        let error = extract_tar(
+        extract_tar(
             || {
                 reads += 1;
                 Ok(Cursor::new(if reads == 1 { &data } else { &changed }))
@@ -527,15 +528,28 @@ fn an_archive_that_changes_stops() {
             &scratch.out(),
             &with_threads(threads, |_| {}),
         )
+        .unwrap();
+        assert_eq!(reads, 1, "{threads:?}");
+        for (name, body) in files_of(&entries) {
+            assert_eq!(
+                &std::fs::read(scratch.out().join(name)).unwrap(),
+                body,
+                "{name}"
+            );
+        }
+        // Into a sink it is read twice, and the change stops it.
+        let mut reads = 0;
+        let mut sink = Nothing;
+        let error = extract_tar_to(
+            || {
+                reads += 1;
+                Ok(Cursor::new(if reads == 1 { &data } else { &changed }))
+            },
+            &mut sink,
+            &with_threads(threads, |_| {}),
+        )
         .unwrap_err();
         assert!(matches!(error.kind, ErrorKind::Changed), "{error}");
-        // What was written is whole.
-        for (name, body) in files_of(&entries) {
-            let at = scratch.out().join(name);
-            if at.is_file() {
-                assert_eq!(&std::fs::read(&at).unwrap(), body, "{name}");
-            }
-        }
     }
 }
 
@@ -710,4 +724,29 @@ fn a_sink_is_given_the_same() {
     extract_tar_to(open, &mut eight_threads, &with_threads(eight(), |_| {})).unwrap();
     assert_eq!(one.0, eight_threads.0);
     assert_eq!(eight_threads.1.len(), 1);
+}
+
+/// A sink that writes nothing.
+struct Nothing;
+
+impl hivepack::extract::Sink for Nothing {
+    fn directory(&mut self, _: &hivepack::extract::Entry<'_>) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn start_file(&mut self, _: &hivepack::extract::Entry<'_>) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn write(&mut self, _: &[u8]) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn finish_file(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn discard_file(&mut self) {}
+    fn symlink(&mut self, _: &hivepack::extract::Entry<'_>, _: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn hard_link(&mut self, _: &hivepack::extract::Entry<'_>, _: &[String]) -> std::io::Result<()> {
+        Ok(())
+    }
 }
