@@ -106,8 +106,8 @@ pub use name::{MAX_COMPONENT, Name, NameError, NameRules, check_name, check_name
 pub use origin::Origin;
 pub use plan::{
     Limits, LinkOutside, Links, NameDecoder, Names, OnDamaged, OnDamagedFn, OnLinksOutside,
-    OnLinksOutsideFn, OnRefused, OnUnnamable, OnUnnamableFn, Options, Owners, Packages,
-    Permissions, Renamed, Select,
+    OnLinksOutsideFn, OnRefused, OnUnnamable, OnUnnamableFn, OnWrittenFn, Options, Owners,
+    Packages, Permissions, Renamed, Select, Written, WrittenKind,
 };
 pub use progress::{Cancel, Progress, ProgressFn};
 #[cfg(feature = "rar")]

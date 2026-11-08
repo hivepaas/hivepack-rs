@@ -438,7 +438,7 @@ pub fn remove_stale(destination: &Path) -> io::Result<()> {
     if !std::fs::symlink_metadata(destination).is_ok_and(|m| m.is_dir()) {
         return Ok(());
     }
-    Destination::open(destination, None)?.remove_stale();
+    Destination::open(destination, None, None)?.remove_stale();
     Ok(())
 }
 

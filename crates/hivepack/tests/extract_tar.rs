@@ -665,6 +665,34 @@ fn into_a_folder_the_archive_is_read_once() {
     assert_eq!(summary.files, 2);
     // Nothing else is left: the private folder is gone.
     assert_eq!(listing(&s.out()), ["a.txt", "b.txt"]);
+
+    // Its files are told as they move into place, by their paths there,
+    // never as they are written into the private folder.
+    let s = Scratch::new();
+    std::fs::create_dir(s.out()).unwrap();
+    let told = Arc::new(Mutex::new(Vec::new()));
+    let into = Arc::clone(&told);
+    let mut options = portable();
+    options.on_written = Some(Arc::new(move |w: &hivepack::extract::Written<'_>| {
+        into.lock().unwrap().push((w.path.join("/"), w.kind));
+    }));
+    let data = tar(&[
+        E::Dir(b"d/"),
+        E::File(b"d/a.txt", b"one"),
+        E::File(b"b.txt", b"two"),
+    ]);
+    extract_tar(|| Ok(Cursor::new(data.clone())), &s.out(), &options).unwrap();
+    let mut told = told.lock().unwrap().clone();
+    told.sort_by(|a, b| a.0.cmp(&b.0));
+    use hivepack::extract::WrittenKind as K;
+    assert_eq!(
+        told,
+        [
+            ("b.txt".to_owned(), K::File),
+            ("d".to_owned(), K::Directory),
+            ("d/a.txt".to_owned(), K::File)
+        ]
+    );
 }
 
 /// Read twice into a sink, an archive that changes between the readings stops.

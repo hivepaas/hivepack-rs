@@ -131,6 +131,34 @@ pub enum OnDamaged {
 /// thread writing the entry, about one entry at a time.
 pub type OnDamagedFn = Arc<dyn Fn(&Error) -> OnDamaged + Send + Sync>;
 
+/// An entry written into the destination folder, as [`Options::on_written`]
+/// is told it.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct Written<'a> {
+    /// Where it is, under the destination, a component at a time: the entry's
+    /// name, or the one it was given ([`Renamed`]).
+    pub path: &'a [String],
+    pub kind: WrittenKind,
+}
+
+/// What an entry written is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum WrittenKind {
+    /// A file, its data written: also a hard link written as a copy, with
+    /// [`Links::AsFile`], and a damaged file kept ([`OnDamaged::Keep`]).
+    File,
+    Directory,
+    /// A symbolic link.
+    Link,
+    /// A hard link to a file written before it.
+    HardLink,
+}
+
+/// What [`Options::on_written`] calls.
+pub type OnWrittenFn = Arc<dyn Fn(&Written<'_>) + Send + Sync>;
+
 /// What to do with the entries whose names this system cannot take, asked once,
 /// of all of them, before anything is written ([`Options::on_unnamable`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -374,6 +402,15 @@ pub struct Options {
     /// place.
     /// With [`Options::threads`], by the thread that wrote, one at a time.
     pub progress: Option<ProgressFn>,
+    /// Told of each entry once it is written into the destination folder, by
+    /// its path there: a file once its data, time and mark are, a directory,
+    /// a link. Not told of an entry left out, or of a file whose data was
+    /// damaged and removed; a damaged file kept is told. With
+    /// [`Options::threads`], by the thread that wrote, possibly at once. A tar
+    /// archive read once into a folder tells its files as they move into
+    /// place. A [`Sink`](crate::extract::Sink) is told nothing of it: it is
+    /// given each entry itself. None by default.
+    pub on_written: Option<OnWrittenFn>,
     /// The archive's mark of origin ([`Origin::of`]), written on every file
     /// extracted, and on macOS every directory created; a mark not written
     /// stops the extraction. None by default: the archive's path is the
@@ -459,6 +496,7 @@ impl std::fmt::Debug for Options {
             .field("time_limit", &self.time_limit)
             .field("cancel", &self.cancel)
             .field("progress", &self.progress.as_ref().map(|_| ".."))
+            .field("on_written", &self.on_written.as_ref().map(|_| ".."))
             .field("origin", &self.origin)
             .field("select", &self.select.as_ref().map(|_| ".."))
             .field("threads", &self.threads)

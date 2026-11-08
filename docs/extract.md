@@ -94,6 +94,8 @@ The limits bound what an archive writes, not how long it takes: a disk that is s
 
 `Options::progress` is told the entries and bytes to write once the entries are checked, as the archive says them (the data is checked against them, so what is written does not pass them), then the entries and bytes written after each piece of data and each entry. It is called on the extracting thread (with [threads](#threads), on the one that wrote, one call at a time), and should hand on what it is told, not wait. Calling `Cancel::cancel` from it stops the extraction.
 
+`Options::on_written` is told each entry once it is written into the folder: a file once its data, time, permissions and mark are, a directory, a symbolic link, a hard link, each by its path under the destination (the name it was given, if it was renamed) and its `WrittenKind`. An entry left out is not told, nor a file whose data was damaged and removed; a damaged file kept is. With [threads](#threads), it is told by the thread that wrote, and may be told by several at once. A tar archive read once ([extract-once.md](extract-once.md)) tells its files as they move into place, never as they are written into its private folder, so that what it is told is what the folder holds. A program keeping a record of what it extracted, as packwing's audit log does, takes the names from it. A `Sink` is told nothing: it is given each entry itself.
+
 The research behind this plan found neither in any Rust ZIP crate, so the design is this crate's own: a token and a function, rather than an asynchronous interface, as the writing blocks anyway.
 
 ## Options
@@ -123,6 +125,7 @@ Each rule that is not about writing outside the destination can be relaxed, by n
 | `time_limit` | none | how long the extraction may take (see [Time, cancelling and progress](#time-cancelling-and-progress)) |
 | `cancel` | none | a `Cancel` token that stops it |
 | `progress` | none | a function told how far it is |
+| `on_written` | none | a function told each entry once it is written into the folder, by its path there and what it is (see [Time, cancelling and progress](#time-cancelling-and-progress)) |
 | `threads` | `Threads::One` | how many threads extraction may use: files written at once where the archive's entries are apart (ZIP, RAR that is not solid), RAR 5's Huffman blocks decoded ahead where its files are written one at a time, or by threads while the archive is read (tar, cpio), LZMA2 blocks decompressed at once in 7z (see [Threads](#threads)) |
 | `memory_limit` | none | the memory the threads may take where each holds what it decompresses with (RAR): the threads are lowered until they fit, one always allowed; for tar and cpio, the data handed to threads to write, 32 MiB at most (see [memory.md](memory.md#readers)) |
 | `memory_budget` | none | with the feature `memory`, a `memory::Budget` the threads' memory is held from once it is known, after the first reading, until the extraction is done |
