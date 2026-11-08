@@ -187,16 +187,20 @@ impl<'a> Destination<'a> {
             let Some(name) = name.to_str().filter(|n| n.starts_with(STAGING)) else {
                 continue;
             };
-            let Ok(dir) = self.root.open_dir_nofollow(name) else {
-                continue;
-            };
-            let mut options = OpenOptions::new();
-            options.write(true);
-            options.follow(FollowSymlinks::No);
-            let free = match dir.open_with(OWNER, &options) {
-                Ok(owner) => owner.into_std().try_lock().is_ok(),
-                // Made, and left before its `owner` was.
-                Err(e) => e.kind() == io::ErrorKind::NotFound,
+            let free = {
+                let Ok(dir) = self.root.open_dir_nofollow(name) else {
+                    continue;
+                };
+                let mut options = OpenOptions::new();
+                options.write(true);
+                options.follow(FollowSymlinks::No);
+                match dir.open_with(OWNER, &options) {
+                    Ok(owner) => owner.into_std().try_lock().is_ok(),
+                    // Made, and left before its `owner` was.
+                    Err(e) => e.kind() == io::ErrorKind::NotFound,
+                }
+                // The folder's handle and its owner's closed here, before it
+                // is removed: Windows removes nothing that is open.
             };
             if free {
                 let _ = self.root.remove_dir_all(name);
