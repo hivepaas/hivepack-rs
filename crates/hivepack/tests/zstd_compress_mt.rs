@@ -1719,3 +1719,45 @@ fn silesia_with_workers() {
     println!("{compared} frames compared");
     problems.check();
 }
+
+/// A context let go while its jobs compress, as a job stopped lets it go,
+/// ends soon: the jobs stop at their next chunk, where libzstd waits for
+/// them to be done, many seconds at the highest levels.
+#[test]
+fn let_go_while_compressing_ends_soon() {
+    // Words and noise, which level 19 takes its time over.
+    let mut rng = Rng(0x5701);
+    // More than two jobs of 32 MiB, so that two are handed over.
+    let mut input = Vec::with_capacity(70 << 20);
+    while input.len() < 70 << 20 {
+        let x = rng.next();
+        match x % 8 {
+            0 => input.extend((0..x % 200).map(|i| (x >> (i % 56)) as u8)),
+            n => input.extend_from_slice(
+                ["packwing ", "zstd ", "thread ", "job\n"][n as usize % 4].as_bytes(),
+            ),
+        }
+    }
+    let mut cctx = hivepack::zstd::CCtx::new();
+    cctx.set_parameter(hivepack::zstd::CParameter::CompressionLevel(19))
+        .unwrap();
+    cctx.set_parameter(hivepack::zstd::CParameter::NbWorkers(2))
+        .unwrap();
+    let mut out = vec![0; 1 << 20];
+    let mut output = hivepack::zstd::OutBuffer::new(&mut out);
+    let mut from = hivepack::zstd::InBuffer::new(&input);
+    while from.pos < input.len() {
+        output.pos = 0;
+        cctx.compress_stream2(
+            &mut output,
+            &mut from,
+            hivepack::zstd::EndDirective::Continue,
+        )
+        .unwrap();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let at = std::time::Instant::now();
+    drop(cctx);
+    let took = at.elapsed();
+    assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+}
