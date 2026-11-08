@@ -83,7 +83,11 @@ impl<R: Read> Input<R> {
                 self.end -= self.start;
                 self.start = 0;
             }
-            let want = (self.start + min).max(self.end + READ_SIZE);
+            // What is asked, but at most twice what is held so far: a size the
+            // image says, as a directory's, is not allocated before the input
+            // shows it has that much (fuzzing found 4 GiB for 57 KiB).
+            let grown = self.end + READ_SIZE.max(self.end);
+            let want = (self.start + min).min(grown).max(self.end + READ_SIZE);
             if self.buf.len() < want {
                 self.buf
                     .try_reserve(want - self.buf.len())
@@ -198,5 +202,24 @@ impl<R: Read> Input<R> {
             self.position = offset;
             Ok(offset)
         })())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::io::Cursor;
+
+    use super::*;
+
+    #[test]
+    fn what_is_asked_past_the_end_is_not_allocated() {
+        let mut input = Input::new(Cursor::new(vec![7u8; 1000]), None);
+        assert!(input.ahead(1 << 30).unwrap().is_none());
+        assert!(input.buf.capacity() < 1 << 20, "{}", input.buf.capacity());
+        // What is there is still given whole, however much is asked at once.
+        let mut input = Input::new(Cursor::new(vec![7u8; 3 << 20]), None);
+        assert_eq!(input.ahead(3 << 20).unwrap().unwrap().len(), 3 << 20);
     }
 }
