@@ -189,6 +189,8 @@ Each extractor has a twin that writes into a `Sink` in place of a folder: `extra
 
 A tar archive has no central directory: each header comes before its data, one after the other, often inside a compressor (`.tar.gz`, `.tar.zst`) or age (`.tar.zst.age`). To check every entry before anything is written, as for ZIP, `extract_tar` reads it twice, through a function that opens it again (and so decompresses or decrypts it again): first the headers, the data skipped, for every check of the plan; then the entries are written, each header compared with the first reading's, its type, name, link target and size, and an archive that is not the one checked stops (`ErrorKind::Changed`) at the first that differs, or where the readings end differently. Data cut short stops the first reading, before anything is written; a file whose data fails in the second is removed.
 
+Reading it once instead, into a private folder in the destination moved into place once every check has passed, is designed in [extract-once.md](extract-once.md).
+
 What differs from ZIP:
 
 - **`./`**: `tar -cf x.tar .` writes every name with a leading `./`, which is dropped; `./` itself, the archive's root, is not an entry. Every other `.` component is refused, as in ZIP.
