@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use hivepack::extract::{
-    ErrorKind, Limits, LinkOutside, Links, NameError, OnLinksOutside, OnRefused, Options, Owners,
-    Progress, Summary, extract_tar,
+    Entry, ErrorKind, Limits, LinkOutside, Links, NameError, OnLinksOutside, OnRefused, Options,
+    Owners, Progress, Sink, Summary, extract_tar, extract_tar_to, remove_stale,
 };
 
 /// The time the test entries have.
@@ -620,23 +620,18 @@ fn the_stream_is_read_past_the_archive_to_its_end() {
     assert!(matches!(e.kind, ErrorKind::Io(_)), "{e}");
     assert!(!s.out().exists());
 
-    // In the second reading too, after the first passed.
-    let calls = Cell::new(0);
+    // Into a folder the archive is read once: the file was written, into
+    // the private folder, before the check failed, and nothing is left of it.
     let s = Scratch::new();
+    std::fs::create_dir(s.out()).unwrap();
     let e = extract_tar(
-        || -> std::io::Result<Box<dyn std::io::Read>> {
-            calls.set(calls.get() + 1);
-            Ok(if calls.get() == 1 {
-                Box::new(Cursor::new(data.clone()))
-            } else {
-                Box::new(FailsAtTheEnd(Cursor::new(data.clone())))
-            })
-        },
+        || Ok(FailsAtTheEnd(Cursor::new(data.clone()))),
         &s.out(),
         &portable(),
     )
     .unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Io(_)), "{e}");
+    assert!(listing(&s.out()).is_empty(), "{:?}", listing(&s.out()));
 
     // What follows is limited by the limit on all that is written, or by
     // 1 MiB, the largest record tar pads to, if that is less.
@@ -652,6 +647,27 @@ fn the_stream_is_read_past_the_archive_to_its_end() {
     assert!(!s.out().exists());
 }
 
+#[test]
+fn into_a_folder_the_archive_is_read_once() {
+    let data = tar(&[E::File(b"a.txt", b"one"), E::File(b"b.txt", b"two")]);
+    let s = Scratch::new();
+    let calls = Cell::new(0);
+    let summary = extract_tar(
+        || {
+            calls.set(calls.get() + 1);
+            Ok(Cursor::new(data.clone()))
+        },
+        &s.out(),
+        &portable(),
+    )
+    .unwrap();
+    assert_eq!(calls.get(), 1);
+    assert_eq!(summary.files, 2);
+    // Nothing else is left: the private folder is gone.
+    assert_eq!(listing(&s.out()), ["a.txt", "b.txt"]);
+}
+
+/// Read twice into a sink, an archive that changes between the readings stops.
 #[test]
 fn an_archive_that_changes_between_readings_stops() {
     let first = tar(&[E::File(b"a.txt", b"one"), E::File(b"b.txt", b"two")]);
@@ -669,9 +685,9 @@ fn an_archive_that_changes_between_readings_stops() {
         tar(&[E::File(b"a.txt", b"one")]),
     ];
     for second in cases {
-        let s = Scratch::new();
         let calls = Cell::new(0);
-        let result = extract_tar(
+        let mut names = Names::default();
+        let result = extract_tar_to(
             || {
                 calls.set(calls.get() + 1);
                 Ok(Cursor::new(if calls.get() == 1 {
@@ -680,14 +696,14 @@ fn an_archive_that_changes_between_readings_stops() {
                     second.clone()
                 }))
             },
-            &s.out(),
+            &mut names,
             &portable(),
         );
         let e = result.unwrap_err();
         assert!(matches!(e.kind, ErrorKind::Changed), "{e}");
         assert_eq!(calls.get(), 2);
-        // Only what the first reading checked was written.
-        for name in listing(&s.out()) {
+        // Only what the first reading checked was given.
+        for name in &names.0 {
             assert!(["a.txt", "b.txt"].contains(&name.as_str()), "{name}");
         }
     }
@@ -1343,4 +1359,176 @@ fn owners_are_given_by_name_or_by_number() {
     let summary = extract(&moved, &bare, &options(|_| {})).unwrap();
     assert_eq!(owned(&bare), (mine.uid(), mine.gid()));
     assert_eq!(summary.owners_left, 0);
+}
+
+/// A sink that keeps the names of the files it is given, and writes nothing.
+#[derive(Default)]
+struct Names(Vec<String>);
+
+impl Sink for Names {
+    fn directory(&mut self, _: &Entry<'_>) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn start_file(&mut self, entry: &Entry<'_>) -> std::io::Result<()> {
+        self.0.push(entry.path.join("/"));
+        Ok(())
+    }
+
+    fn write(&mut self, _: &[u8]) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn finish_file(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn discard_file(&mut self) {}
+
+    fn symlink(&mut self, _: &Entry<'_>, _: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn hard_link(&mut self, _: &Entry<'_>, _: &[String]) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Read once into a private folder, a tar archive refused at its last entry
+/// leaves the destination as it was: what was there stays, nothing of the
+/// archive appears, and no private folder is left.
+#[test]
+fn refused_at_its_end_the_destination_is_as_it_was() {
+    let s = Scratch::new();
+    std::fs::create_dir(s.out()).unwrap();
+    std::fs::write(s.out().join("kept.txt"), "mine").unwrap();
+    let data = tar(&[
+        E::Dir(b"d/"),
+        E::File(b"d/a.txt", b"one"),
+        E::File(b"b.txt", b"two"),
+        // The same path again, refused once the archive is read.
+        E::File(b"B.TXT", b"three"),
+    ]);
+    let e = extract(&data, &s.out(), &portable()).unwrap_err();
+    assert!(matches!(e.kind, ErrorKind::Duplicate { .. }), "{e}");
+    assert_eq!(listing(&s.out()), ["kept.txt"]);
+    assert_eq!(
+        std::fs::read_to_string(s.out().join("kept.txt")).unwrap(),
+        "mine"
+    );
+    // A destination made for it is gone too.
+    let s = Scratch::new();
+    extract(&data, &s.out(), &portable()).unwrap_err();
+    assert!(!s.out().exists());
+}
+
+/// What is in the destination is found in the way before anything moves: a
+/// file there stops the extraction, and nothing of the archive appears; with
+/// `overwrite`, it is replaced, whole; a directory there is merged into.
+#[test]
+fn what_is_there_is_found_before_anything_moves() {
+    let data = tar(&[
+        E::Dir(b"d/"),
+        E::File(b"d/new.txt", b"new"),
+        E::File(b"a.txt", b"from the archive"),
+    ]);
+    let s = Scratch::new();
+    std::fs::create_dir_all(s.out().join("d")).unwrap();
+    std::fs::write(s.out().join("d/old.txt"), "old").unwrap();
+    std::fs::write(s.out().join("a.txt"), "mine").unwrap();
+    let e = extract(&data, &s.out(), &portable()).unwrap_err();
+    assert!(matches!(e.kind, ErrorKind::Exists), "{e}");
+    assert_eq!(listing(&s.out()), ["a.txt", "d/", "d/old.txt"]);
+    assert_eq!(
+        std::fs::read_to_string(s.out().join("a.txt")).unwrap(),
+        "mine"
+    );
+
+    extract(&data, &s.out(), &options(|o| o.overwrite = true)).unwrap();
+    assert_eq!(listing(&s.out()), ["a.txt", "d/", "d/new.txt", "d/old.txt"]);
+    assert_eq!(
+        std::fs::read_to_string(s.out().join("a.txt")).unwrap(),
+        "from the archive"
+    );
+}
+
+/// A private folder a process left, which no one holds, is removed by the next
+/// extraction into the same place; one whose `owner` is held is not.
+#[test]
+fn a_private_folder_left_behind_is_removed_next_time() {
+    let s = Scratch::new();
+    let left = s.out().join(".hivepack-extracting-dead");
+    std::fs::create_dir_all(left.join("data")).unwrap();
+    std::fs::write(left.join("owner"), "").unwrap();
+    std::fs::write(left.join("data/0"), "half a file").unwrap();
+    let held = s.out().join(".hivepack-extracting-alive");
+    std::fs::create_dir_all(&held).unwrap();
+    let owner = std::fs::File::create(held.join("owner")).unwrap();
+    owner.try_lock().unwrap();
+
+    let data = tar(&[E::File(b"a.txt", b"one")]);
+    extract(&data, &s.out(), &portable()).unwrap();
+    assert!(!left.exists(), "left behind");
+    assert!(held.exists(), "in use");
+    drop(owner);
+    extract(&tar(&[E::File(b"b.txt", b"two")]), &s.out(), &portable()).unwrap();
+    assert_eq!(listing(&s.out()), ["a.txt", "b.txt"]);
+}
+
+/// `remove_stale` removes a private folder left behind without extracting:
+/// what a program calls when it starts, for the places it extracted into.
+#[test]
+fn remove_stale_removes_what_no_one_holds() {
+    let s = Scratch::new();
+    std::fs::create_dir(s.out()).unwrap();
+    let left = s.out().join(".hivepack-extracting-dead");
+    std::fs::create_dir_all(left.join("data")).unwrap();
+    std::fs::write(left.join("owner"), "").unwrap();
+    let held = s.out().join(".hivepack-extracting-alive");
+    std::fs::create_dir_all(&held).unwrap();
+    let owner = std::fs::File::create(held.join("owner")).unwrap();
+    owner.try_lock().unwrap();
+    std::fs::write(s.out().join("mine.txt"), "mine").unwrap();
+    remove_stale(&s.out()).unwrap();
+    assert!(!left.exists());
+    assert!(held.exists());
+    assert!(s.out().join("mine.txt").exists());
+    // Nothing there, nothing done.
+    remove_stale(&s.path().join("not-there")).unwrap();
+    assert!(!s.path().join("not-there").exists());
+}
+
+/// What is told never passes its totals, even where a file written into the
+/// private folder is then left out (the same path again, skipped): it is
+/// counted as each entry moves into place.
+#[test]
+fn progress_never_passes_its_totals_when_a_file_is_left_out() {
+    let data = tar(&[
+        E::File(b"a.txt", b"kept"),
+        E::File(b"A.TXT", b"left out, and long enough to count"),
+        E::File(b"b.txt", b"kept too"),
+    ]);
+    let seen: Arc<Mutex<Vec<Progress>>> = Arc::default();
+    let record = Arc::clone(&seen);
+    let s = Scratch::new();
+    let summary = extract(
+        &data,
+        &s.out(),
+        &options(|o| {
+            o.on_refused = OnRefused::Skip;
+            o.progress = Some(Arc::new(move |p: &Progress| {
+                record.lock().unwrap().push(*p)
+            }));
+        }),
+    )
+    .unwrap();
+    assert_eq!(summary.files, 2);
+    let seen = seen.lock().unwrap();
+    assert!(
+        seen.iter()
+            .all(|p| p.bytes <= p.total_bytes && p.entries <= p.total_entries),
+        "{seen:?}"
+    );
+    let last = seen.last().unwrap();
+    assert_eq!((last.bytes, last.total_bytes), (12, 12));
 }

@@ -83,7 +83,7 @@ crypto = [
 
 deflate = []
 
-extract = ["zip", "tar", "iso", "cpio", "xar", "open", "udf", "sevenz", "dep:cap-std", "dep:cap-fs-ext", "dep:nix", "dep:rustix"]
+extract = ["zip", "tar", "iso", "cpio", "xar", "open", "udf", "sevenz", "dep:cap-std", "dep:cap-fs-ext", "dep:nix", "dep:rustix", "dep:windows-sys"]
 
 iso = ["deflate"]
 
@@ -150,10 +150,12 @@ nix = { workspace = true, optional = true }
 # The system's page counts, for `memory`.
 libc = { workspace = true, optional = true }
 
-# The system's free memory and job objects, for `memory`.
+# The system's free memory and job objects, for `memory`; the hidden
+# attribute of `extract`'s private folders.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, optional = true, features = [
   "Win32_Foundation",
+  "Win32_Storage_FileSystem",
   "Win32_System_JobObjects",
   "Win32_System_ProcessStatus",
   "Win32_System_SystemInformation",

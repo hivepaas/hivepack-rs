@@ -58,6 +58,11 @@ pub(crate) struct Run<'a> {
     deadline: Option<Instant>,
     /// Set when one of the threads writing at once failed: the others stop.
     halted: AtomicBool,
+    /// Nothing is counted: what is written is not yet what the extraction
+    /// writes (an archive read once, into its private folder), and its
+    /// totals are not known. [`Options::progress`] is told nothing but that
+    /// it goes on.
+    quiet: AtomicBool,
     progress: Mutex<Progress>,
     /// Held while [`Options::on_damaged`] is asked, so that it is asked of
     /// one entry at a time.
@@ -81,6 +86,7 @@ impl Run<'_> {
                 .time_limit
                 .and_then(|limit| Instant::now().checked_add(limit)),
             halted: AtomicBool::new(false),
+            quiet: AtomicBool::new(false),
             progress: Mutex::new(Progress::default()),
             asking: Mutex::new(()),
             damaged: Mutex::new(Vec::new()),
@@ -167,6 +173,13 @@ impl Run<'_> {
         std::mem::take(&mut *lock(&self.damaged))
     }
 
+    /// While `quiet`, nothing is counted, and what is told is all 0: what is
+    /// written goes into a private folder, to be counted as each entry moves
+    /// into place.
+    pub(crate) fn quiet(&self, quiet: bool) {
+        self.quiet.store(quiet, Ordering::Relaxed);
+    }
+
     /// The entries are checked: `entries` to write, which say they hold
     /// `bytes`.
     pub(crate) fn start(&self, entries: u64, bytes: u64) {
@@ -197,7 +210,9 @@ impl Run<'_> {
     /// time, so that what it is told never goes back.
     fn update(&self, change: impl FnOnce(&mut Progress)) {
         let mut progress = lock(&self.progress);
-        change(&mut progress);
+        if !self.quiet.load(Ordering::Relaxed) {
+            change(&mut progress);
+        }
         if let Some(f) = &self.options.progress {
             f(&progress);
         }

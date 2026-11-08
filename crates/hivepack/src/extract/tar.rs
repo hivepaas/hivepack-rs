@@ -1,13 +1,18 @@
 //! Extracting a tar archive that `hivepack::tar` reads.
 //!
 //! A tar archive has no index: its entries come one after the other, each
-//! header before its data. To check every entry before anything is
-//! written, as for ZIP, the archive is read twice: once for the headers,
-//! skipping the data, and once to write, each header compared with the
-//! first reading's. The caller gives a function that opens it again, which
-//! for a compressed or encrypted archive decompresses or decrypts it again.
-//! Each reading goes on past the archive's end to the end of the stream,
-//! so that what checks the stream there is made.
+//! header before its data. Every entry is checked before anything of the
+//! archive appears in the destination, as for ZIP. Into a folder, the
+//! archive is read once: each file's data is written into a private folder
+//! in the destination as it comes, named by its index, the entries are
+//! checked once the stream has ended, and they are moved into place (see the
+//! repository's `docs/extract-once.md`). Into a sink, which has no folder to
+//! write into first, it is read twice: once for the headers, skipping the
+//! data, and once to write, each header compared with the first reading's;
+//! the caller's function opens it again, which for a compressed or encrypted
+//! archive decompresses or decrypts it again. Each reading goes on past the
+//! archive's end to the end of the stream, so that what checks the stream
+//! there is made.
 
 use std::collections::HashMap;
 use std::io::{self, Read};
@@ -19,11 +24,12 @@ use crate::tar::{
     TYPE_X_GLOBAL_HEADER, Time,
 };
 
-use crate::extract::destination::{Counted, Target, TargetFile};
+use crate::extract::destination::{Counted, Destination, Staging, Target, TargetFile};
 use crate::extract::error::{Error, ErrorKind};
 use crate::extract::name::{Name, NameError};
+use crate::extract::plan::Settled;
 use crate::extract::plan::{Item, Kind, Links, OnDamaged, OnRefused, Options, Owner, check, fold};
-use crate::extract::plan::{LinkTo, link_to, named, settle, settle_links, skips_links};
+use crate::extract::plan::{LinkTo, link_to, named, picked, settle, settle_links, skips_links};
 use crate::extract::progress::Run;
 use crate::extract::sink::{Sink, SinkState};
 use crate::extract::writers::{Writers, with_writers, writer_threads};
@@ -114,7 +120,61 @@ fn system_time(t: Option<Time>) -> Option<SystemTime> {
     at.checked_add(Duration::from_nanos(u64::from(t.nanos)))
 }
 
-/// The first reading: every header, the data skipped.
+/// The item header `h` is, the `index`th of the archive: none for the
+/// archive's own metadata (global PAX headers, GNU volume labels) and for
+/// its root, `./`.
+fn item_of(h: &Header, index: u64, options: &Options) -> Option<Item> {
+    let name = match h.typeflag {
+        // The archive's own metadata, not entries to write.
+        TYPE_X_GLOBAL_HEADER | TYPE_GNU_VOLUME => None,
+        _ => named_of(&h.name, options),
+    };
+    let (text, name) = name?;
+    let named_dir = name.as_ref().is_ok_and(|name| name.is_dir);
+    let kind = match h.typeflag {
+        TYPE_DIR | TYPE_GNU_DUMPDIR => Kind::Dir,
+        TYPE_SYMLINK => Kind::Link,
+        TYPE_LINK => Kind::HardLink,
+        TYPE_CHAR | TYPE_BLOCK | TYPE_FIFO => Kind::Special,
+        _ if named_dir => Kind::Dir,
+        // Regular files, sparse files, and the types GNU and Python
+        // tar take for regular files.
+        _ => Kind::File,
+    };
+    let size = match kind {
+        Kind::File => u64::try_from(h.size).unwrap_or(0),
+        _ => 0,
+    };
+    Some(Item {
+        index,
+        raw_name: h.name.clone(),
+        text,
+        name,
+        kind,
+        size,
+        // tar does not compress: the ratio is a compressor's to check.
+        compressed: size,
+        data: None,
+        mode: Some((h.mode & 0o7777) as u32),
+        mtime: system_time(h.mod_time),
+        owner: owner_of(h),
+        xattrs: h
+            .xattrs
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    })
+}
+
+/// A link's target, as header `h` of `kind` has it: a symbolic link's as
+/// written, a hard link's as a name in the archive; none for the rest.
+fn target_of(h: &Header, kind: Kind) -> Vec<u8> {
+    match kind {
+        Kind::Link | Kind::HardLink => h.linkname.clone(),
+        _ => Vec::new(),
+    }
+}
+
 /// What the first reading found: the entries and the items to write, and
 /// whether the stream is cut short after them, which
 /// [`Options::on_damaged`](crate::extract::Options::on_damaged) may go on from.
@@ -149,62 +209,22 @@ fn read_headers<R: Read>(r: R, run: &Run<'_>, options: &Options) -> Result<First
             return Err(Error::global(ErrorKind::TooManyEntries));
         }
         let seen = Seen::of(&h);
-        let name = match h.typeflag {
-            // The archive's own metadata, not entries to write.
-            TYPE_X_GLOBAL_HEADER | TYPE_GNU_VOLUME => None,
-            _ => named_of(&h.name, options),
-        };
-        let Some((text, name)) = name else {
-            entries.push(Entry {
+        match item_of(&h, index, options) {
+            None => entries.push(Entry {
                 seen,
                 item: None,
                 target: Vec::new(),
-            });
-            continue;
-        };
-        let named_dir = name.as_ref().is_ok_and(|name| name.is_dir);
-        let kind = match h.typeflag {
-            TYPE_DIR | TYPE_GNU_DUMPDIR => Kind::Dir,
-            TYPE_SYMLINK => Kind::Link,
-            TYPE_LINK => Kind::HardLink,
-            TYPE_CHAR | TYPE_BLOCK | TYPE_FIFO => Kind::Special,
-            _ if named_dir => Kind::Dir,
-            // Regular files, sparse files, and the types GNU and Python
-            // tar take for regular files.
-            _ => Kind::File,
-        };
-        let size = match kind {
-            Kind::File => u64::try_from(h.size).unwrap_or(0),
-            _ => 0,
-        };
-        let target = match kind {
-            Kind::Link | Kind::HardLink => h.linkname.clone(),
-            _ => Vec::new(),
-        };
-        items.push(Item {
-            index,
-            raw_name: h.name.clone(),
-            text,
-            name,
-            kind,
-            size,
-            // tar does not compress: the ratio is a compressor's to check.
-            compressed: size,
-            data: None,
-            mode: Some((h.mode & 0o7777) as u32),
-            mtime: system_time(h.mod_time),
-            owner: owner_of(&h),
-            xattrs: h
-                .xattrs
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-        });
-        entries.push(Entry {
-            seen,
-            item: Some(items.len() - 1),
-            target,
-        });
+            }),
+            Some(item) => {
+                let target = target_of(&h, item.kind);
+                items.push(item);
+                entries.push(Entry {
+                    seen,
+                    item: Some(items.len() - 1),
+                    target,
+                });
+            }
+        }
     }
     read_rest(tr.into_inner(), run, options)?;
     Ok((entries, items, false))
@@ -357,18 +377,25 @@ pub(crate) fn plan_links<S>(
 /// Extracts the tar archive that `open` gives into `destination`, which is
 /// created if it is not there, with `options`.
 ///
-/// `open` is called twice, and must give the same archive each time: the
-/// first reading checks every entry before anything is written, as
-/// [`extract_zip`](crate::extract::extract_zip) does (names, the same path twice,
-/// links, the sizes against the limits), and the second writes them, each
-/// header compared with the first reading's ([`ErrorKind::Changed`] if one
-/// differs). For a compressed or encrypted archive, `open` decompresses or
-/// decrypts it again (`hivepack::open::Opener` does). Each reading goes on
-/// past the archive's end to the end of the stream, so that a compressor's
-/// check there, or age's last chunk, fails the first reading before
-/// anything is written ([`ErrorKind::Io`]); what follows the end is
-/// limited to [`Limits::max_total_size`](crate::extract::Limits::max_total_size),
-/// or 1 MiB if that is less.
+/// `open` is called once. The archive is read into a private folder made in
+/// the destination (`.hivepack-extracting-…`, hidden), each file's data
+/// written there as it comes; once the stream has ended, every entry is
+/// checked as [`extract_zip`](crate::extract::extract_zip) checks them (names, the
+/// same path twice, links, the sizes against the limits), what is in the
+/// destination already is looked at, and only then do the entries move into
+/// place, by hard link or rename. If anything fails before, the private
+/// folder is removed, and the destination too if this made it and it is
+/// empty: nothing of the archive appears. The stream is read past the
+/// archive's end to its end, so that a compressor's check there, or age's
+/// last chunk, fails it ([`ErrorKind::Io`]); what follows the end is limited
+/// to [`Limits::max_total_size`](crate::extract::Limits::max_total_size), or
+/// 1 MiB if that is less. The limit on all that is written counts every file
+/// written into the private folder, those the checks leave out too. A private
+/// folder a process left when it ended without removing it is removed before
+/// (its `owner` file is locked while it is used, and the system lets go of
+/// the lock however the process ends). With
+/// [`Options::overwrite`](crate::extract::Options::overwrite), a file there is
+/// replaced by a rename, whole.
 ///
 /// Besides ZIP's rules: a leading `./` is dropped from names, and `./`
 /// itself, the archive's root, is not an entry; a hard link is created
@@ -385,9 +412,7 @@ pub(crate) fn plan_links<S>(
 /// that, or sparse, is written on the caller's thread. A hard link waits for
 /// the files handed before it to be written, and symbolic links are created
 /// once every thread is done. What is written is the same, and so is the
-/// summary. The first error stops the other threads, which remove the files
-/// they were writing, and is the one returned; files after it in the archive
-/// may have been written.
+/// summary. The first error stops the other threads, and is the one returned.
 pub fn extract_tar<R: Read, F: FnMut() -> io::Result<R>>(
     open: F,
     destination: &Path,
@@ -399,11 +424,29 @@ pub fn extract_tar<R: Read, F: FnMut() -> io::Result<R>>(
             .map_err(|e| Error::global(ErrorKind::Origin(e)))?;
     }
     let options = &options.for_folder(destination);
-    extract_into(open, || open_destination(destination, options), options)
+    extract_once(open, destination, options)
+}
+
+/// Removes the private folders that extractions into `destination` left
+/// behind, their process having ended without removing them: those whose
+/// `owner` file can be locked ([`extract_tar`] reads a tar archive into one,
+/// and keeps its `owner` locked while it does). One being used is left.
+/// Nothing is done if `destination` is not a folder. [`extract_tar`] calls it
+/// on its destination first; a program that keeps where it extracted can call
+/// it when it starts, so that a folder left elsewhere goes too.
+pub fn remove_stale(destination: &Path) -> io::Result<()> {
+    if !std::fs::symlink_metadata(destination).is_ok_and(|m| m.is_dir()) {
+        return Ok(());
+    }
+    Destination::open(destination, None)?.remove_stale();
+    Ok(())
 }
 
 /// Extracts the tar archive that `open` gives into `sink`, with the checks and
-/// in the order of [`extract_tar`], reading it twice as it does: see [`Sink`].
+/// in the order of [`extract_tar`], but reading it twice, as a sink has no folder
+/// to write into first: the first reading checks every entry before any is
+/// given, and the second gives them, each header compared with the first
+/// reading's ([`ErrorKind::Changed`] if one differs): see [`Sink`].
 /// The sink is given one entry at a time, on the caller's thread, whatever
 /// [`Options::threads`] says.
 pub fn extract_tar_to<R: Read, F: FnMut() -> io::Result<R>>(
@@ -490,6 +533,403 @@ fn extract_into<R: Read, F: FnMut() -> io::Result<R>, T: Target>(
     summary.damaged = run.take_damaged();
     summary.owners_left = destination.owners_left();
     Ok(summary)
+}
+
+/// [`extract_tar`] into the folder at `path`, reading the archive once: each
+/// file's data is written into a private folder in the destination as it
+/// comes, named by its index, and the entries are checked once the stream has
+/// ended, then moved into place. If anything fails, the private folder goes,
+/// and the destination too if this made it and it is empty: nothing of the
+/// archive is left.
+fn extract_once<R: Read, F: FnMut() -> io::Result<R>>(
+    mut open: F,
+    path: &Path,
+    options: &Options,
+) -> Result<Summary, Error> {
+    let run = Run::new(options);
+    let made = std::fs::symlink_metadata(path).is_err();
+    let destination = open_destination(path, options)?;
+    // What a process that died left here.
+    destination.remove_stale();
+    let staging = destination.staging(path).map_err(Error::global)?;
+    let result = once(&mut open, &destination, &staging, &run, options);
+    destination.remove_staging(staging);
+    if result.is_err() && made {
+        let _ = std::fs::remove_dir(path);
+    }
+    result
+}
+
+/// The directory of a private folder that files' data is written to.
+const SPOOL: &str = "data";
+
+/// What the one reading wrote of a file into the private folder: its data
+/// whole, or damaged, with how much of it was kept, to be asked about with
+/// [`Options::on_damaged`](crate::extract::Options::on_damaged) when its turn
+/// comes to be moved into place.
+enum Spooled {
+    Whole(u64),
+    Damaged(ErrorKind, u64),
+}
+
+/// What the one reading found: the entries and items, as the first reading
+/// finds them; how the stream was cut short, if it was and that is gone on
+/// from; and what was written of each file, by index.
+struct ReadOnce {
+    entries: Vec<Entry<()>>,
+    items: Vec<Item>,
+    cut: Option<ErrorKind>,
+    spooled: HashMap<u64, Spooled>,
+}
+
+/// `item`, as its data is written into the private folder: named by its
+/// index, in [`SPOOL`]; its name kept as text, for what an error says.
+fn spool_item(item: &Item) -> Item {
+    Item {
+        index: item.index,
+        raw_name: item.raw_name.clone(),
+        text: item.text.clone(),
+        name: Ok(Name {
+            components: vec![SPOOL.to_owned(), item.index.to_string()],
+            is_dir: false,
+        }),
+        kind: Kind::File,
+        size: item.size,
+        compressed: item.compressed,
+        data: None,
+        mode: item.mode,
+        mtime: item.mtime,
+        owner: item.owner.clone(),
+        xattrs: item.xattrs.clone(),
+    }
+}
+
+/// The archive read once, into `staging`, then checked and moved into
+/// `destination`.
+fn once<R: Read, F: FnMut() -> io::Result<R>>(
+    open: &mut F,
+    destination: &Destination<'_>,
+    staging: &Staging<'_>,
+    run: &Run<'_>,
+    options: &Options,
+) -> Result<Summary, Error> {
+    let r = open().map_err(|e| Error::global(ErrorKind::Io(e)))?;
+    let spool = &staging.data;
+    // Counted as each entry moves into place, the totals known.
+    run.quiet(true);
+    let read = match writer_threads(options, u64::MAX) {
+        Some(writing) => with_writers(spool, run, options, &writing, |writers| {
+            read_once(r, spool, run, options, Some(writers))
+        }),
+        None => read_once(r, spool, run, options, None),
+    };
+    run.quiet(false);
+    let read = read?;
+    let ReadOnce {
+        entries,
+        mut items,
+        cut,
+        mut spooled,
+    } = read;
+
+    // The checks, as after a first reading.
+    let settled: Settled = settle(&mut items, options)?;
+    let (kept, mut skipped) = check(&items, &settled, options)?;
+    let plans = plan_links(&entries, &items, &kept, options, &mut skipped)?;
+    let kept_indexes: std::collections::HashSet<u64> = kept
+        .iter()
+        .filter(|item| {
+            !matches!(item.kind, Kind::Link | Kind::HardLink) || plans.contains_key(&item.index)
+        })
+        .map(|item| item.index)
+        .collect();
+    let created_later = |item: &Item| matches!(plans.get(&item.index), Some(LinkPlan::Symlink(..)));
+    run.start(
+        kept_indexes.len() as u64,
+        bytes_to_write(&entries, &items, &kept_indexes, &plans, options),
+    );
+    let placed = |entry: &Entry<()>| {
+        entry
+            .item
+            .map(|at| &items[at])
+            .filter(|item| kept_indexes.contains(&item.index))
+    };
+
+    // What is in the destination already, before anything moves.
+    for item in entries.iter().filter_map(placed) {
+        let Ok(name) = &item.name else {
+            continue;
+        };
+        let file = match (item.kind, plans.get(&item.index)) {
+            (Kind::File, _) | (_, Some(LinkPlan::SymlinkAsFile)) => true,
+            (Kind::HardLink, _) => destination.copies_hard_links(options),
+            _ => false,
+        };
+        destination
+            .in_the_way(
+                &name.components,
+                item.kind == Kind::Dir,
+                file && options.overwrite,
+            )
+            .map_err(|kind| item.error(kind))?;
+    }
+
+    // Moving into place, in the archive's order.
+    let data = spool.open_dir(&[SPOOL.to_owned()]).map_err(Error::global)?;
+    let mut summary = Summary {
+        skipped,
+        renamed: settled.renamed,
+        ..Summary::default()
+    };
+    for entry in &entries {
+        let Some(item) = placed(entry) else {
+            continue;
+        };
+        if created_later(item) {
+            continue;
+        }
+        let Ok(name) = &item.name else {
+            continue;
+        };
+        let error = |kind| item.error(kind);
+        let components = &name.components;
+        run.check().map_err(error)?;
+        if item.kind == Kind::Dir {
+            Target::directory(destination, item, components).map_err(error)?;
+            summary.directories += 1;
+            run.entry_done();
+            continue;
+        }
+        let remaining = options.limits.max_total_size.saturating_sub(summary.bytes);
+        let written = match plans.get(&item.index) {
+            Some(LinkPlan::Hard(target)) if !destination.copies_hard_links(options) => {
+                destination
+                    .hard_link(item, components, target)
+                    .map_err(error)?;
+                summary.files += 1;
+                run.entry_done();
+                continue;
+            }
+            Some(LinkPlan::Hard(target)) => {
+                copy_of(destination, target, item, remaining, run, options)?
+            }
+            Some(LinkPlan::SymlinkAsFile) => write_from(
+                &mut &entry.target[..],
+                item,
+                entry.target.len() as u64,
+                destination,
+                remaining,
+                false,
+                run,
+                options,
+            )?,
+            _ => {
+                let spooled_name = item.index.to_string();
+                match spooled.remove(&item.index) {
+                    Some(Spooled::Whole(bytes)) => {
+                        destination
+                            .place(&data, &spooled_name, components, options.overwrite)
+                            .map_err(error)?;
+                        summary.files += 1;
+                        summary.bytes += bytes;
+                        run.wrote(bytes);
+                    }
+                    Some(Spooled::Damaged(kind, kept)) => match run.decide(item, kind)? {
+                        (OnDamaged::Keep, damage) => {
+                            destination.damaged(&damage);
+                            destination
+                                .place(&data, &spooled_name, components, options.overwrite)
+                                .map_err(error)?;
+                            run.damaged(damage, Some(kept));
+                            summary.files += 1;
+                            summary.bytes += kept;
+                            run.wrote(kept);
+                        }
+                        (_, damage) => {
+                            destination.damaged(&damage);
+                            run.damaged(damage, None);
+                        }
+                    },
+                    // Not read: the checks keep no file they did not let be read.
+                    None => {
+                        return Err(error(ErrorKind::Io(io::Error::other(
+                            "a file kept that was not read",
+                        ))));
+                    }
+                }
+                run.entry_done();
+                continue;
+            }
+        };
+        if let Some(written) = written {
+            summary.files += 1;
+            summary.bytes += written;
+        }
+        run.entry_done();
+    }
+    if let Some(kind) = cut {
+        cut_short(&entries, kind, run)?;
+    }
+
+    for &item in kept.iter().filter(|item| created_later(item)) {
+        let error = |kind| item.error(kind);
+        let (Ok(name), Some(LinkPlan::Symlink(target, to_dir))) =
+            (&item.name, plans.get(&item.index))
+        else {
+            continue;
+        };
+        run.check().map_err(error)?;
+        destination
+            .symlink(item, &name.components, target, *to_dir)
+            .map_err(error)?;
+        summary.links += 1;
+        run.entry_done();
+    }
+
+    set_dir_times(destination, &kept, run)?;
+    summary.damaged = run.take_damaged();
+    summary.owners_left = destination.owners_left();
+    Ok(summary)
+}
+
+/// The one reading, of `r`: every header kept, as the first reading keeps
+/// them, and each file's data that may be kept written into `spool` as it
+/// comes, by `writers` where there are, or here. The stream is read to its
+/// end. A file's data that is damaged is kept, to be asked about when it is
+/// moved into place, as [`Options::on_damaged`](crate::extract::Options::on_damaged)
+/// is asked in the archive's order.
+fn read_once<'a, R: Read>(
+    r: R,
+    spool: &Destination<'_>,
+    run: &Run<'_>,
+    options: &Options,
+    writers: Option<&Writers<'a>>,
+) -> Result<ReadOnce, Error> {
+    let limits = &options.limits;
+    let mut tr = Reader::new(r);
+    let mut entries = Vec::new();
+    let mut items = Vec::new();
+    let mut spooled = HashMap::new();
+    // What the files written so far came to: the limit on them all counts
+    // every file written into the private folder.
+    let mut total: u64 = 0;
+    let mut cut = None;
+    loop {
+        let index = entries.len() as u64;
+        run.check().map_err(Error::global)?;
+        let h = match tr.next() {
+            Ok(Some(h)) => h,
+            Ok(None) => break,
+            Err(e) => {
+                let kind = ErrorKind::Tar(e);
+                if run.may_be_cut(&kind) {
+                    cut = Some(kind);
+                    break;
+                }
+                return Err(Error {
+                    index: Some(index),
+                    name: None,
+                    kind,
+                });
+            }
+        };
+        // Every entry counts, metadata too, so that an archive of them
+        // does not grow this list without end.
+        if index >= limits.max_entries {
+            return Err(Error::global(ErrorKind::TooManyEntries));
+        }
+        let Some(item) = item_of(&h, index, options) else {
+            entries.push(Entry {
+                seen: (),
+                item: None,
+                target: Vec::new(),
+            });
+            continue;
+        };
+        let target = target_of(&h, item.kind);
+        // Its data, if the checks may keep it: a file picked, whose name is
+        // one or may be renamed to one, within the limit on one entry.
+        let may_keep = item.kind == Kind::File
+            && picked(&item, options)
+            && item
+                .name
+                .as_ref()
+                .map_or_else(|e| e.is_unnamable(), |_| true)
+            && item.size <= limits.max_entry_size;
+        if may_keep {
+            let remaining = limits.max_total_size.saturating_sub(total);
+            let holes = tr.is_sparse();
+            let done = match writers.filter(|_| !holes) {
+                Some(writers) => {
+                    match writers.file(&mut tr, spool_item(&item), item.size, remaining, true)? {
+                        None => Spooled::Whole(item.size),
+                        Some(mut replay) => {
+                            spool_from(&mut replay, &item, spool, remaining, false, run, options)?
+                        }
+                    }
+                }
+                None => spool_from(&mut tr, &item, spool, remaining, holes, run, options)?,
+            };
+            total = total.saturating_add(match &done {
+                Spooled::Whole(bytes) | Spooled::Damaged(_, bytes) => *bytes,
+            });
+            spooled.insert(index, done);
+        }
+        items.push(item);
+        entries.push(Entry {
+            seen: (),
+            item: Some(items.len() - 1),
+            target,
+        });
+    }
+    if cut.is_none() {
+        read_rest(tr.into_inner(), run, options)?;
+    }
+    Ok(ReadOnce {
+        entries,
+        items,
+        cut,
+        spooled,
+    })
+}
+
+/// Writes `item`'s data, read from `r`, into `spool` under its index, with its
+/// time, permissions and what else a file is given: whole, or damaged where
+/// [`Options::on_damaged`](crate::extract::Options::on_damaged) may go on from
+/// it, what was read of it kept, to be asked about later.
+fn spool_from(
+    r: &mut impl Read,
+    item: &Item,
+    spool: &Destination<'_>,
+    remaining: u64,
+    holes: bool,
+    run: &Run<'_>,
+    options: &Options,
+) -> Result<Spooled, Error> {
+    let spooled = spool_item(item);
+    let components = &[SPOOL.to_owned(), item.index.to_string()];
+    let error = |kind| item.error(kind);
+    let file = spool
+        .create_file(&spooled, components, Some(item.size), options)
+        .map_err(error)?;
+    let mut file = Counted { file, len: 0 };
+    let done = match write_into(r, item.size, &mut file, remaining, holes, run, options) {
+        Ok(written) => Spooled::Whole(written),
+        Err(kind) if kind.is_damage() && options.on_damaged.is_some() => {
+            Spooled::Damaged(kind, file.len)
+        }
+        Err(kind) => {
+            drop(file);
+            spool.remove_file(components);
+            return Err(error(kind));
+        }
+    };
+    if let Err(kind) = spool.finish_file(file.file, &spooled, options) {
+        spool.remove_file(components);
+        return Err(error(kind));
+    }
+    run.entry_done();
+    Ok(done)
 }
 
 /// What the first reading found and the checks kept, for the second reading.

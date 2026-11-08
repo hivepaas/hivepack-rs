@@ -35,6 +35,22 @@ pub(crate) struct Destination<'a> {
     owning: Arc<Owning>,
 }
 
+/// What the private folders of archives read once are named, before a number
+/// of their own: hidden on Unix, and told apart from what an archive holds.
+pub(crate) const STAGING: &str = ".hivepack-extracting-";
+
+/// The file in a private folder that its extraction keeps locked.
+const OWNER: &str = "owner";
+
+/// A private folder an archive read once is written into
+/// ([`Destination::staging`]): the destination its files are written into,
+/// within it, and the lock that tells it is used.
+pub(crate) struct Staging<'a> {
+    pub(crate) data: Destination<'a>,
+    name: String,
+    _owner: std::fs::File,
+}
+
 /// What giving files their owners keeps as it goes: the names this system was
 /// asked for, and how many owners were left.
 #[derive(Default)]
@@ -57,6 +73,177 @@ impl<'a> Destination<'a> {
             origin,
             owning: Arc::default(),
         })
+    }
+
+    /// A private folder in this destination, for an archive read once: its
+    /// entries are written there as they come, then moved into place once
+    /// every check has passed. Named [`STAGING`] and a number of its own, made
+    /// by this process (mode 0700 on Unix), with a file `owner` in it that is
+    /// locked for as long as the folder is used, which the system lets go of
+    /// however the process ends: a folder whose `owner` can be locked is no
+    /// one's ([`Destination::remove_stale`]).
+    pub(crate) fn staging(&self, path: &Path) -> Result<Staging<'a>, ErrorKind> {
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        for n in 0u32..1000 {
+            let name = format!("{STAGING}{:x}-{nanos:x}-{n}", std::process::id());
+            #[cfg_attr(not(unix), allow(unused_mut))]
+            let mut builder = cap_std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use cap_std::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match self.root.create_dir_with(&name, &builder) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(ErrorKind::Io(e)),
+            }
+            // Hidden on Windows, where its dot does not hide it: if that
+            // fails, it is seen while it lasts, and nothing else changes.
+            crate::hidden::hide(&path.join(&name));
+            let made = (|| {
+                let dir = self.root.open_dir_nofollow(&name).map_err(ErrorKind::Io)?;
+                let mut options = OpenOptions::new();
+                options.write(true).create_new(true);
+                options.follow(FollowSymlinks::No);
+                let owner = dir
+                    .open_with(OWNER, &options)
+                    .map_err(ErrorKind::Io)?
+                    .into_std();
+                owner
+                    .try_lock()
+                    .map_err(|_| ErrorKind::Io(io::Error::from(io::ErrorKind::WouldBlock)))?;
+                Ok(Staging {
+                    data: Destination {
+                        root: dir,
+                        origin: self.origin,
+                        owning: Arc::clone(&self.owning),
+                    },
+                    name: name.clone(),
+                    _owner: owner,
+                })
+            })();
+            if made.is_err() {
+                let _ = self.root.remove_dir_all(&name);
+            }
+            return made;
+        }
+        Err(ErrorKind::Io(io::Error::from(io::ErrorKind::AlreadyExists)))
+    }
+
+    /// Removes the private folder `staging`, with all that is in it, by handle,
+    /// following no link.
+    pub(crate) fn remove_staging(&self, staging: Staging<'_>) {
+        let Staging { data, name, _owner } = staging;
+        drop(data);
+        // Closed first: Windows removes no file that is open. Another process
+        // may take it for left behind meanwhile, and remove it too.
+        drop(_owner);
+        let _ = self.root.remove_dir_all(&name);
+    }
+
+    /// Removes the private folders of extractions that are no more: those
+    /// whose `owner` can be locked, a process that wrote into them having
+    /// ended without removing them. One being used is left: its `owner` is
+    /// locked.
+    pub(crate) fn remove_stale(&self) {
+        let Ok(entries) = self.root.entries() else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str().filter(|n| n.starts_with(STAGING)) else {
+                continue;
+            };
+            let Ok(dir) = self.root.open_dir_nofollow(name) else {
+                continue;
+            };
+            let mut options = OpenOptions::new();
+            options.write(true);
+            options.follow(FollowSymlinks::No);
+            let free = match dir.open_with(OWNER, &options) {
+                Ok(owner) => owner.into_std().try_lock().is_ok(),
+                // Made, and left before its `owner` was.
+                Err(e) => e.kind() == io::ErrorKind::NotFound,
+            };
+            if free {
+                let _ = self.root.remove_dir_all(name);
+            }
+        }
+    }
+
+    /// Whether what is at `components` here is in the way of an entry put
+    /// there: a directory (`dir`) merges into one, and a file replaces a file
+    /// with `overwrite`; anything else in the way is refused, as writing it
+    /// would refuse it ([`ErrorKind::NotADirectory`] on the way or for a
+    /// directory, [`ErrorKind::Exists`] for the rest).
+    pub(crate) fn in_the_way(
+        &self,
+        components: &[String],
+        dir: bool,
+        overwrite: bool,
+    ) -> Result<(), ErrorKind> {
+        let Some((last, parents)) = components.split_last() else {
+            return Ok(());
+        };
+        let mut at = self.root.try_clone().map_err(ErrorKind::Io)?;
+        for component in parents {
+            match at.open_dir_nofollow(component) {
+                Ok(next) => at = next,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+                Err(e) => return Err(not_a_directory(&at, component, e)),
+            }
+        }
+        match at.symlink_metadata(last) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(ErrorKind::Io(e)),
+            Ok(there) if dir && there.is_dir() => Ok(()),
+            Ok(_) if dir => Err(ErrorKind::NotADirectory),
+            Ok(there) if overwrite && there.is_file() => Ok(()),
+            Ok(_) => Err(ErrorKind::Exists),
+        }
+    }
+
+    /// Moves the file `name` of `from` (a private folder's) to `components`
+    /// here: by a hard link, which never replaces what is there, then
+    /// removing it from `from`. With `overwrite`, a file there is replaced by
+    /// a rename. Where the file system has no hard links (FAT32, exFAT), the
+    /// file is renamed after one more look.
+    pub(crate) fn place(
+        &self,
+        from: &Dir,
+        name: &str,
+        components: &[String],
+        overwrite: bool,
+    ) -> Result<(), ErrorKind> {
+        let (last, parents) = split(components)?;
+        let dir = self.directory(parents)?;
+        let rename = || from.rename(name, &dir, last).map_err(ErrorKind::Io);
+        let there = |e: io::Error| match dir.symlink_metadata(last) {
+            Ok(metadata) if overwrite && metadata.is_file() => rename(),
+            Ok(_) => Err(ErrorKind::Exists),
+            Err(found) if found.kind() == io::ErrorKind::NotFound => Err(ErrorKind::Io(e)),
+            Err(found) => Err(ErrorKind::Io(found)),
+        };
+        match from.hard_link(name, &dir, last) {
+            Ok(()) => {
+                let _ = from.remove_file(name);
+                Ok(())
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => there(e),
+            // No hard links here, or none across: a rename, if nothing is there.
+            Err(e) => match dir.symlink_metadata(last) {
+                Err(found) if found.kind() == io::ErrorKind::NotFound => rename(),
+                _ => there(e),
+            },
+        }
+    }
+
+    /// The directory of the private folder's files, `components` within it.
+    pub(crate) fn open_dir(&self, components: &[String]) -> Result<Dir, ErrorKind> {
+        self.directory(components)
     }
 
     /// The directory at `components`, as a destination of its own, opened
