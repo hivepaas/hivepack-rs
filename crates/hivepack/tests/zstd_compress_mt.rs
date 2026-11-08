@@ -1759,5 +1759,16 @@ fn let_go_while_compressing_ends_soon() {
     let at = std::time::Instant::now();
     drop(cctx);
     let took = at.elapsed();
-    assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+    // 4 MiB at level 19, on this machine and in this build: a job stops
+    // at its next chunk of 512 KiB, after the window of the job before is
+    // loaded if it was loading, within about that; the rest of the two
+    // jobs, 32 MiB each, would take many times longer.
+    let at = std::time::Instant::now();
+    let mut one = hivepack::zstd::CCtx::new();
+    one.set_parameter(hivepack::zstd::CParameter::CompressionLevel(19))
+        .unwrap();
+    let mut out = vec![0; 5 << 20];
+    one.compress2(&mut out, &input[..4 << 20]).unwrap();
+    let four_mib = at.elapsed();
+    assert!(took < four_mib * 3, "{took:?}, 4 MiB in {four_mib:?}");
 }
