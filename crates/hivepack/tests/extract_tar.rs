@@ -740,12 +740,8 @@ fn progress_counts_links_written_as_files() {
     let last = seen.last().unwrap();
     assert_eq!((last.bytes, last.total_bytes), (23, 23));
     assert_eq!((last.entries, last.total_entries), (4, 4));
-    // The totals are known once the archive is read: none passes them
-    // after.
-    let known = seen.iter().position(|p| p.total_bytes > 0).unwrap();
     assert!(
-        seen[known..]
-            .iter()
+        seen.iter()
             .all(|p| p.bytes <= p.total_bytes && p.entries <= p.total_entries)
     );
 }
@@ -1500,4 +1496,39 @@ fn remove_stale_removes_what_no_one_holds() {
     // Nothing there, nothing done.
     remove_stale(&s.path().join("not-there")).unwrap();
     assert!(!s.path().join("not-there").exists());
+}
+
+/// What is told never passes its totals, even where a file written into the
+/// private folder is then left out (the same path again, skipped): it is
+/// counted as each entry moves into place.
+#[test]
+fn progress_never_passes_its_totals_when_a_file_is_left_out() {
+    let data = tar(&[
+        E::File(b"a.txt", b"kept"),
+        E::File(b"A.TXT", b"left out, and long enough to count"),
+        E::File(b"b.txt", b"kept too"),
+    ]);
+    let seen: Arc<Mutex<Vec<Progress>>> = Arc::default();
+    let record = Arc::clone(&seen);
+    let s = Scratch::new();
+    let summary = extract(
+        &data,
+        &s.out(),
+        &options(|o| {
+            o.on_refused = OnRefused::Skip;
+            o.progress = Some(Arc::new(move |p: &Progress| {
+                record.lock().unwrap().push(*p)
+            }));
+        }),
+    )
+    .unwrap();
+    assert_eq!(summary.files, 2);
+    let seen = seen.lock().unwrap();
+    assert!(
+        seen.iter()
+            .all(|p| p.bytes <= p.total_bytes && p.entries <= p.total_entries),
+        "{seen:?}"
+    );
+    let last = seen.last().unwrap();
+    assert_eq!((last.bytes, last.total_bytes), (12, 12));
 }

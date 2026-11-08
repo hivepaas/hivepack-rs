@@ -369,7 +369,9 @@ pub struct Options {
     /// Told how far the extraction is: once the entries are checked, after
     /// each piece of data written (at most 64 KiB), and after each entry. A
     /// tar archive read once into a folder writes its files' data before its
-    /// entries are checked: the totals are 0 until then.
+    /// entries are checked: while it does, what is told is all 0, to say it
+    /// goes on, and its entries and bytes are counted as they move into
+    /// place.
     /// With [`Options::threads`], by the thread that wrote, one at a time.
     pub progress: Option<ProgressFn>,
     /// The archive's mark of origin ([`Origin::of`]), written on every file

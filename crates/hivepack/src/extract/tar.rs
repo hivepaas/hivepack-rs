@@ -615,12 +615,16 @@ fn once<R: Read, F: FnMut() -> io::Result<R>>(
 ) -> Result<Summary, Error> {
     let r = open().map_err(|e| Error::global(ErrorKind::Io(e)))?;
     let spool = &staging.data;
+    // Counted as each entry moves into place, the totals known.
+    run.quiet(true);
     let read = match writer_threads(options, u64::MAX) {
         Some(writing) => with_writers(spool, run, options, &writing, |writers| {
             read_once(r, spool, run, options, Some(writers))
-        })?,
-        None => read_once(r, spool, run, options, None)?,
+        }),
+        None => read_once(r, spool, run, options, None),
     };
+    run.quiet(false);
+    let read = read?;
     let ReadOnce {
         entries,
         mut items,
@@ -720,7 +724,6 @@ fn once<R: Read, F: FnMut() -> io::Result<R>>(
                 options,
             )?,
             _ => {
-                // Counted as written and done when it was read.
                 let spooled_name = item.index.to_string();
                 match spooled.remove(&item.index) {
                     Some(Spooled::Whole(bytes)) => {
@@ -729,6 +732,7 @@ fn once<R: Read, F: FnMut() -> io::Result<R>>(
                             .map_err(error)?;
                         summary.files += 1;
                         summary.bytes += bytes;
+                        run.wrote(bytes);
                     }
                     Some(Spooled::Damaged(kind, kept)) => match run.decide(item, kind)? {
                         (OnDamaged::Keep, damage) => {
@@ -739,6 +743,7 @@ fn once<R: Read, F: FnMut() -> io::Result<R>>(
                             run.damaged(damage, Some(kept));
                             summary.files += 1;
                             summary.bytes += kept;
+                            run.wrote(kept);
                         }
                         (_, damage) => {
                             destination.damaged(&damage);
@@ -752,6 +757,7 @@ fn once<R: Read, F: FnMut() -> io::Result<R>>(
                         ))));
                     }
                 }
+                run.entry_done();
                 continue;
             }
         };

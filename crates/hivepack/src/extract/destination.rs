@@ -138,8 +138,10 @@ impl<'a> Destination<'a> {
     pub(crate) fn remove_staging(&self, staging: Staging<'_>) {
         let Staging { data, name, _owner } = staging;
         drop(data);
-        let _ = self.root.remove_dir_all(&name);
+        // Closed first: Windows removes no file that is open. Another process
+        // may take it for left behind meanwhile, and remove it too.
         drop(_owner);
+        let _ = self.root.remove_dir_all(&name);
     }
 
     /// Removes the private folders of extractions that are no more: those

@@ -91,7 +91,7 @@ A private folder is never mistaken for one in use: its `owner` is locked for as 
 
 ## Progress
 
-The totals are counted once the entries are checked, after the one reading: `Options::progress` is told 0 for them until then, while the files' data is written and counted. The caller, which knows the archive's size (packwing does, for a file), shows how far through it the reading is from the bytes it has read of it, and the files and bytes written without a total. Moving into place takes no time to speak of.
+The totals are counted once the entries are checked, after the one reading. While the files' data is written into the private folder, `Options::progress` is told all 0, to say it goes on: the data is counted as each entry moves into place, so that what is told never passes the totals, a file written into the private folder and then left out included. The caller, which knows the archive's size (packwing does, for a file), shows how far through it the reading is from the bytes it has read of it.
 
 ## What it costs, and what it saves
 
