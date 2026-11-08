@@ -1,0 +1,484 @@
+//! Deflate in threads, as pigz does it (`deflate::DeflateMt`): the same
+//! output whatever the threads and the buffers, pigz's byte for byte where
+//! pigz is installed, read back by the port's inflate and by `gzip`, with
+//! flushes that leave what was given readable.
+
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use std::io::Write;
+use std::process::{Command, Stdio};
+
+use hivepack::Threads;
+use hivepack::deflate::{
+    BLOCK_SIZE, DeflateMt, ErrorCode, Flush, InBuffer, Inflate, MtOptions, OutBuffer, Status,
+    Z_DEFAULT_COMPRESSION, Z_DEFAULT_STRATEGY, Z_FILTERED, Z_FIXED, Z_HUFFMAN_ONLY, Z_RLE, crc32,
+};
+
+/// A small generator, for inputs and the sizes of calls.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
+    }
+}
+
+/// `len` bytes that compress somewhat: words, runs and noise.
+fn input(len: usize, seed: u64) -> Vec<u8> {
+    let mut rng = Rng(seed | 1);
+    let words: [&[u8]; 6] = [
+        b"archive ",
+        b"thread ",
+        b"block ",
+        b"\n",
+        b"deflate ",
+        b"hive ",
+    ];
+    let mut data = Vec::with_capacity(len);
+    while data.len() < len {
+        match rng.below(10) {
+            0 => data.extend(std::iter::repeat_n(b'.', rng.below(300))),
+            1 => data.extend((0..rng.below(200)).map(|_| rng.next() as u8)),
+            _ => data.extend_from_slice(words[rng.below(words.len())]),
+        }
+    }
+    data.truncate(len);
+    data
+}
+
+fn threads() -> [Threads; 4] {
+    [Threads::One, Threads::of(2), Threads::of(8), Threads::Auto]
+}
+
+/// Room for `len` bytes compressed, header and trailer.
+fn room(len: usize) -> usize {
+    len + len / 100 + (64 << 10)
+}
+
+/// `data` compressed in one call with `Flush::Finish`, with room for all.
+fn compress(data: &[u8], options: &MtOptions) -> Vec<u8> {
+    let mut mt = DeflateMt::new(options).unwrap();
+    let mut out = vec![0; room(data.len())];
+    let mut output = OutBuffer::new(&mut out);
+    let mut input = InBuffer::new(data);
+    let status = mt.deflate(&mut output, &mut input, Flush::Finish).unwrap();
+    assert_eq!(status, Status::StreamEnd);
+    let n = output.pos;
+    assert_eq!(mt.total_in(), data.len() as u64);
+    assert_eq!(mt.total_out(), n as u64);
+    out.truncate(n);
+    out
+}
+
+/// `data` compressed a little at a time: input given in pieces of random
+/// sizes, output taken through a buffer of random sizes, some of 1 byte.
+/// Each call reads all its input, or fills its output.
+fn compress_in_bits(data: &[u8], options: &MtOptions, seed: u64) -> Vec<u8> {
+    let mut rng = Rng(seed | 1);
+    let mut mt = DeflateMt::new(options).unwrap();
+    let mut out = Vec::new();
+    let mut buf = vec![0; 1 << 16];
+    let mut at = 0;
+    loop {
+        let end = (at + rng.below(100_000)).min(data.len());
+        let finish = end == data.len();
+        let flush = if finish {
+            Flush::Finish
+        } else {
+            Flush::NoFlush
+        };
+        let mut input = InBuffer::new(&data[at..end]);
+        loop {
+            let room = if rng.below(4) == 0 {
+                1
+            } else {
+                1 + rng.below(buf.len())
+            };
+            let mut output = OutBuffer::new(&mut buf[..room]);
+            let status = mt.deflate(&mut output, &mut input, flush).unwrap();
+            let (made, full) = (output.pos, output.pos == room);
+            out.extend_from_slice(&buf[..made]);
+            if status == Status::StreamEnd {
+                assert_eq!(at + input.pos, data.len());
+                return out;
+            }
+            assert!(full || input.pos == input.src.len(), "returned early");
+            if !full && !finish {
+                break;
+            }
+        }
+        at = end;
+    }
+}
+
+/// What the port's inflate reads of `stream`: gzip, or raw deflate.
+fn inflate(stream: &[u8], raw: bool) -> Vec<u8> {
+    let mut inflate = Inflate::new(if raw { -15 } else { 31 }).unwrap();
+    let mut out = Vec::new();
+    let mut buf = vec![0; 1 << 16];
+    let mut input = InBuffer::new(stream);
+    loop {
+        let mut output = OutBuffer::new(&mut buf);
+        let status = inflate
+            .inflate(&mut output, &mut input, Flush::NoFlush)
+            .unwrap();
+        let made = output.pos;
+        out.extend_from_slice(&buf[..made]);
+        if status == Status::StreamEnd {
+            assert_eq!(input.pos, stream.len(), "bytes after the stream");
+            return out;
+        }
+        assert!(made > 0 || input.pos < stream.len(), "cut short");
+    }
+}
+
+#[test]
+fn the_output_is_the_same_whatever_the_threads_and_the_buffers() {
+    let sizes = [
+        0,
+        1,
+        1000,
+        (32 << 10) - 1,
+        BLOCK_SIZE - 1,
+        BLOCK_SIZE,
+        BLOCK_SIZE + 1,
+        3 * BLOCK_SIZE,
+        5 * BLOCK_SIZE + 12_345,
+    ];
+    for (i, &size) in sizes.iter().enumerate() {
+        let data = input(size, i as u64 + 1);
+        for (level, strategy, block_size) in [
+            (Z_DEFAULT_COMPRESSION, Z_DEFAULT_STRATEGY, 0),
+            (0, Z_DEFAULT_STRATEGY, 0),
+            (1, Z_DEFAULT_STRATEGY, 0),
+            (9, Z_DEFAULT_STRATEGY, 0),
+            (6, Z_FILTERED, 0),
+            (6, Z_HUFFMAN_ONLY, 0),
+            (6, Z_RLE, 0),
+            (6, Z_FIXED, 0),
+            (6, Z_DEFAULT_STRATEGY, 1000),
+            (6, Z_DEFAULT_STRATEGY, 50_000),
+        ] {
+            let mut want = None;
+            for threads in threads() {
+                let options = MtOptions {
+                    level,
+                    strategy,
+                    threads,
+                    block_size,
+                    ..MtOptions::default()
+                };
+                let what = format!("{size} bytes, {options:?}");
+                let whole = compress(&data, &options);
+                let bits = compress_in_bits(&data, &options, size as u64 + 7);
+                assert_eq!(whole, bits, "{what}: in bits");
+                assert_eq!(inflate(&whole, false), data, "{what}: read back");
+                match &want {
+                    None => want = Some(whole),
+                    Some(want) => assert_eq!(&whole, want, "{what}"),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_member_is_gzip_s() {
+    let data = input(3 * BLOCK_SIZE + 99, 5);
+    for (level, xfl) in [(1, 4), (2, 0), (6, 0), (9, 2)] {
+        let gz = compress(
+            &data,
+            &MtOptions {
+                level,
+                threads: Threads::of(4),
+                ..MtOptions::default()
+            },
+        );
+        assert_eq!(&gz[..8], [0x1f, 0x8b, 8, 0, 0, 0, 0, 0], "level {level}");
+        assert_eq!(gz[8], xfl, "level {level}");
+        let n = gz.len();
+        assert_eq!(gz[n - 8..n - 4], crc32(0, &data).to_le_bytes());
+        assert_eq!(gz[n - 4..], (data.len() as u32).to_le_bytes());
+        // Raw: the same stream, without the header and the trailer.
+        let raw = compress(
+            &data,
+            &MtOptions {
+                level,
+                raw: true,
+                threads: Threads::of(4),
+                ..MtOptions::default()
+            },
+        );
+        assert_eq!(raw, gz[10..n - 8], "level {level}");
+        assert_eq!(inflate(&raw, true), data);
+    }
+}
+
+#[test]
+fn an_empty_input_is_an_empty_block() {
+    let gz = compress(&[], &MtOptions::default());
+    assert_eq!(gz[10..], [3, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let raw = compress(
+        &[],
+        &MtOptions {
+            raw: true,
+            ..MtOptions::default()
+        },
+    );
+    assert_eq!(raw, [3, 0]);
+}
+
+/// `data` compressed with a flush after each of `cuts`; with what was
+/// written at each flush.
+fn compress_flushed(
+    data: &[u8],
+    cuts: &[usize],
+    flush: Flush,
+    options: &MtOptions,
+) -> (Vec<u8>, Vec<usize>) {
+    let mut mt = DeflateMt::new(options).unwrap();
+    let mut out = Vec::new();
+    let mut ends = Vec::new();
+    let mut buf = vec![0; 1000];
+    let mut at = 0;
+    for &cut in cuts.iter().chain([&data.len()]) {
+        let last = cut == data.len();
+        let mut input = InBuffer::new(&data[at..cut]);
+        loop {
+            let mut output = OutBuffer::new(&mut buf);
+            let status = mt
+                .deflate(
+                    &mut output,
+                    &mut input,
+                    if last { Flush::Finish } else { flush },
+                )
+                .unwrap();
+            let made = output.pos;
+            out.extend_from_slice(&buf[..made]);
+            if status == Status::StreamEnd || (!last && made < buf.len()) {
+                break;
+            }
+        }
+        assert_eq!(input.pos, cut - at);
+        ends.push(out.len());
+        at = cut;
+    }
+    (out, ends)
+}
+
+/// What inflate reads of `part`, which ends where a flush did.
+fn inflate_part(part: &[u8], raw: bool) -> Vec<u8> {
+    let mut inflate = Inflate::new(if raw { -15 } else { 31 }).unwrap();
+    let mut out = vec![0; 4 << 20];
+    let mut output = OutBuffer::new(&mut out);
+    let mut input = InBuffer::new(part);
+    let status = inflate
+        .inflate(&mut output, &mut input, Flush::SyncFlush)
+        .unwrap();
+    assert_eq!(status, Status::Ok);
+    assert_eq!(input.pos, part.len());
+    let n = output.pos;
+    out.truncate(n);
+    out
+}
+
+#[test]
+fn a_flush_leaves_what_was_given_readable() {
+    let data = input(4 * BLOCK_SIZE, 11);
+    let cuts = [
+        10,
+        5000,
+        5000,
+        BLOCK_SIZE + 7,
+        2 * BLOCK_SIZE,
+        3 * BLOCK_SIZE + 1,
+    ];
+    for flush in [Flush::SyncFlush, Flush::FullFlush] {
+        let mut want = None;
+        for threads in threads() {
+            let options = MtOptions {
+                threads,
+                ..MtOptions::default()
+            };
+            let (gz, ends) = compress_flushed(&data, &cuts, flush, &options);
+            assert_eq!(inflate(&gz, false), data, "{flush:?}");
+            for (&cut, &end) in cuts.iter().zip(&ends) {
+                assert_eq!(
+                    inflate_part(&gz[..end], false),
+                    data[..cut],
+                    "{flush:?} at {cut}"
+                );
+            }
+            // After a full flush, what follows needs nothing before it.
+            if flush == Flush::FullFlush {
+                for (&cut, &end) in cuts.iter().zip(&ends) {
+                    let rest = inflate(&gz[end..gz.len() - 8], true);
+                    assert_eq!(rest, data[cut..], "after {cut}");
+                }
+            }
+            match &want {
+                None => want = Some(gz),
+                Some(want) => assert_eq!(&gz, want, "{flush:?}, {threads:?}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn calls_are_checked() {
+    let mut mt = DeflateMt::new(&MtOptions::default()).unwrap();
+    let mut buf = vec![0; 1 << 16];
+    for flush in [Flush::PartialFlush, Flush::Block, Flush::Trees] {
+        let mut output = OutBuffer::new(&mut buf);
+        let e = mt
+            .deflate(&mut output, &mut InBuffer::new(b"abc"), flush)
+            .unwrap_err();
+        assert_eq!(e.code(), ErrorCode::Stream);
+    }
+    // Refused calls change nothing.
+    let mut input = InBuffer::new(b"hello");
+    let mut output = OutBuffer::new(&mut buf[..5]);
+    let status = mt.deflate(&mut output, &mut input, Flush::Finish).unwrap();
+    assert_eq!(status, Status::Ok);
+    let mut output = OutBuffer::new(&mut buf[5..]);
+    let e = mt
+        .deflate(&mut output, &mut input, Flush::NoFlush)
+        .unwrap_err();
+    assert_eq!((e.code(), output.pos), (ErrorCode::Stream, 0));
+    let mut output = OutBuffer::new(&mut buf[5..]);
+    let status = mt.deflate(&mut output, &mut input, Flush::Finish).unwrap();
+    assert_eq!(status, Status::StreamEnd);
+    let n = 5 + output.pos;
+    assert_eq!(inflate(&buf[..n], false), b"hello");
+    let mut output = OutBuffer::new(&mut buf);
+    let status = mt
+        .deflate(&mut output, &mut InBuffer::new(b""), Flush::Finish)
+        .unwrap();
+    assert_eq!((status, output.pos), (Status::StreamEnd, 0));
+
+    for options in [
+        MtOptions {
+            level: 10,
+            ..MtOptions::default()
+        },
+        MtOptions {
+            level: -2,
+            ..MtOptions::default()
+        },
+        MtOptions {
+            strategy: Z_FIXED + 1,
+            ..MtOptions::default()
+        },
+        MtOptions {
+            block_size: (1 << 30) + 1,
+            ..MtOptions::default()
+        },
+    ] {
+        let e = DeflateMt::new(&options).unwrap_err();
+        assert_eq!(e.code(), ErrorCode::Stream, "{options:?}");
+        assert!(options.memory_usage(1).is_err());
+    }
+
+    fn send<T: Send>(_: &T) {}
+    send(&mt);
+}
+
+#[test]
+fn a_memory_limit_lowers_the_threads() {
+    let options = MtOptions {
+        threads: Threads::of(8),
+        ..MtOptions::default()
+    };
+    assert_eq!(options.threads_used().unwrap(), 8);
+    let one = options.memory_usage(1).unwrap();
+    let three = options.memory_usage(3).unwrap();
+    assert!(one < three && three < 2 << 20 << 2, "{one} {three}");
+    for (limit, threads) in [(0, 1), (one, 1), (three, 3), (three - 1, 2), (u64::MAX, 8)] {
+        let limited = MtOptions {
+            memory_limit: limit,
+            ..options
+        };
+        assert_eq!(limited.threads_used().unwrap(), threads, "{limit}");
+        assert_eq!(DeflateMt::new(&limited).unwrap().threads(), threads);
+    }
+}
+
+/// What `tool` with `args` writes of `stdin`; none if it is not installed.
+fn run(tool: &str, args: &[&str], stdin: &[u8]) -> Option<Vec<u8>> {
+    let mut child = Command::new(tool)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let mut writer = child.stdin.take().unwrap();
+    let stdin = stdin.to_vec();
+    let feeder = std::thread::spawn(move || writer.write_all(&stdin));
+    let output = child.wait_with_output().unwrap();
+    feeder.join().unwrap().unwrap();
+    assert!(output.status.success(), "{tool} {args:?}: {output:?}");
+    Some(output.stdout)
+}
+
+#[test]
+fn gzip_reads_it() {
+    let data = input(3 * BLOCK_SIZE + 5, 13);
+    let gz = compress(
+        &data,
+        &MtOptions {
+            threads: Threads::of(4),
+            ..MtOptions::default()
+        },
+    );
+    match run("gzip", &["-dc"], &gz) {
+        Some(out) => assert_eq!(out, data),
+        None => eprintln!("gzip is not installed: skipped"),
+    }
+}
+
+#[test]
+fn it_is_pigz_s_byte_for_byte() {
+    // Its header has no name nor time with -n, and says Unix wherever it
+    // runs; the rest is the same.
+    for (i, size) in [
+        0,
+        1,
+        1000,
+        BLOCK_SIZE,
+        2 * BLOCK_SIZE,
+        7 * BLOCK_SIZE + 3333,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let data = input(size, 20 + i as u64);
+        for level in [1, 2, 6, 9] {
+            let Some(pigz) = run(
+                "pigz",
+                &["-n", "-c", "-p", "3", &format!("-{level}")],
+                &data,
+            ) else {
+                eprintln!("pigz is not installed: skipped");
+                return;
+            };
+            let gz = compress(
+                &data,
+                &MtOptions {
+                    level,
+                    threads: Threads::of(3),
+                    ..MtOptions::default()
+                },
+            );
+            assert_eq!(gz[..9], pigz[..9], "{size} bytes, level {level}");
+            assert_eq!(gz[10..], pigz[10..], "{size} bytes, level {level}");
+        }
+    }
+}

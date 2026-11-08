@@ -1,7 +1,8 @@
 //! Jobs done in threads, their results taken in the order the jobs were
 //! given: 7z's LZMA2 blocks, compressed by the writer and decompressed by a
-//! folder's decoder, ZIP entries compressed ahead of the one written, and
-//! zstd's frames compressed apart (`zstd::CompressFrames`).
+//! folder's decoder, ZIP entries compressed ahead of the one written,
+//! zstd's frames compressed apart (`zstd::CompressFrames`), and deflate's
+//! blocks (`deflate::DeflateMt`).
 //! Not from the LZMA SDK, which has no threads in its 7z decoder, nor from
 //! libzip, which has none.
 //!
@@ -142,7 +143,7 @@ where
 
     /// The result of the oldest job not taken if it is there, without
     /// waiting for it.
-    #[cfg_attr(not(feature = "zstd"), allow(dead_code))]
+    #[cfg_attr(not(any(feature = "deflate", feature = "zstd")), allow(dead_code))]
     pub(crate) fn try_take(&mut self) -> Option<O> {
         if self.taken == self.given {
             return None;
