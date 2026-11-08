@@ -156,6 +156,35 @@ where
         Some(out.unwrap_or_else(self.lost))
     }
 
+    /// The result of the oldest job not taken, waited for up to `wait`:
+    /// `Err(())` if it did not come in that time, none if every result is
+    /// taken.
+    #[cfg_attr(not(feature = "sevenz"), allow(dead_code))]
+    pub(crate) fn take_within(&mut self, wait: std::time::Duration) -> Result<Option<O>, ()> {
+        if self.taken == self.given {
+            return Ok(None);
+        }
+        let until = std::time::Instant::now() + wait;
+        loop {
+            if let Some(out) = self.early.remove(&self.taken) {
+                self.taken += 1;
+                return Ok(Some(out.unwrap_or_else(self.lost)));
+            }
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            match self.done.recv_timeout(left) {
+                Ok((number, out)) => {
+                    self.early.insert(number, out);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Err(()),
+                // Not while `done_tx` is held.
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    self.taken += 1;
+                    return Ok(Some((self.lost)()));
+                }
+            }
+        }
+    }
+
     /// The result of the oldest job not taken, waited for; none if every
     /// result is taken.
     pub(crate) fn take(&mut self) -> Option<O> {

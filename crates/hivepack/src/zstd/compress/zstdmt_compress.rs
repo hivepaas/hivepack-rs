@@ -55,6 +55,7 @@
 
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use crate::zstd::common::bits::highbit32;
@@ -575,6 +576,10 @@ struct Shared {
     in_pool: BufferPool,
     out_pool: BufferPool,
     serial: SerialState,
+    /// The context was let go: its jobs stop at their next chunk. Not in
+    /// libzstd, whose `ZSTDMT_freeCCtx` waits for every job to be done,
+    /// which at the highest levels may be many seconds.
+    abandoned: AtomicBool,
 }
 
 /// `ZSTDMT_jobDescription`, as the thread that compresses the job gets it.
@@ -778,6 +783,10 @@ fn zstdmt_compress_job(
     let mut ip = job.prefix_size;
     let mut op = 0;
     for chunk_nb in 1..nb_chunks {
+        // What it makes is not wanted.
+        if job.shared.abandoned.load(Ordering::Relaxed) {
+            return error!(Generic);
+        }
         let c_size = cctx.compress_continue(
             &mut dst[op..],
             bufs,
@@ -880,6 +889,15 @@ pub(crate) struct MtCCtx {
     dst_capacity: usize,
 }
 
+/// Not in libzstd: the jobs running stop at their next chunk, as what they
+/// make is no longer wanted, so that the threads, which `POOL_free` waits
+/// for, end soon.
+impl Drop for MtCCtx {
+    fn drop(&mut self) {
+        self.shared.abandoned.store(true, Ordering::Relaxed);
+    }
+}
+
 /// `ZSTDMT_createJobsTable`: the size of the job table for `nb_workers`
 /// threads: a power of 2 over `nb_workers + 2`.
 pub(crate) fn zstdmt_jobs_table_size(nb_workers: usize) -> usize {
@@ -966,6 +984,7 @@ impl MtCCtx {
                 in_pool: BufferPool::new(workers + 2),
                 out_pool: BufferPool::new(buf_pool_max_nb_buffers(workers)),
                 serial: SerialState::new(),
+                abandoned: AtomicBool::new(false),
             }),
             params,
             target_section_size: 0,
