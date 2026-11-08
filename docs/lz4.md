@@ -42,6 +42,12 @@ The rules of [porting.md](porting.md):
 - An empty input is an empty stream; data that is not a frame, at the start or after the frames, is an error (`lz4 -d` says "Stream followed by undecodable data" for the latter, and fails); so is a frame or magic number cut short, or damaged data.
 - Unlike `lz4 -d` 1.10.0, a legacy frame may follow a frame of the frame format, as the description says (`lz4 -d` reads its magic number as a frame header and fails with `ERROR_frameType_unknown`), and a skippable frame cut short at the end of the input is an error (`lz4 -d` seeks past the end of its file).
 
+### Frames in threads, beside the port
+
+liblz4's frame API compresses on one thread; `lz4 -T` cuts a frame of independent blocks across threads in its program. `lz4::EncoderMt` (`crates/hivepack/src/lz4/mt.rs`) does the same as an `io::Write`: the input cut into blocks of the frame's block size (4 MB by default, as `lz4` writes), each compressed in a thread by a `CompressionContext` of its own, begun once in independent blocks, so that each block is what that context makes of it; the header is the context's, and the content checksum, on by default as `lz4` writes it, is computed on the caller's thread as the input comes. The frame is `compress_frame`'s with the same preferences, byte for byte, whatever the threads, and `lz4 -1 -T4`'s. Two blocks for each thread are in flight at most; `MtOptions::memory_limit` lowers the threads to fit `MtOptions::memory_usage`, 16.5 MiB a thread for blocks of 4 MB. `tests/lz4_mt.rs` compares it with `compress_frame` at levels −3 to 12, with each checksum, sizes around a block's, 1, 2 and 8 threads, written whole and in pieces, and reads blocks of 4 MB back with liblz4.
+
+3 GB of programs (a tar of `/usr/lib`), 32 threads of an AMD machine with 32: level 1, 3.43 s on one thread, 1.07 s on 32, where `lz4 -1 -T32` takes 1.63 s; level 9, 52.8 s and 2.90 s. At level 1 the caller's thread is what is left: it copies the input into blocks and computes the checksum.
+
 ## How it is shown
 
 The reference is liblz4 1.10.0 itself, reached two ways: built from the sources bundled in `lz4-sys` 1.11.1 and called through the `lz4` crate 1.28.1, both development dependencies only; and `tools/lz4-oracle`, a small C program built from the release tarball by `scripts/testdata.py`, as `tools/bzip2-oracle` is for libbzip2.

@@ -81,6 +81,7 @@ mod threads;
 pub use threads::Threads;
 #[cfg(any(
     feature = "deflate",
+    feature = "lz4",
     feature = "sevenz",
     feature = "zip",
     feature = "zstd"

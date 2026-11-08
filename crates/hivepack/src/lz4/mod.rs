@@ -92,12 +92,14 @@ mod lz4_compress;
 mod lz4frame;
 mod lz4frame_compress;
 mod lz4hc;
+mod mt;
 #[cfg(feature = "lz4-unsafe-fast")]
 mod unchecked;
 mod xxhash;
 
 pub use decoder::{Decoder, LEGACY_BLOCKSIZE, LEGACY_MAGICNUMBER};
 pub use encoder::Encoder;
+pub use mt::{EncoderMt, MtOptions};
 
 /// The block format: `lz4.h`.
 pub mod block {

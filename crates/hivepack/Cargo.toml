@@ -393,6 +393,11 @@ path = "tests/lz4_lz4.rs"
 required-features = ["lz4"]
 
 [[test]]
+name = "lz4_mt"
+path = "tests/lz4_mt.rs"
+required-features = ["lz4"]
+
+[[test]]
 name = "lz4_oracle"
 path = "tests/lz4_oracle.rs"
 required-features = ["lz4"]
