@@ -1305,3 +1305,52 @@ fn portable() -> hivepack::extract::Options {
     options.name_rules = hivepack::extract::NameRules::Portable;
     options
 }
+
+/// What [`Options::on_written`](hivepack::extract::Options::on_written) is told,
+/// by path and kind, sorted, as threads tell it in any order.
+fn told_of(options: &mut Options) -> Arc<Mutex<Vec<(String, hivepack::extract::WrittenKind)>>> {
+    let told = Arc::new(Mutex::new(Vec::new()));
+    let into = Arc::clone(&told);
+    options.on_written = Some(Arc::new(move |w: &hivepack::extract::Written<'_>| {
+        into.lock().unwrap().push((w.path.join("/"), w.kind));
+    }));
+    told
+}
+
+#[test]
+fn each_entry_written_is_told_and_none_left_out() {
+    use hivepack::extract::{OnDamaged, WrittenKind as K};
+    let mut data = zip(&[
+        Entry::Dir(b"dir/"),
+        Entry::File(b"dir/a.txt", b"hello"),
+        Entry::Mode(b"to-a", b"dir/a.txt", 0o120_777),
+        Entry::Stored(b"bad", b"0123456789"),
+        Entry::File(b"b.txt", b"world"),
+    ]);
+    let at = data.windows(10).position(|w| w == b"0123456789").unwrap();
+    data[at + 4] ^= 1;
+    for (threads, damaged) in [(1, OnDamaged::Skip), (4, OnDamaged::Keep)] {
+        let scratch = Scratch::new();
+        let mut options = options(|o| {
+            o.links = Links::Inside;
+            o.threads = hivepack::Threads::Exactly(std::num::NonZeroU32::new(threads).unwrap());
+            o.on_damaged = Some(Arc::new(move |_: &hivepack::extract::Error| damaged));
+        });
+        let told = told_of(&mut options);
+        extract(&data, &scratch.out(), &options).unwrap();
+        let mut told = told.lock().unwrap().clone();
+        told.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut wanted = vec![
+            ("b.txt".to_owned(), K::File),
+            ("dir".to_owned(), K::Directory),
+            ("dir/a.txt".to_owned(), K::File),
+            ("to-a".to_owned(), K::Link),
+        ];
+        // A damaged file kept is written; one left out is not.
+        if damaged == OnDamaged::Keep {
+            wanted.push(("bad".to_owned(), K::File));
+            wanted.sort_by(|a, b| a.0.cmp(&b.0));
+        }
+        assert_eq!(told, wanted, "{threads} threads, {damaged:?}");
+    }
+}

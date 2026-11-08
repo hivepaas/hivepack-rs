@@ -335,8 +335,12 @@ pub(crate) fn open_destination<'a>(
     destination: &Path,
     options: &'a Options,
 ) -> Result<Destination<'a>, Error> {
-    Destination::open(destination, options.origin.as_ref())
-        .map_err(|e| Error::global(ErrorKind::Io(e)))
+    Destination::open(
+        destination,
+        options.origin.as_ref(),
+        options.on_written.as_ref(),
+    )
+    .map_err(|e| Error::global(ErrorKind::Io(e)))
 }
 
 /// Whether `item` is a link created after every other entry.

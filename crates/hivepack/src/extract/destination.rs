@@ -24,13 +24,19 @@ use cap_std::fs::{Dir, File, OpenOptions};
 use crate::extract::error::{Error, ErrorKind};
 use crate::extract::name::NameError;
 use crate::extract::origin::Origin;
-use crate::extract::plan::{Item, Links, Options, Owners};
+use crate::extract::plan::{Item, Links, OnWrittenFn, Options, Owners, Written, WrittenKind};
 use crate::extract::zip::{set_modified, set_permissions};
 
 /// The destination, open, and the mark of origin of what is written in it.
 pub(crate) struct Destination<'a> {
     root: Dir,
     origin: Option<&'a Origin>,
+    /// Told of each entry written ([`Options::on_written`]); none in a
+    /// private folder, whose files are told as they move into place.
+    written: Option<&'a OnWrittenFn>,
+    /// Where this is under the destination the caller gave, a component at a
+    /// time: a package's payload's folder ([`Destination::within`]).
+    prefix: Vec<String>,
     /// Shared with the destinations within, and the threads writing.
     owning: Arc<Owning>,
 }
@@ -65,14 +71,36 @@ struct Owning {
 impl<'a> Destination<'a> {
     /// Opens `path`, creating it first if it is not there. The path itself
     /// is the caller's, and is followed as given.
-    pub(crate) fn open(path: &Path, origin: Option<&'a Origin>) -> io::Result<Destination<'a>> {
+    pub(crate) fn open(
+        path: &Path,
+        origin: Option<&'a Origin>,
+        written: Option<&'a OnWrittenFn>,
+    ) -> io::Result<Destination<'a>> {
         std::fs::create_dir_all(path)?;
         let root = Dir::open_ambient_dir(path, ambient_authority())?;
         Ok(Destination {
             root,
             origin,
+            written,
+            prefix: Vec::new(),
             owning: Arc::default(),
         })
+    }
+
+    /// Tells [`Options::on_written`] of the entry at `components`, written.
+    fn told(&self, components: &[String], kind: WrittenKind) {
+        let Some(tell) = self.written else {
+            return;
+        };
+        if self.prefix.is_empty() {
+            tell(&Written {
+                path: components,
+                kind,
+            });
+        } else {
+            let path: Vec<String> = self.prefix.iter().chain(components).cloned().collect();
+            tell(&Written { path: &path, kind });
+        }
     }
 
     /// A private folder in this destination, for an archive read once: its
@@ -119,6 +147,8 @@ impl<'a> Destination<'a> {
                     data: Destination {
                         root: dir,
                         origin: self.origin,
+                        written: None,
+                        prefix: Vec::new(),
                         owning: Arc::clone(&self.owning),
                     },
                     name: name.clone(),
@@ -239,6 +269,7 @@ impl<'a> Destination<'a> {
                 _ => there(e),
             },
         }
+        .inspect(|()| self.told(components, WrittenKind::File))
     }
 
     /// The directory of the private folder's files, `components` within it.
@@ -253,6 +284,8 @@ impl<'a> Destination<'a> {
         Ok(Destination {
             root: self.directory(components)?,
             origin: self.origin,
+            written: self.written,
+            prefix: self.prefix.iter().chain(components).cloned().collect(),
             owning: Arc::clone(&self.owning),
         })
     }
@@ -655,7 +688,9 @@ impl Target for Destination<'_> {
         Self: 't;
 
     fn directory(&self, _: &Item, components: &[String]) -> Result<(), ErrorKind> {
-        Destination::directory(self, components).map(drop)
+        Destination::directory(self, components)?;
+        self.told(components, WrittenKind::Directory);
+        Ok(())
     }
 
     fn within(&self, _: &Item, components: &[String]) -> Result<Self, ErrorKind> {
@@ -712,7 +747,11 @@ impl Target for Destination<'_> {
         }
         set_permissions(&file, item.mode, options.permissions)?;
         let mut file = file;
-        file.flush().map_err(ErrorKind::Io)
+        file.flush().map_err(ErrorKind::Io)?;
+        if let Ok(name) = &item.name {
+            self.told(&name.components, WrittenKind::File);
+        }
+        Ok(())
     }
 
     fn owners_left(&self) -> u64 {
@@ -736,7 +775,9 @@ impl Target for Destination<'_> {
     ) -> Result<(), ErrorKind> {
         let (last, parents) = split(components)?;
         let dir = Destination::directory(self, parents)?;
-        Destination::symlink(&dir, last, target, to_dir)
+        Destination::symlink(&dir, last, target, to_dir)?;
+        self.told(components, WrittenKind::Link);
+        Ok(())
     }
 
     fn hard_link(
@@ -749,7 +790,9 @@ impl Target for Destination<'_> {
         let dir = Destination::directory(self, parents)?;
         let (target_last, target_parents) = target.split_last().ok_or(ErrorKind::HardLinkTarget)?;
         let target_dir = Destination::directory(self, target_parents)?;
-        Destination::hard_link(&target_dir, target_last, &dir, last)
+        Destination::hard_link(&target_dir, target_last, &dir, last)?;
+        self.told(components, WrittenKind::HardLink);
+        Ok(())
     }
 
     fn open_file(&self, components: &[String]) -> Result<(Box<dyn Read + '_>, u64), ErrorKind> {
