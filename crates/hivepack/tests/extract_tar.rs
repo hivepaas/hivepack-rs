@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use hivepack::extract::{
     Entry, ErrorKind, Limits, LinkOutside, Links, NameError, OnLinksOutside, OnRefused, Options,
-    Owners, Progress, Sink, Summary, extract_tar, extract_tar_to,
+    Owners, Progress, Sink, Summary, extract_tar, extract_tar_to, remove_stale,
 };
 
 /// The time the test entries have.
@@ -1477,4 +1477,27 @@ fn a_private_folder_left_behind_is_removed_next_time() {
     drop(owner);
     extract(&tar(&[E::File(b"b.txt", b"two")]), &s.out(), &portable()).unwrap();
     assert_eq!(listing(&s.out()), ["a.txt", "b.txt"]);
+}
+
+/// `remove_stale` removes a private folder left behind without extracting:
+/// what a program calls when it starts, for the places it extracted into.
+#[test]
+fn remove_stale_removes_what_no_one_holds() {
+    let s = Scratch::new();
+    std::fs::create_dir(s.out()).unwrap();
+    let left = s.out().join(".hivepack-extracting-dead");
+    std::fs::create_dir_all(left.join("data")).unwrap();
+    std::fs::write(left.join("owner"), "").unwrap();
+    let held = s.out().join(".hivepack-extracting-alive");
+    std::fs::create_dir_all(&held).unwrap();
+    let owner = std::fs::File::create(held.join("owner")).unwrap();
+    owner.try_lock().unwrap();
+    std::fs::write(s.out().join("mine.txt"), "mine").unwrap();
+    remove_stale(&s.out()).unwrap();
+    assert!(!left.exists());
+    assert!(held.exists());
+    assert!(s.out().join("mine.txt").exists());
+    // Nothing there, nothing done.
+    remove_stale(&s.path().join("not-there")).unwrap();
+    assert!(!s.path().join("not-there").exists());
 }

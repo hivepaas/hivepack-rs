@@ -77,7 +77,7 @@ If anything stops here, nothing has moved.
 A crash, `kill -9` or the power leaves the private folder behind, with its `owner` unlocked:
 
 - **hivepack**: `extract::remove_stale(destination)` removes every `.hivepack-extracting-*` in it whose `owner` can be locked, by handle. `extract_tar` calls it on the destination before it starts, so extracting again into the same place cleans up.
-- **packwing**: before an extraction starts, it adds the private folder's path to a journal in its data folder and syncs it. When the extraction ends, however it ends, it takes the line out. When the app or `pkw` starts, it calls `remove_stale` on each folder in the journal, so a folder left behind goes the next time packwing runs, wherever it was. hivepack tells the caller the private folder's path through a new `Options::on_staging` callback, called once it is created and before any data is written.
+- **packwing**: before an extraction into a folder starts, it adds the folder to a journal in its data folder. When the extraction ends, however it ends, it takes the line out. When the app or `pkw` starts, it calls `extract::remove_stale` on each folder left in the journal, so a private folder left behind goes the next time packwing runs, wherever it was, even if nothing is extracted there again.
 
 A private folder is never mistaken for one in use: its `owner` is locked for as long as its extraction runs.
 

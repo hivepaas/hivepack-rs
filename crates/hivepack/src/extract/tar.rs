@@ -427,6 +427,21 @@ pub fn extract_tar<R: Read, F: FnMut() -> io::Result<R>>(
     extract_once(open, destination, options)
 }
 
+/// Removes the private folders that extractions into `destination` left
+/// behind, their process having ended without removing them: those whose
+/// `owner` file can be locked ([`extract_tar`] reads a tar archive into one,
+/// and keeps its `owner` locked while it does). One being used is left.
+/// Nothing is done if `destination` is not a folder. [`extract_tar`] calls it
+/// on its destination first; a program that keeps where it extracted can call
+/// it when it starts, so that a folder left elsewhere goes too.
+pub fn remove_stale(destination: &Path) -> io::Result<()> {
+    if !std::fs::symlink_metadata(destination).is_ok_and(|m| m.is_dir()) {
+        return Ok(());
+    }
+    Destination::open(destination, None)?.remove_stale();
+    Ok(())
+}
+
 /// Extracts the tar archive that `open` gives into `sink`, with the checks and
 /// in the order of [`extract_tar`], but reading it twice, as a sink has no folder
 /// to write into first: the first reading checks every entry before any is

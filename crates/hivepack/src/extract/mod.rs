@@ -114,7 +114,7 @@ pub use progress::{Cancel, Progress, ProgressFn};
 pub use rar::{extract_rar, extract_rar_to};
 pub use sevenz::{extract_7z, extract_7z_to};
 pub use sink::{Entry, Sink};
-pub use tar::{extract_tar, extract_tar_to};
+pub use tar::{extract_tar, extract_tar_to, remove_stale};
 pub use udf::{extract_udf, extract_udf_to};
 /// The version of Unicode names are compared with: major, minor, update.
 pub use unicode::VERSION as UNICODE_VERSION;
