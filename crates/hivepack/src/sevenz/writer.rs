@@ -18,6 +18,9 @@
 //! `docs/7z.md`.
 
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use crate::bzip2::{
     Action as BzAction, Compress, InBuffer as BzIn, OutBuffer as BzOut, Status as BzStatus,
@@ -224,7 +227,42 @@ pub struct WriteOptions {
     /// whatever it is. No limit (`u64::MAX`) by default. See
     /// `docs/memory.md`.
     pub memory_limit: u64,
+    /// Set from another thread, stops the writer where it waits for
+    /// LZMA2's blocks, which may be long: the call fails with
+    /// [`Error::Progress`], 7-Zip's error for a progress that stops it, and
+    /// the archive is not finished. Looked at every 50 ms while waiting.
+    /// None by default.
+    pub stop: Option<Arc<AtomicBool>>,
 }
+
+/// How far a [`Writer`] has come, readable from another thread while it
+/// writes: what it was given, and of that, what is compressed. With LZMA2 in
+/// blocks, up to a block for each thread, and the one being filled, is
+/// given and not yet compressed, so a progress counted on what is given ends
+/// long before the archive does; one counted on what is compressed does not.
+/// Other methods compress what they are given as they are given it.
+#[derive(Clone, Debug, Default)]
+pub struct WriteProgress {
+    taken: Arc<AtomicU64>,
+    compressed: Arc<AtomicU64>,
+}
+
+impl WriteProgress {
+    /// The bytes of files' data given to the writer so far.
+    pub fn taken(&self) -> u64 {
+        self.taken.load(Ordering::Relaxed)
+    }
+
+    /// Of those, the bytes compressed: all of them once the archive is
+    /// finished.
+    pub fn compressed(&self) -> u64 {
+        self.compressed.load(Ordering::Relaxed).min(self.taken())
+    }
+}
+
+/// How often a writer waiting for LZMA2's blocks looks at
+/// [`WriteOptions::stop`].
+const STOP_EVERY: Duration = Duration::from_millis(50);
 
 impl Default for WriteOptions {
     fn default() -> Self {
@@ -240,6 +278,7 @@ impl Default for WriteOptions {
             lzma2_blocks: Lzma2Blocks::None,
             threads: Threads::One,
             memory_limit: u64::MAX,
+            stop: None,
         }
     }
 }
@@ -257,6 +296,7 @@ impl core::fmt::Debug for WriteOptions {
             .field("lzma2_blocks", &self.lzma2_blocks)
             .field("threads", &self.threads)
             .field("memory_limit", &self.memory_limit)
+            .field("stop", &self.stop.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -540,8 +580,9 @@ impl Compressor {
     }
 }
 
-/// A block of LZMA2 to compress, with the options to compress it with.
-type BlockJob = (LzmaOptions, Vec<u8>);
+/// A block of LZMA2 to compress, with the options to compress it with, and
+/// where its size is counted once it is compressed.
+type BlockJob = (LzmaOptions, Vec<u8>, Arc<AtomicU64>);
 
 /// The threads that compress LZMA2's blocks, each keeping its encoder for
 /// the next block.
@@ -550,7 +591,10 @@ type BlockWorkers = Workers<Option<Box<Stream>>, BlockJob, Result<Vec<u8>>>;
 /// A block compressed as a stream of its own, without its end: `spare` is the
 /// encoder of the block before, whose memory it takes over. Its first chunk
 /// resets the dictionary, as the first of a stream does.
-fn compress_block(spare: &mut Option<Box<Stream>>, (lzma, data): BlockJob) -> Result<Vec<u8>> {
+fn compress_block(
+    spare: &mut Option<Box<Stream>>,
+    (lzma, data, compressed): BlockJob,
+) -> Result<Vec<u8>> {
     let filters = [XzFilter::lzma2(lzma)];
     let mut stream = match spare.take() {
         Some(stream) => stream.raw_encoder_again(&filters),
@@ -582,6 +626,7 @@ fn compress_block(spare: &mut Option<Box<Stream>>, (lzma, data): BlockJob) -> Re
     if out.pop() != Some(0) {
         return Err(Error::Fail);
     }
+    compressed.fetch_add(data.len() as u64, Ordering::Relaxed);
     Ok(out)
 }
 
@@ -601,6 +646,10 @@ struct Blocks {
     size: usize,
     block: Vec<u8>,
     workers: Box<BlockWorkers>,
+    /// Where each block is counted once compressed.
+    compressed: Arc<AtomicU64>,
+    /// [`WriteOptions::stop`].
+    stop: Option<Arc<AtomicBool>>,
 }
 
 impl Blocks {
@@ -617,7 +666,11 @@ impl Blocks {
             size,
             block,
             workers,
+            compressed,
+            stop,
         } = self;
+        let job =
+            |block: &mut Vec<u8>| (lzma.clone(), std::mem::take(block), Arc::clone(compressed));
         let mut add = |mut data: &[u8]| -> io::Result<()> {
             while !data.is_empty() {
                 if block.capacity() < *size {
@@ -628,7 +681,7 @@ impl Blocks {
                 block.extend_from_slice(&data[..n]);
                 data = &data[n..];
                 if block.len() == *size {
-                    give(workers, lzma, block, out)?;
+                    give(workers, job(block), stop.as_deref(), out)?;
                 }
             }
             Ok(())
@@ -639,9 +692,9 @@ impl Blocks {
         }
         if finish {
             if !block.is_empty() {
-                give(workers, lzma, block, out)?;
+                give(workers, job(block), stop.as_deref(), out)?;
             }
-            while let Some(made) = workers.take() {
+            while let Some(made) = wait(workers, stop.as_deref())? {
                 out(&made.map_err(io::Error::other)?)?;
             }
             out(&[0])?;
@@ -650,17 +703,33 @@ impl Blocks {
     }
 }
 
+/// The oldest block, waited for, `stop` looked at as it waits: none if all
+/// are written.
+fn wait(
+    workers: &mut BlockWorkers,
+    stop: Option<&AtomicBool>,
+) -> io::Result<Option<Result<Vec<u8>>>> {
+    loop {
+        if stop.is_some_and(|stop| stop.load(Ordering::Relaxed)) {
+            return Err(io::Error::other(Error::Progress));
+        }
+        if let Ok(made) = workers.take_within(STOP_EVERY) {
+            return Ok(made);
+        }
+    }
+}
+
 /// Gives `block` to a thread, and writes the blocks before it until no more
 /// wait than there are threads.
 fn give(
     workers: &mut BlockWorkers,
-    lzma: &LzmaOptions,
-    block: &mut Vec<u8>,
+    job: BlockJob,
+    stop: Option<&AtomicBool>,
     out: &mut dyn FnMut(&[u8]) -> io::Result<()>,
 ) -> io::Result<()> {
-    workers.give((lzma.clone(), std::mem::take(block)));
+    workers.give(job);
     while workers.pending() > workers.most() {
-        match workers.take() {
+        match wait(workers, stop)? {
             Some(made) => out(&made.map_err(io::Error::other)?)?,
             None => break,
         }
@@ -798,6 +867,7 @@ pub struct Writer<W> {
     folders: Vec<(FolderInfo, Vec<(u64, u32)>)>,
     pack_total: u64,
     failed: Option<Error>,
+    progress: WriteProgress,
 }
 
 impl<W: Write + Seek> Writer<W> {
@@ -843,6 +913,7 @@ impl<W: Write + Seek> Writer<W> {
             folders: Vec::new(),
             pack_total: 0,
             failed: None,
+            progress: WriteProgress::default(),
         })
     }
 
@@ -1008,6 +1079,8 @@ impl<W: Write + Seek> Writer<W> {
             size,
             block: Vec::new(),
             workers,
+            compressed: Arc::clone(&self.progress.compressed),
+            stop: self.options.stop.clone(),
         })))
     }
 
@@ -1286,6 +1359,11 @@ impl<W: Write + Seek> Writer<W> {
     pub fn get_ref(&self) -> &W {
         &self.w
     }
+
+    /// How far it has come, to read from another thread while it writes.
+    pub fn progress(&self) -> WriteProgress {
+        self.progress.clone()
+    }
 }
 
 /// The error an `io::Error` of this writer's stands for.
@@ -1399,8 +1477,17 @@ impl<W: Write + Seek> Write for Writer<W> {
                     entry.has_stream = true;
                 }
             }
+            self.progress
+                .taken
+                .fetch_add(data.len() as u64, Ordering::Relaxed);
             self.feed(data, false)?;
             if let Some(folder) = &mut self.folder {
+                // What is not in blocks is compressed as it is given.
+                if !matches!(folder.compressor, Compressor::Blocks(_)) {
+                    self.progress
+                        .compressed
+                        .fetch_add(data.len() as u64, Ordering::Relaxed);
+                }
                 folder.unpacked += data.len() as u64;
                 if let Some((size, sum)) = folder.files.last_mut() {
                     *size += data.len() as u64;

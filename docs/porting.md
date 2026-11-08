@@ -174,6 +174,8 @@ At level 9 with 4 jobs at once, the port falls from 0.80× to 0.63–0.68×: the
 
 What made the difference, against a first version at 0.74–0.82× with 8 workers at level 1: keeping the jobs' input buffers, their output and the contexts' sequence stores for the next jobs, rather than taking new memory for each, which the threads then had to map page by page.
 
+**A context let go** while its jobs compress, as when the work it was for is stopped: libzstd's `ZSTDMT_freeCCtx` waits for every job to be done, which at level 19, with jobs of 32 MiB, took 12 s. The port's jobs stop at their next chunk (512 KiB) once the context is let go (`MtCCtx`'s `Drop`), and the threads end soon after: in about a second at level 19, a job that was loading the window of the one before finishing that first. What a context makes while it is kept is the same; `tests/zstd_compress_mt.rs` (`let_go_while_compressing_ends_soon`) checks the time against that of 4 MiB on the same machine, as a CI runner in a debug build is slower.
+
 **Memory**, beside the port: libzstd estimates a context without workers and refuses to with them. `CCtx::estimate_memory(nb_workers)` counts what the port allocates for the next frame, with workers or without, as an upper bound, and `CCtx::set_workers_memory_limit` lowers each frame's workers until it fits, one always allowed: the frames are the same with one worker or many. Level 3 takes 4.5 MiB without workers, 69 MiB with one and 572 MiB with 16; level 19 90 MiB, 373 MiB and 3.5 GiB. The formula, and how it is checked against what is allocated, are in [memory.md](memory.md#zstd-with-workers).
 
 ### zstd in frames, beside the port
