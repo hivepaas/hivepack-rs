@@ -1035,3 +1035,115 @@ fn encrypted_entry_fails() {
         }
     }
 }
+
+/// What `DeflateMt` makes of `data` at `level`, raw: the stream an entry
+/// deflated in blocks holds.
+fn in_blocks(data: &[u8], level: u32) -> Vec<u8> {
+    use hivepack::deflate::{DeflateMt, Flush, InBuffer, MtOptions, OutBuffer, Status};
+    let mut blocks = DeflateMt::new(&MtOptions {
+        level: level as i32,
+        raw: true,
+        ..MtOptions::default()
+    })
+    .unwrap();
+    let mut out = vec![0; data.len() + data.len() / 100 + (64 << 10)];
+    let mut output = OutBuffer::new(&mut out);
+    let mut input = InBuffer::new(data);
+    let status = blocks
+        .deflate(&mut output, &mut input, Flush::Finish)
+        .unwrap();
+    assert_eq!(status, Status::StreamEnd);
+    let n = output.pos;
+    out.truncate(n);
+    out
+}
+
+/// Entry `i`'s data as it is in `bytes`, compressed.
+fn compressed(bytes: &[u8], i: u64) -> Vec<u8> {
+    let archive = Archive::open(bytes, OpenFlags::RDONLY).unwrap();
+    let mut data = Vec::new();
+    io::copy(
+        &mut archive.fopen_index(i, Flags::COMPRESSED).unwrap(),
+        &mut data,
+    )
+    .unwrap();
+    data
+}
+
+/// Deflate in blocks, asked: each entry deflated, small ones in the threads
+/// ahead and one past 32 MiB where it is written, is the stream `DeflateMt`
+/// makes, the archive the same whatever the threads, to a file or a stream,
+/// encrypted too, and read back by the port and by Info-ZIP. Torrentzip is
+/// zlib's still.
+#[test]
+fn deflate_in_blocks() {
+    let mut specs: Vec<Spec> = (0..12u64)
+        .map(|i| {
+            spec(
+                format!("small{i}"),
+                text(i, 150_000 + 997 * i as usize),
+                deflate(6),
+            )
+        })
+        .collect();
+    specs.push(spec("big", text(77, 34 << 20), deflate(1)));
+    specs.push(spec("default", text(78, 600_000), None));
+    let mut unsized_ = spec("unsized", text(79, 3 << 20), deflate(6));
+    unsized_.source = SourceKind::Unsized;
+    specs.push(unsized_);
+    let mut aes = spec("aes", text(80, 2 << 20), deflate(6));
+    aes.encryption = Some(em::AES_256);
+    specs.push(aes);
+    let write = |threads: Threads, stream: bool| {
+        let mut a = archive(&specs, threads);
+        a.set_deflate_in_blocks(true);
+        if stream {
+            streamed(&mut a)
+        } else {
+            seekable(&mut a)
+        }
+    };
+    let one = write(Threads::One, false);
+    let one_stream = write(Threads::One, true);
+    assert!(one.1.is_ok() && one_stream.1.is_ok());
+    for threads in many() {
+        assert!(
+            write(threads, false).0 == one.0,
+            "{threads:?}: bytes differ"
+        );
+        assert!(
+            write(threads, true).0 == one_stream.0,
+            "{threads:?}, stream: bytes differ"
+        );
+    }
+    for (i, s) in specs.iter().enumerate() {
+        if s.encryption.is_some() {
+            continue;
+        }
+        let level = s.method.map_or(9, |(_, level)| level);
+        assert!(
+            compressed(&one.0, i as u64) == in_blocks(&s.data, level),
+            "{}",
+            s.name
+        );
+    }
+    reads_back(&one.0, &specs);
+    reads_back(&one_stream.0, &specs);
+    info_zip_agrees(&one.0, "blocks", true);
+    // Off, as libzip deflates: one zlib stream, not blocks.
+    let off = seekable(&mut archive(&specs, Threads::Auto));
+    let big = specs.iter().position(|s| s.name == "big").unwrap() as u64;
+    assert!(compressed(&off.0, big) != compressed(&one.0, big));
+
+    let torrent: Vec<Spec> = (0..20u64)
+        .map(|i| spec(format!("t{i}"), text(i, 200_000), None))
+        .collect();
+    let write = |blocks: bool| {
+        let mut a = archive(&torrent, Threads::Auto);
+        a.set_deflate_in_blocks(blocks);
+        a.set_archive_flag(ArchiveFlags::WANT_TORRENTZIP, true)
+            .unwrap();
+        seekable(&mut a)
+    };
+    assert!(write(true).0 == write(false).0, "torrentzip in blocks");
+}

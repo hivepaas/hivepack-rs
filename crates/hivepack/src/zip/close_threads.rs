@@ -117,6 +117,32 @@ impl<R> Archive<R> {
     pub fn set_threads(&mut self, threads: Threads) {
         self.threads = threads;
     }
+
+    /// Sets whether new data is deflated in blocks, as pigz does, when the
+    /// archive is written: off by default, as libzip deflates, one zlib
+    /// stream for each entry. libzip has no such thing.
+    ///
+    /// On, each deflated entry of new data is one raw deflate stream of
+    /// blocks of 128 KiB, each compressed with the 32 KiB before it as its
+    /// dictionary ([`DeflateMt`](crate::deflate::DeflateMt)), which every
+    /// ZIP reader reads, and no larger: 3 GB of programs at level 6 is
+    /// 0.05% smaller. An entry the threads of [`set_threads`] would compress
+    /// one each, and that could take more than 32 MiB, is compressed where
+    /// it is written, its blocks in all of them: one large file is deflated
+    /// on every core, where it was on one. The archive is the same, byte for
+    /// byte, whatever the threads. Not for torrentzip, whose streams are
+    /// zlib's.
+    ///
+    /// [`set_threads`]: Archive::set_threads
+    pub fn set_deflate_in_blocks(&mut self, blocks: bool) {
+        self.deflate_blocks = blocks;
+    }
+
+    /// The threads new data is deflated in blocks in where it is written,
+    /// if it is.
+    pub(crate) fn deflate_blocks(&self) -> Option<Threads> {
+        self.deflate_blocks.then_some(self.threads)
+    }
 }
 
 /// How a thread encrypts an entry.
@@ -156,6 +182,8 @@ pub(crate) struct Key {
     keep_compressing: bool,
     /// how the thread encrypts it, if it does
     encryption: Option<Encryption>,
+    /// whether deflate is in blocks, which the thread compresses alone
+    blocks: bool,
 }
 
 impl Key {
@@ -254,6 +282,7 @@ impl Precompressed {
             first_read,
             keep_compressing: stream && encrypting.is_some(),
             encryption: None,
+            blocks: self.key.blocks,
         })
     }
 
@@ -399,7 +428,8 @@ fn encrypt_layer(encryption: &Encryption) -> Option<Layer<Encrypt>> {
 /// than it could, or the archive is no longer written.
 fn compress(_: &mut (), job: Job) -> Made {
     let Job { key, most, stop } = job;
-    let mut compress = Compress::new(key.method, key.level).ok()?;
+    let blocks = key.blocks.then_some(Threads::One);
+    let mut compress = Compress::new(key.method, key.level, blocks).ok()?;
     if key.keep_compressing {
         compress.keep_compressing();
     }
@@ -659,11 +689,14 @@ impl<R: ReadAt> Archive<R> {
             .iter()
             .map(|&i| {
                 let mut planned = self.plan(i, stream);
-                if planned
-                    .job
-                    .as_ref()
-                    .is_some_and(|job| job.most + ENTRY_COST > budget)
-                {
+                if planned.job.as_ref().is_some_and(|job| {
+                    job.most + ENTRY_COST > budget
+                        // Deflated in blocks where it is written, in all
+                        // the threads.
+                        || (job.key.blocks
+                            && cm_actual(job.key.method) == cm::DEFLATE
+                            && job.most > memory_per_thread())
+                }) {
                     planned.job = None;
                 }
                 planned
@@ -767,6 +800,7 @@ impl<R: ReadAt> Archive<R> {
                 first_read: BUFSIZE - header,
                 keep_compressing: stream && encrypts,
                 encryption: None,
+                blocks: self.deflate_blocks && !self.want_torrentzip(),
             };
             Some(PlannedJob { key, most, encrypt })
         })();
@@ -940,6 +974,7 @@ mod tests {
                 first_read: BUFSIZE,
                 keep_compressing: false,
                 encryption: None,
+                blocks: false,
             },
             open: Ok(()),
             data: b"abc".to_vec(),

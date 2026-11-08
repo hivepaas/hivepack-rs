@@ -10,6 +10,7 @@
 use std::cmp::Ordering;
 use std::io::{Seek, Write};
 
+use crate::Threads;
 use crate::zip::buffer::Buffer;
 use crate::zip::close_threads::{Encrypting, Taken};
 use crate::zip::dirent::{Dirent, DosTime, cm_actual, u2d_time};
@@ -286,6 +287,7 @@ impl<R: ReadAt> Archive<R> {
     ) -> Result<()> {
         let want_torrentzip = self.want_torrentzip();
         let new_data = self.new_data(i);
+        let blocks = self.deflate_blocks();
 
         // create new local directory entry
         let entry = &mut self.entry[i];
@@ -334,6 +336,7 @@ impl<R: ReadAt> Archive<R> {
                 self.default_password.as_deref(),
                 self.random.as_ref(),
                 taken,
+                blocks,
             );
             if let Some(changes) = self.entry[i].changes.as_deref_mut() {
                 *changes = de;
@@ -386,6 +389,7 @@ impl<R: ReadAt> Archive<R> {
         attributes: crate::zip::source_data::FileAttributes,
         out: &mut Output<W>,
     ) -> Result<()> {
+        let blocks = self.deflate_blocks();
         let Some(mut de) = self.entry[i].changes.as_deref().cloned() else {
             return Err(Error::new(ErrorCode::Internal, 0));
         };
@@ -405,6 +409,7 @@ impl<R: ReadAt> Archive<R> {
             self.default_password.as_deref(),
             self.random.as_ref(),
             Taken::default(),
+            blocks,
         );
         if let Some(changes) = self.entry[i].changes.as_deref_mut() {
             *changes = de;
@@ -478,6 +483,7 @@ fn add_data<R: ReadAt + ?Sized, W: Write + Seek>(
     default_password: Option<&[u8]>,
     random: Option<&RandomSource>,
     taken: Taken,
+    blocks: Option<Threads>,
 ) -> Result<()> {
     let mut st = src.stat()?;
 
@@ -597,6 +603,7 @@ fn add_data<R: ReadAt + ?Sized, W: Write + Seek>(
         true => Some(Layer::new(Compress::new(
             de.comp_method,
             de.compression_level,
+            blocks,
         )?)),
         false => None,
     };
