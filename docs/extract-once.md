@@ -1,6 +1,6 @@
 # Reading a tar archive once (design)
 
-> **Status:** a design, for review before any code. Nothing here is built yet.
+> **Status:** designed, and its open points decided (below); being built.
 
 `extract_tar` reads a tar stream twice into a folder: first the headers, for every check, then the entries are written (see [extract.md](extract.md#tar)). A compressed tar is therefore decompressed twice. On 3 GB of programs, 32 threads:
 
@@ -44,6 +44,7 @@ So only three checks need the whole archive. Symbolic links are already made aft
 - `extract_tar` opens the destination as today (`Destination::open`), and remembers whether it created it.
 - Inside it, it creates `.hivepack-extracting-<16 random hex>`, mode 0700. That folder becomes the `Destination` root everything is written to, through the same handles (cap-std, `O_NOFOLLOW`, `create_new`). Every write rule in [extract.md](extract.md#writing-by-handle) holds unchanged.
 - Being inside the destination puts it on the same file system, so moving an entry into place is a `rename`: no data is copied.
+- On Windows, where a leading dot hides nothing, the folder is given the hidden attribute (`SetFileAttributesW`, through `windows-sys`, already there for `cap-std`; see [safety.md](safety.md#dependencies-with-unsafe-code)). If that fails, the folder stays visible while it lasts, which changes nothing else.
 - In it, a file named `owner` is created and **locked** (`File::try_lock`, std since Rust 1.89, the crate's minimum: `flock` on Unix, `LockFileEx` on Windows) for as long as the extraction runs. The system lets go of the lock when the process ends, however it ends: `kill -9`, a crash, the power. A folder whose `owner` can be locked has no one extracting into it.
 
 ### 2. One reading
@@ -73,8 +74,8 @@ Once the stream has ended soundly:
 
 ### 4. Moving into place, and failing
 
-- **Moving.** Each entry of the private folder's top level is renamed into the destination by handle (`Dir::rename`). A directory not in the destination moves whole, in one rename. One that is there is descended into, and its entries are moved one by one. Directory times, owners and xattrs are set last, deepest first, as today. Then the private folder, by now empty, and its `owner` are removed.
-- **Overwriting.** With `overwrite`, a file is replaced by a rename over it, where today it is truncated in place. The new file is written whole before it replaces the old one, so a failure never leaves a half-written file. A hard link to the old file elsewhere keeps the old content, as with GNU tar's default.
+- **Moving.** Each entry of the private folder's top level is moved into the destination by handle. A directory not in the destination moves whole, in one rename (`Dir::rename`). One that is there is descended into, and its entries are moved one by one. A file is moved by a hard link to its new place, then removed from the private folder (`Dir::hard_link`, then `remove_file`). A link fails where something is there, so a file put in the destination after the conflicts were checked is never replaced. Where the file system has no hard links (FAT32, exFAT), the file is renamed after one more look, which leaves a window of microseconds. A directory renamed fails onto one that has entries; onto an empty one that appeared meanwhile, it takes its place, and nothing is lost. Directory times, owners and xattrs are set last, deepest first, as today. Then the private folder, by now empty, and its `owner` are removed.
+- **Overwriting.** With `overwrite`, a file is replaced by a rename over it, where today it is truncated in place, as GNU tar and bsdtar replace a file by default. The new file is written whole before it replaces the old one, so a failure never leaves a half-written file. A hard link to the old file elsewhere keeps the old content, as with GNU tar's default.
 - **Failing.** On any error, cancel or time limit, before the moves begin: the private folder is removed whole, by handle and without following links (cap-std `remove_dir_all` on its `Dir`). If the destination was created by this extraction and is now empty, it is removed too. Nothing of the archive is left.
 - **A failure while moving** (rare: permissions changed, the disk gone) stops the moves. What was moved stays, the rest is removed, and the error says how many entries were moved. This is the one case where part of an archive appears, and it is said.
 
@@ -97,7 +98,7 @@ A private folder is never mistaken for one in use: its `owner` is locked for as 
 
 ## Progress
 
-Today the totals are counted by the first reading (`run.start`). With one reading they are not known beforehand. `Progress` gains the archive's bytes read so far and its size when it is known (the compressed file's), so that the caller can show how far through the archive it is. packwing shows that instead of the bytes written.
+Today the totals are counted by the first reading (`run.start`). With one reading they are not known beforehand. `Progress` gains the archive's bytes read so far, and its size when it is known (the compressed file's). How far through the archive the reading is, is what the time left comes from: decompressing takes time with the compressed bytes. The files and bytes written are still told, without a total. Where the archive's size is not known (a stream), there is no fraction. packwing shows the fraction of the archive read and the files written, and "Finishing…" while the entries move into place.
 
 ## What it costs, and what it saves
 
@@ -116,11 +117,11 @@ Today the totals are counted by the first reading (`run.start`). With one readin
 - The fuzz target `extract_tar` runs on the new path. Afterwards, nothing may be left in the destination but the archive's entries, and no `.hivepack-extracting-*` may remain.
 - Timing on 3 GB, before and after, as above.
 
-## Open points
+## Decisions
 
-1. **Windows:** a leading dot does not hide a folder. Setting its hidden attribute takes `SetFileAttributesW`, which safe Rust does not have: either a dependency that wraps it, or the folder stays visible on Windows while it exists.
-2. **A file put in the destination between the conflict check and the move:**
-   - Linux has `renameat2(RENAME_NOREPLACE)`. Elsewhere a rename replaces a file.
-   - For files, `link` then `unlink` never replaces, and works by handle. For a directory, a rename onto an existing non-empty directory fails.
-   - Proposed: files are moved by link and unlink where `overwrite` is off, and by rename where it is on.
-3. **Progress without totals** (above): the bytes read of the archive, against its size.
+The points left open in the first draft, decided in review:
+
+1. **Windows' hidden attribute:** hivepack sets it itself, through `windows-sys`, so every caller has it; `safety.md` lists it, as it lists `hivepack::memory`'s calls. A failure to set it is not an error.
+2. **A file put in the destination meanwhile:** files move by hard link and removal, which never replaces; by a rename where the file system has no hard links, or where `overwrite` asks to replace.
+3. **Progress:** the fraction of the archive read, against its size; the files and bytes written, without totals.
+4. **`overwrite` replaces by a rename**, as GNU tar and bsdtar do, rather than truncating in place: a file is replaced only once its new content is whole.
