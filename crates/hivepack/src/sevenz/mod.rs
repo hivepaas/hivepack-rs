@@ -69,7 +69,9 @@ use std::io::{self, Read, Seek};
 
 pub use arc_in::SIGNATURE;
 pub use error::{Error, Result};
-pub use writer::{Filter, Lzma2Blocks, Method, NewEntry, RandomSource, WriteOptions, Writer};
+pub use writer::{
+    Filter, Lzma2Blocks, Method, NewEntry, RandomSource, WriteOptions, WriteProgress, Writer,
+};
 
 use aes7z::{Decoding, MAX_KEY_CYCLES};
 use arc_in::ArEx;

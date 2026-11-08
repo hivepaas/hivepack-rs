@@ -747,3 +747,74 @@ impl hivepack::extract::Sink for Collect {
         Ok(())
     }
 }
+
+/// What a writer has compressed, as another thread would read it: never more
+/// than it was given, behind it while the blocks are in flight and the last
+/// is being filled, all of it once finished; without blocks, all of it as it
+/// is given.
+#[test]
+fn progress_counts_what_is_compressed() {
+    let mut rng = Rng(0x7ead_5002);
+    let data = support::input(&mut rng, (6 << 20) + 12_345);
+    for (blocks, threads) in [
+        (Lzma2Blocks::Size(1 << 20), Threads::of(4)),
+        (Lzma2Blocks::Size(1 << 20), Threads::One),
+        (Lzma2Blocks::None, Threads::One),
+    ] {
+        let what = format!("{blocks:?}, {threads:?}");
+        let options = WriteOptions {
+            threads,
+            ..options(blocks)
+        };
+        let mut w = Writer::with_options(Cursor::new(Vec::new()), options).unwrap();
+        let progress = w.progress();
+        w.start_file(NewEntry::new("a")).unwrap();
+        for chunk in data.chunks(64 << 10) {
+            w.write_all(chunk).unwrap();
+            assert!(progress.compressed() <= progress.taken(), "{what}");
+        }
+        assert_eq!(progress.taken(), data.len() as u64, "{what}");
+        if blocks == Lzma2Blocks::None {
+            assert_eq!(progress.compressed(), progress.taken(), "{what}");
+        } else {
+            // The last block, a part of one, is given only at the end.
+            assert!(progress.compressed() < progress.taken(), "{what}");
+        }
+        let archive = w.finish().unwrap().into_inner();
+        assert_eq!(progress.compressed(), data.len() as u64, "{what}");
+        same(
+            &read_all(&archive, None, Threads::One),
+            &[Read_::Entry("a".into(), Ok(summed(&data)))],
+            &what,
+        );
+    }
+}
+
+/// Stopped while it waits for LZMA2's blocks, as it ends or as it is given
+/// more than the threads hold, a writer fails with `Error::Progress`.
+#[test]
+fn stopped_while_waiting_for_blocks() {
+    let mut rng = Rng(0x7ead_5003);
+    let data = support::input(&mut rng, 4 << 20);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let options = WriteOptions {
+        threads: Threads::of(2),
+        stop: Some(Arc::clone(&stop)),
+        ..options(Lzma2Blocks::Size(1 << 20))
+    };
+    // As it ends.
+    let mut w = Writer::with_options(Cursor::new(Vec::new()), options.clone()).unwrap();
+    w.start_file(NewEntry::new("a")).unwrap();
+    w.write_all(&data[..(1 << 20) + 1]).unwrap();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(w.finish().err(), Some(Error::Progress));
+    // As it is given more than its two threads hold: a block for each, and
+    // one being filled.
+    stop.store(false, std::sync::atomic::Ordering::Relaxed);
+    let mut w = Writer::with_options(Cursor::new(Vec::new()), options).unwrap();
+    w.start_file(NewEntry::new("a")).unwrap();
+    w.write_all(&data[..2 << 20]).unwrap();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let e = w.write_all(&data[2 << 20..]).unwrap_err();
+    assert_eq!(sevenz_error(&e), Error::Progress);
+}
