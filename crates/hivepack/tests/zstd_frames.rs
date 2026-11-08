@@ -65,6 +65,7 @@ fn compress(data: &[u8], options: &FramesOptions) -> Vec<u8> {
     {}
     let n = output.pos;
     assert_eq!(frames.total_in(), data.len() as u64);
+    assert_eq!(frames.consumed(), data.len() as u64);
     assert_eq!(frames.total_out(), n as u64);
     out.truncate(n);
     out
@@ -361,4 +362,48 @@ fn a_memory_limit_lowers_the_threads() {
     };
     assert_eq!(none.threads_used().unwrap(), 1);
     assert_eq!(CompressFrames::new(&none).unwrap().threads(), 1);
+}
+
+/// What is read is counted as consumed once its frame is compressed: never
+/// ahead of what is read, behind it by the frames in flight and the piece at
+/// most, and all of it at the end.
+#[test]
+fn consumed_is_what_the_threads_have_compressed() {
+    let frame_size = 64 << 10;
+    let data = input(40 * frame_size + 1234, 11);
+    for threads in [1, 4] {
+        let mut frames = CompressFrames::new(&options(9, frame_size, threads)).unwrap();
+        let mut out = vec![0; compress_bound(data.len()).unwrap() + 4096];
+        let mut output = OutBuffer::new(&mut out);
+        let mut fed = 0;
+        for piece in data.chunks(10_000) {
+            let mut input = InBuffer::new(piece);
+            while input.pos < piece.len() {
+                frames
+                    .compress_stream(&mut output, &mut input, EndDirective::Continue)
+                    .unwrap();
+            }
+            fed += piece.len() as u64;
+            let consumed = frames.consumed();
+            assert_eq!(frames.total_in(), fed);
+            assert!(consumed <= fed, "{threads} threads: {consumed} of {fed}");
+            assert_eq!(
+                consumed % frame_size as u64,
+                0,
+                "{threads} threads: whole frames"
+            );
+            let behind = (threads as u64 + 1) * frame_size as u64;
+            assert!(
+                fed - consumed <= behind,
+                "{threads} threads: {consumed} of {fed}"
+            );
+        }
+        let mut input = InBuffer::new(&[][..]);
+        while frames
+            .compress_stream(&mut output, &mut input, EndDirective::End)
+            .unwrap()
+            != 0
+        {}
+        assert_eq!(frames.consumed(), data.len() as u64, "{threads} threads");
+    }
 }

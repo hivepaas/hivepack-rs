@@ -13,6 +13,9 @@
 //! The pieces are cut where their size says, never where the threads would:
 //! the output is the same whatever the threads, one or many.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::Threads;
 use crate::workers::Workers;
 use crate::zstd::{
@@ -149,6 +152,8 @@ struct Job {
     piece: Vec<u8>,
     level: i32,
     checksum: bool,
+    /// Where the piece is counted once it is compressed.
+    compressed: Arc<AtomicU64>,
 }
 
 /// A frame, and the size of its content.
@@ -161,6 +166,8 @@ fn compress_frame(cctx: &mut Option<Box<CCtx>>, job: Job) -> Frame {
     let bound = compress_bound(job.piece.len()).ok_or(Error::from(ErrorCode::SrcSizeWrong))?;
     let mut frame = vec![0; bound];
     let size = cctx.compress2(&mut frame, &job.piece)?;
+    job.compressed
+        .fetch_add(job.piece.len() as u64, Ordering::Relaxed);
     frame.truncate(size);
     frame.shrink_to_fit();
     Ok((frame, job.piece.len()))
@@ -224,6 +231,8 @@ pub struct CompressFrames {
     failed: Option<Error>,
     total_in: u64,
     total_out: u64,
+    /// The input of the frames compressed, counted by the threads.
+    compressed: Arc<AtomicU64>,
 }
 
 impl CompressFrames {
@@ -249,6 +258,7 @@ impl CompressFrames {
             failed: None,
             total_in: 0,
             total_out: 0,
+            compressed: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -313,6 +323,17 @@ impl CompressFrames {
     /// The bytes written so far.
     pub fn total_out(&self) -> u64 {
         self.total_out
+    }
+
+    /// The bytes read so far whose frames are compressed, as
+    /// `ZSTD_getFrameProgression` says of a stream's `consumed`:
+    /// [`CompressFrames::total_in`] less the frames in flight and the piece
+    /// not yet a frame. With more than one thread, read takes up to a frame
+    /// for each thread before they are compressed, so this, not
+    /// `total_in`, is how far the compression has gone. It counts a frame
+    /// as its thread ends it, before it is written out.
+    pub fn consumed(&self) -> u64 {
+        self.compressed.load(Ordering::Relaxed)
     }
 
     /// The threads it compresses in, as [`FramesOptions::threads_used`] said.
@@ -416,6 +437,7 @@ impl CompressFrames {
             piece: std::mem::take(&mut self.piece),
             level: self.level,
             checksum: self.checksum,
+            compressed: Arc::clone(&self.compressed),
         });
         Ok(())
     }
