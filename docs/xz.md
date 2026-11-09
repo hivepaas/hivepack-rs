@@ -78,14 +78,18 @@ AMD Ryzen 9 9950X (x86-64, Linux), October 2026, the 12 Silesia files with CRC64
 
 Every Stream was liblzma's, byte for byte. By preset, the means are 1.03×, 1.04×, 0.99× and 1.01×; the two below 0.95× are `dickens` and `mr` at preset 9 (0.94× and 0.93×). The encoder was there as first ported.
 
-Decompression at presets 0, 6 and 9, best of three rounds. liblzma is built as `liblzma-sys` builds it, which on x86-64 with GCC or Clang decodes its range coder's bittrees, matched literals, reverse bittrees and direct bits in inline assembly (`LZMA_RANGE_DECODER_CONFIG` 0x1F0); on other machines, arm64 among them, liblzma has C there. Both are measured, the C one by building `liblzma-sys` with `CFLAGS=-DLZMA_RANGE_DECODER_CONFIG=0`:
+Decompression at presets 0, 6 and 9, best of three rounds, November 2026. liblzma is built as `liblzma-sys` builds it, which on x86-64 with GCC or Clang decodes its range coder's bittrees, matched literals, reverse bittrees and direct bits in inline assembly (`LZMA_RANGE_DECODER_CONFIG` 0x1F0); on other machines, arm64 among them, liblzma has C there. Both are measured, the C one by building `liblzma-sys` with `CFLAGS=-DLZMA_RANGE_DECODER_CONFIG=0`:
 
 | | Mean | Range | At 0.95× or more |
 |---|---|---|---|
-| Against liblzma with its x86-64 assembly | 0.81× | 0.74–0.89× | 0 of 36 |
-| Against liblzma's C | 1.18× | 1.06–1.34× | 36 of 36 |
+| Against liblzma with its x86-64 assembly | 0.94× | 0.89–1.03× | 11 of 36 |
+| Against liblzma's C | 1.44× | 1.23–1.69× | 36 of 36 |
 
-So the port is at liblzma's speed where liblzma is C, and below it on x86-64, where it is assembly: **the target is not met there yet.** As first ported, with the resumable mode only, as liblzma has with `HAVE_SMALL`, the port was at 0.60–0.82×; the Non-resumable mode brought it to the numbers above. Bounds checks cost about 5% (measured with them removed, which the crate's rules forbid); loading both probabilities a bittree's next bit may need before the bit is known, as the assembly does, gained nothing in Rust. Closing the rest of the gap is the next work on the decoder. arm64 is not measured yet.
+By preset, against the assembly: 0.93×, 0.95× and 0.95×. So the port is well past liblzma's speed where liblzma is C, and at it on x86-64, where it is assembly, on average just under the target. As first ported, with the resumable mode only, as liblzma has with `HAVE_SMALL`, the port was at 0.60–0.82×; the Non-resumable mode brought it to 0.81× (0.74–0.89×; 1.18× liblzma's C), and decoding its bittrees as the assembly does to the numbers above:
+
+- **The bits of a bittree, a literal's above all, as liblzma's assembly decodes them** (`bittree_fast!`, `matched8!` in `lzma_decoder.rs`, the Non-resumable mode only). A node's two children's probabilities are read before its bit is known, and the bit picks one (`std::hint::select_unpredictable`, a `cmov`), so that reading them is not on the way from one bit to the next: that way is then the multiplication and the comparison, as in the assembly. For a literal after a match the two indices the next bit may take are made from the match byte's bit as both outcomes would make them. Each tree is taken once as an array of its size (a literal coder's 0x300, a length's 8 or 256, a slot's 64), its bounds checked there, and every index into it is masked to it, so the compiler leaves out the check of each read. The bits and the probabilities written are the C's. Plain literals: 0.81× to 0.84×; literals after a match: to 0.90× (`x-ray` 0.79× to 0.99×, `mr` 0.81× to 0.94×); lengths and slots: to 0.94×. Reading both children with a bounds check on each, as tried before, gained nothing; and masking every index of the whole array of probabilities, rounded up to 16,384, made it 2–3% slower.
+
+Bounds checks left cost little more: the input's, once per byte of it, and the dictionary's. arm64 is not measured yet.
 
 ### The multithreaded encoder
 
@@ -95,7 +99,7 @@ Very small Blocks cost about what they cost liblzma, as both keep a Block's enco
 
 ### The multithreaded decoder
 
-`--threads N` without `--compress` decodes the Streams of liblzma's threaded encoder with each threaded decoder. Silesia at presets 0 and 6, best of three rounds, on x86-64 where liblzma's range decoder is assembly: 0.81× with 1 thread (0.75–0.89×), 0.81× with 4 (0.75–0.90×) and 0.81× with 16 (0.74–0.90×). So the threads add nothing to the gap of the decoder above; `mozilla` at preset 0 goes from 112 MB/s to 405 and 1,260 MB/s (liblzma 140, 506 and 1,640), and a preset's big Blocks make fewer threads useful at preset 6, as for liblzma.
+`--threads N` without `--compress` decodes the Streams of liblzma's threaded encoder with each threaded decoder. Silesia at presets 0 and 6, best of three rounds, on x86-64 where liblzma's range decoder is assembly, November 2026: 0.93× with 1 thread (0.90–1.02×) and 0.94× with 16 (0.89–1.01×), where they were 0.81× with 1, 4 and 16. So the threads add nothing to the gap of the decoder above; `mozilla` at preset 0 goes from 132 MB/s to 1,530 MB/s (liblzma 140 and 1,660), and a preset's big Blocks make fewer threads useful at preset 6, as for liblzma.
 
 Small Blocks cost more than they cost liblzma, which keeps a worker's decoder from one Block to the next where the port makes a new one: 1 MB in Blocks of 4,096 bytes takes 3.9 ms in one thread against 2.9 ms and 1.1 ms in four against 0.76 ms (0.69–0.75×), in Blocks of 100 bytes 0.88–0.93×. This is left to do, as for the encoders above.
 

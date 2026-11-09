@@ -399,6 +399,107 @@ impl LzmaDecoder {
                 symbol = symbol.wrapping_add(($final_add) as u32);
             }};
         }
+        // `rc_bittree3`, `rc_bittree6` and `rc_bittree8` of the Non-resumable
+        // mode, as `bittree!`, but as liblzma's x86-64 assembly decodes them,
+        // not its C. Differs from liblzma's C, without a difference to see:
+        // the probabilities of a node's two children are read before its bit
+        // is known, and the bit picks one, so that reading them is not on the
+        // way from one bit to the next; and they are read from the tree's
+        // `1 << $bits`, its bounds checked once, by indices masked to it,
+        // which leaves out the checks of each. At the last bit, what is read
+        // is not used. The bits, and the probabilities written, are
+        // `bittree!`'s.
+        macro_rules! bittree_fast {
+            ($probs:expr, $bits:literal, $final_add:expr) => {{
+                const SIZE: usize = 1 << $bits;
+                let base = $probs;
+                match p[base..].first_chunk_mut::<SIZE>() {
+                    Some(tree) => {
+                        symbol = 1;
+                        let mut prob = u32::from(tree[1]);
+                        for _ in 0..$bits {
+                            normalize!();
+                            let node = symbol as usize & (SIZE - 1);
+                            let zero = u32::from(tree[(2 * node) & (SIZE - 1)]);
+                            let one = u32::from(tree[(2 * node + 1) & (SIZE - 1)]);
+                            rc_bound = (rc.range >> RC_BIT_MODEL_TOTAL_BITS) * prob;
+                            let bit = rc.code >= rc_bound;
+                            let mask = 0u32.wrapping_sub(u32::from(bit));
+                            rc.range = core::hint::select_unpredictable(
+                                bit,
+                                rc.range.wrapping_sub(rc_bound),
+                                rc_bound,
+                            );
+                            rc.code = rc.code.wrapping_sub(rc_bound & mask);
+                            let offset = !mask & RC_BIT_MODEL_OFFSET;
+                            tree[node] = prob
+                                .wrapping_sub(prob.wrapping_add(offset) >> RC_MOVE_BITS)
+                                as Probability;
+                            symbol = (symbol << 1) + u32::from(bit);
+                            prob = core::hint::select_unpredictable(bit, one, zero);
+                        }
+                        symbol = symbol.wrapping_add(($final_add) as u32);
+                    }
+                    None => bittree!(base, $bits, $final_add),
+                }
+            }};
+        }
+        // `rc_matched_literal` of a literal at `$probs` after a match, its
+        // byte `$match_byte`, as `bittree_fast!` decodes one without: the
+        // probabilities of both indices the next bit may take read before
+        // the bit is known, from the literal coder's 0x300, by indices made
+        // of their parts masked, as no index is past 0x2FF, so that the
+        // compiler leaves out the checks of each. Where the next bit has no
+        // next index, at the last, what is read is not used. The bits, and
+        // the probabilities written, are `matched_literal!`'s.
+        macro_rules! matched8 {
+            ($probs:expr, $match_byte:expr) => {{
+                let base = $probs;
+                let match_byte = $match_byte;
+                match p[base..].first_chunk_mut::<LITERAL_CODER_SIZE>() {
+                    Some(lit) => {
+                        let index = |offset: u32, match_bit: u32, symbol: u32| {
+                            ((offset & 0x100) + (match_bit & 0x100) + (symbol & 0xFF)) as usize
+                        };
+                        let mut t_match_byte = u32::from(match_byte) << 1;
+                        let mut t_offset: u32 = 0x100;
+                        let mut t_match_bit = t_match_byte & t_offset;
+                        symbol = 1;
+                        let mut at = index(t_offset, t_match_bit, symbol);
+                        let mut prob = u32::from(lit[at]);
+                        for _ in 0..8 {
+                            normalize!();
+                            let next_byte = t_match_byte << 1;
+                            let offset0 = t_offset & !t_match_bit;
+                            let offset1 = t_offset & t_match_bit;
+                            let at0 = index(offset0, next_byte & offset0, symbol << 1);
+                            let at1 = index(offset1, next_byte & offset1, (symbol << 1) + 1);
+                            let zero = u32::from(lit[at0]);
+                            let one = u32::from(lit[at1]);
+                            rc_bound = (rc.range >> RC_BIT_MODEL_TOTAL_BITS) * prob;
+                            let bit = rc.code >= rc_bound;
+                            let mask = 0u32.wrapping_sub(u32::from(bit));
+                            rc.range = core::hint::select_unpredictable(
+                                bit,
+                                rc.range.wrapping_sub(rc_bound),
+                                rc_bound,
+                            );
+                            rc.code = rc.code.wrapping_sub(rc_bound & mask);
+                            let offset = !mask & RC_BIT_MODEL_OFFSET;
+                            lit[at] = prob.wrapping_sub(prob.wrapping_add(offset) >> RC_MOVE_BITS)
+                                as Probability;
+                            symbol = (symbol << 1) + u32::from(bit);
+                            t_offset = core::hint::select_unpredictable(bit, offset1, offset0);
+                            t_match_byte = next_byte;
+                            t_match_bit = next_byte & t_offset;
+                            at = core::hint::select_unpredictable(bit, at1, at0);
+                            prob = core::hint::select_unpredictable(bit, one, zero);
+                        }
+                    }
+                    None => matched_literal!(base, match_byte),
+                }
+            }};
+        }
         // `rc_bittree_rev4`.
         macro_rules! bittree_rev4 {
             ($probs:expr) => {{
@@ -468,7 +569,7 @@ impl LzmaDecoder {
                 let ld = $ld;
                 if if_0!(ld + LEN_CHOICE) {
                     update_0!(ld + LEN_CHOICE);
-                    bittree!(
+                    bittree_fast!(
                         ld + LEN_LOW + $pos_state as usize * LEN_LOW_SYMBOLS as usize,
                         3,
                         MATCH_LEN_MIN.wrapping_sub(LEN_LOW_SYMBOLS)
@@ -478,7 +579,7 @@ impl LzmaDecoder {
                     update_1!(ld + LEN_CHOICE);
                     if if_0!(ld + LEN_CHOICE2) {
                         update_0!(ld + LEN_CHOICE2);
-                        bittree!(
+                        bittree_fast!(
                             ld + LEN_MID + $pos_state as usize * LEN_MID_SYMBOLS as usize,
                             3,
                             (MATCH_LEN_MIN + LEN_LOW_SYMBOLS).wrapping_sub(LEN_MID_SYMBOLS)
@@ -486,7 +587,7 @@ impl LzmaDecoder {
                         $target = symbol;
                     } else {
                         update_1!(ld + LEN_CHOICE2);
-                        bittree!(
+                        bittree_fast!(
                             ld + LEN_HIGH,
                             8,
                             (MATCH_LEN_MIN + LEN_LOW_SYMBOLS + LEN_MID_SYMBOLS)
@@ -930,11 +1031,11 @@ impl LzmaDecoder {
                     if is_literal_state(state) {
                         state = update_literal_normal(state);
                         // Decode literal without match byte.
-                        bittree!(probs, 8, 0);
+                        bittree_fast!(probs, 8, 0);
                     } else {
                         state = update_literal_matched(state);
                         // Decode literal with match byte.
-                        matched_literal!(probs, dict.get(rep0));
+                        matched8!(probs, dict.get(rep0));
                     }
 
                     // Write decoded literal to dictionary
@@ -967,7 +1068,7 @@ impl LzmaDecoder {
                     // Next, decode the distance into rep0. The next 6 bits
                     // determine how to decode the rest of the distance.
                     probs = DIST_SLOT + (get_dist_state(len) * DIST_SLOTS) as usize;
-                    bittree!(probs, 6, 0u32.wrapping_sub(DIST_SLOTS));
+                    bittree_fast!(probs, 6, 0u32.wrapping_sub(DIST_SLOTS));
 
                     if symbol < DIST_MODEL_START {
                         // If the decoded symbol is < DIST_MODEL_START then
