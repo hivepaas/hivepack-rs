@@ -469,3 +469,48 @@ fn the_threads_are_held_from_the_budget() {
     assert!(most > 0 && most <= 12 << 20, "{most}");
     assert_eq!(budget.held(), 0);
 }
+
+/// LZMA2's blocks decoded ahead are held from the budget as each is given,
+/// beside what the folders' decoders hold, and all given back.
+#[cfg(feature = "memory")]
+#[test]
+fn the_blocks_are_held_from_the_budget() {
+    use hivepack::memory::Budget;
+    let data = archive(
+        &[
+            Put::Dir("d".into()),
+            Put::File(
+                "d/one".into(),
+                text(3, 6 << 20),
+                Method::Lzma2 { preset: 1 },
+            ),
+        ],
+        WriteOptions {
+            lzma2_blocks: Lzma2Blocks::Size(300_000),
+            ..WriteOptions::default()
+        },
+    );
+    let budget = Budget::new(1 << 30);
+    // The least and the most held as the progress is told: the directory
+    // first, before any block.
+    let during = Arc::new(Mutex::new((u64::MAX, 0u64)));
+    let record = Arc::clone(&during);
+    let held = budget.clone();
+    let options = with_threads(Threads::of(8), |o| {
+        o.memory_budget = Some(budget.clone());
+        o.progress = Some(Arc::new(move |_: &Progress| {
+            let mut seen = record.lock().unwrap();
+            let now = held.held();
+            *seen = (seen.0.min(now), seen.1.max(now));
+        }));
+    });
+    let scratch = Scratch::new();
+    extract(&data, &scratch.out(), &options).unwrap();
+    assert_eq!(
+        std::fs::read(scratch.out().join("d/one")).unwrap(),
+        text(3, 6 << 20)
+    );
+    let (least, most) = *during.lock().unwrap();
+    assert!(least > 0 && most > least, "{least} to {most}");
+    assert_eq!(budget.held(), 0);
+}
