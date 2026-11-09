@@ -6,6 +6,9 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+#[path = "threads_support/mod.rs"]
+mod threads_support;
+
 use std::collections::HashSet;
 use std::io::Cursor;
 use std::num::NonZeroU32;
@@ -121,13 +124,13 @@ fn contents(dir: &Path) -> Vec<String> {
 }
 
 /// One thread, two, eight, and as many as the machine runs.
-fn every_threads() -> [Threads; 4] {
-    [
+fn every_threads() -> Vec<Threads> {
+    threads_support::chosen([
         Threads::One,
         Threads::Exactly(NonZeroU32::new(2).unwrap()),
         Threads::Exactly(NonZeroU32::new(8).unwrap()),
         Threads::Auto,
-    ]
+    ])
 }
 
 fn eight() -> Threads {

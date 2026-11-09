@@ -62,14 +62,16 @@ Every stream was zlib's, byte for byte.
 
 ### Where decompression stands
 
-AMD Ryzen 9 9950X (x86-64, Linux), October 2026, the Silesia corpus compressed by zlib at levels 1, 6 and 9, best of three rounds taken in turn:
+AMD Ryzen 9 9950X (x86-64, Linux), November 2026, the Silesia corpus compressed by zlib at levels 1, 6 and 9, best of three rounds taken in turn:
 
 | | Mean | Range | At 0.95× or more |
 |---|---|---|---|
-| In one call | 1.00× zlib | 0.92–1.09× | 34 of 36 |
-| Streaming, in pieces of 16 KiB as zlib's `zpipe.c` | 1.05× | 0.95–1.14× | 36 of 36 |
+| In one call | 1.49× zlib | 1.12–2.04× | 36 of 36 |
+| Streaming, in pieces of 16 KiB as zlib's `zpipe.c` | 1.28× | 1.03–1.54× | 36 of 36 |
 
-It was 0.82× in one call (0.71–0.86×) and 0.90× streaming before the speed work, all of it in `inflate_fast`. What made the difference, the largest first, measured at level 6 in one call:
+It was 0.82× in one call (0.71–0.86×) and 0.90× streaming before the speed work, all of it in `inflate_fast`, and 0.97× (0.89–1.07×) and 1.04× (0.94–1.15×) before its last item, whole pieces. What made the difference, measured at level 6 in one call:
+
+- **Whole pieces, sixteen bytes at a time.** Where the output has room for a piece past a match, a match at least eight bytes back is copied in whole pieces, the last one too, writing up to 15 bytes past the match into space the output has not reached yet, as zlib-ng and libdeflate copy; sixteen bytes at a time where the match starts sixteen or more back. The last piece cut to the match, byte by byte, was most of a copy's cost on text, whose matches are short. 0.97× to 1.49× over the levels; text at level 1 gains the most (dickens and reymont 0.89× to 2.0×), x-ray the least (1.0× to 1.12×). Inflating the 2.3 GB of a computer's own programs and libraries, as one ZIP entry, takes 3.60 s where it took 4.55 s, CRC included. Pieces of 32 bytes made little more difference (1%), and are not in the port. `Inflate::inflate` may so write over the bytes of `output` past what it says it wrote, as zlib-ng's does; zlib writes none.
 
 - **Eight bytes of input at once.** zlib pulls two bytes into its bit buffer whenever it has fewer than 15 bits, up to six times per length and distance. The port reads eight bytes once per code, to 56 bits or more, which is enough for a length, a distance and their extra bits (48 at most). The bits past those counted are the input's next bits, so they can be or-ed in again. 0.83× to 0.94×.
 
@@ -80,7 +82,7 @@ It was 0.82× in one call (0.71–0.86×) and 0.90× streaming before the speed 
 
 Tried, and not worth it: copying matches two to seven bytes back eight bytes at a time too, from the nearest multiple of their distance that is eight or more back. That made decompression 9% slower on average, and is not in the port.
 
-The slowest inputs are text at level 1, mostly literals. arm64 is not measured yet.
+The slowest input is now x-ray, an image with few matches, mostly literals. arm64 is not measured yet.
 
 ### Deflate64
 
@@ -132,7 +134,7 @@ On an AMD Ryzen 9 9950X (16 cores, 32 threads), November 2026, 546 MB of mixed f
 |---|---|---|---|
 | `zlib.h`, `zconf.h`, `zutil.{h,c}` (the parts inflate uses) | `zutil.rs` | done | the return codes and messages in every comparison |
 | `adler32.c` | `adler32.rs` | done | the definition; the trailers of zlib streams |
-| `crc32.c`, `crc32.h` | `crc32.rs` | done | `crc32.h`'s tables; the definition; the trailers of gzip streams |
+| `crc32.c`, `crc32.h` | `crc32.rs` | done; with `unsafe-fast`, arm64's CRC-32 instructions where zlib uses them, and x86-64's carry-less multiplication (`PCLMULQDQ`), which zlib does not use, folding as zlib-ng does: 22 GB/s where the braided code runs at 7.2 (see [unsafe.md](unsafe.md)) | `crc32.h`'s tables; the definition; the trailers of gzip streams; the instructions against the braided code |
 | `inftrees.{h,c}`, `inffixed.h` | `inftrees.rs`, `inffixed.rs` | done | `inffixed.h` rebuilt; `infcover.c`'s `cover_trees`; every dynamic block in `tests/zlib.rs` |
 | `inffast.{h,c}` | `inffast.rs` | done | `tests/zlib.rs`; `tests/oracle.rs`; `infcover.c`'s `cover_fast` |
 | `inflate.{h,c}` | `inflate.rs` | done | `tests/zlib.rs`; `tests/oracle.rs`, for every function and flush; `infcover.c`'s `cover_support`, `cover_wrap` and `cover_inflate` |
@@ -148,7 +150,7 @@ On an AMD Ryzen 9 9950X (16 cores, 32 threads), November 2026, 546 MB of mixed f
 - `infback.c`: `inflateBack`, a callback interface to the same decoder.
 - `gzlib.c`, `gzread.c`, `gzwrite.c`, `gzclose.c`: reading and writing gzip files. The gzip format itself is in `inflate.c` and is ported.
 - Parts that exist only because zlib is in C: custom allocators (`zalloc`, `zfree`), the version checks of `inflateInit_` and `deflateInit_`, the `method` argument of `deflateInit2` (always `Z_DEFLATED`), the checks of a null or uninitialised stream, and building the CRC tables on first use (`DYNAMIC_CRC_TABLE`).
-- Build options that zlib leaves off by default: `INFLATE_STRICT`, `INFLATE_ALLOW_INVALID_DISTANCE_TOOFAR_ARRR` (so `inflateUndermine` always fails, as in a default build), `PKZIP_BUG_WORKAROUND`, `BUILDFIXED`, the ARMv8 CRC instructions, and in the compressor `FASTEST`, `LIT_MEM`, `UNALIGNED_OK`, `FORCE_STATIC`, `FORCE_STORED`, `GEN_TREES_H` and `ZLIB_DEBUG`.
+- Build options that zlib leaves off by default: `INFLATE_STRICT`, `INFLATE_ALLOW_INVALID_DISTANCE_TOOFAR_ARRR` (so `inflateUndermine` always fails, as in a default build), `PKZIP_BUG_WORKAROUND`, `BUILDFIXED`, and in the compressor `FASTEST`, `LIT_MEM`, `UNALIGNED_OK`, `FORCE_STATIC`, `FORCE_STORED`, `GEN_TREES_H` and `ZLIB_DEBUG`.
 - `contrib/`, except `infback9`.
 
 ## Following new releases

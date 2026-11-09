@@ -42,6 +42,15 @@ extern crate self as hivepack;
 pub mod age;
 #[cfg(feature = "bzip2")]
 pub mod bzip2;
+#[cfg(all(
+    target_arch = "x86_64",
+    not(miri),
+    any(
+        all(feature = "deflate", feature = "deflate-unsafe-fast"),
+        all(feature = "xz", feature = "xz-unsafe-fast")
+    )
+))]
+mod clmul;
 #[cfg(feature = "cpio")]
 pub mod cpio;
 #[cfg(feature = "crypto")]

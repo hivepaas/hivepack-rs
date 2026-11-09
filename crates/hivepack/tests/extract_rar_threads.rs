@@ -6,6 +6,9 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+#[path = "threads_support/mod.rs"]
+mod threads_support;
+
 #[path = "extract_support/mod.rs"]
 mod support;
 
@@ -31,13 +34,13 @@ const HARD_LINK: u64 = 4;
 const FILE_COPY: u64 = 5;
 
 /// One thread, two, eight, and as many as the machine runs.
-fn every_threads() -> [Threads; 4] {
-    [
+fn every_threads() -> Vec<Threads> {
+    threads_support::chosen([
         Threads::One,
         Threads::Exactly(NonZeroU32::new(2).unwrap()),
         Threads::Exactly(NonZeroU32::new(8).unwrap()),
         Threads::Auto,
-    ]
+    ])
 }
 
 fn extract(data: &[u8], out: &Path, options: &Options) -> Result<Summary, Error> {
@@ -200,13 +203,23 @@ fn the_same(label: &str, data: &[u8], change: impl Fn(&mut Options)) -> Vec<(Thr
     reporting
 }
 
+/// How many threads wrote with the most threads given: eight, or two under
+/// emulation ([`threads_support::chosen`]).
+fn most(reporting: &[(Threads, usize)]) -> usize {
+    reporting
+        .iter()
+        .find(|(t, _)| *t == Threads::Exactly(NonZeroU32::new(8).unwrap()))
+        .or(reporting.last())
+        .map_or(0, |(_, n)| *n)
+}
+
 #[test]
 fn what_is_written_is_the_same() {
     let data = many_rar();
     let reporting = the_same("many", &data, |_| {});
-    // Several threads wrote, where asked to.
+    // Several threads wrote, where asked to: the most there are.
     assert_eq!(reporting[0].1, 1);
-    assert!(reporting[2].1 > 1, "{reporting:?}");
+    assert!(most(&reporting) > 1, "{reporting:?}");
     let scratch = Scratch::new();
     let options = with_threads(Threads::Exactly(NonZeroU32::new(4).unwrap()), |_| {});
     extract(&data, &scratch.out(), &options).unwrap();
@@ -267,7 +280,7 @@ fn real_archives_are_the_same() {
             o.password = Some(b"hivepack".to_vec());
             o.limits.max_ratio = u64::MAX;
         });
-        let several = reporting[2].1 > 1;
+        let several = most(&reporting) > 1;
         assert_eq!(several, !name.contains("solid"), "{name}: {reporting:?}");
         read += 1;
     }
