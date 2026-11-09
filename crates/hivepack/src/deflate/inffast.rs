@@ -1,6 +1,11 @@
 //! The fast decoding loop: port of `inffast.{h,c}`.
 
-use crate::deflate::inflate::{InflateState, Mode, TABLE_SPAN};
+use std::sync::OnceLock;
+
+use crate::deflate::inflate::{FastKind, InflateState, Mode};
+use crate::deflate::inftrees::{
+    Code, CodeType, DIST_ROOT, ENOUGH_DISTS_FAST, ENOUGH_LENS_FAST, LEN_ROOT, build_table,
+};
 
 /// Decodes literal, length and distance codes and writes literals and match
 /// bytes until either not enough input or output is available, an
@@ -16,7 +21,8 @@ use crate::deflate::inflate::{InflateState, Mode, TABLE_SPAN};
 /// - `start` is the output space inflate() had when it was called, so that
 ///   the output written in this call starts at `*next_out - (start -
 ///   left)`;
-/// - `state.bits < 8`.
+/// - `state.bits < 8`, zlib says; inflate() may leave a whole byte there,
+///   which the port's loop takes as it takes the rest.
 ///
 /// On return, `state.mode` is one of `Len` (not enough input or output),
 /// `Type` (end of block) or `Bad` (with `*msg` set). The bytes of the bit
@@ -40,6 +46,12 @@ use crate::deflate::inflate::{InflateState, Mode, TABLE_SPAN};
 ///   six or more are left, with nothing else changed. So zlib decodes a
 ///   code here exactly when six bytes or more are left past the bytes
 ///   already used, and the port's loop goes on under that same test.
+/// - the codes are decoded from tables of their own ([`FastTables`]), made
+///   from zlib's for each block, which a dynamic block builds with roots of
+///   11 and 8 bits: each entry a word that says all of what it is. What is
+///   decoded, the bits each code takes, where the loop stops and its errors
+///   are those of zlib's tables. inflate() calls the loop only where there
+///   are such tables, as there always are for a block of codes.
 pub(crate) fn inflate_fast(
     state: &mut InflateState,
     input: &[u8],
@@ -49,35 +61,237 @@ pub(crate) fn inflate_fast(
     start: usize,
     msg: &mut Option<&'static str>,
 ) {
-    // copy state to local variables
-    let mut inp = *next_in; // local strm->next_in
-    let last = input.len() - 6; // have enough input while the bytes used reach no further
-    let mut out = *next_out; // local strm->next_out
-    let beg = out - (start - (output.len() - out)); // inflate()'s initial strm->next_out
-    let end = out + (output.len() - out - 257); // while out < end, enough space available
-    let wsize = state.wsize; // window size or zero if not using window
-    let whave = state.whave; // valid bytes in the window
-    let wnext = state.wnext; // window write index
-    let mut hold = state.hold; // local strm->hold
-    let mut bits = state.bits; // local strm->bits
-    let lmask = (1u64 << state.lenbits) - 1; // mask for first level of length codes
-    let dmask = (1u64 << state.distbits) - 1; // mask for first level of distance codes
-    let sane = state.sane;
-    let mut mode = None; // the mode to leave in, when not Len
+    match state.fast_kind {
+        FastKind::Own => {
+            if let Some(tables) = state.fast.take() {
+                inflate_fast_packed(state, input, next_in, output, next_out, start, msg, &tables);
+                state.fast = Some(tables);
+            }
+        }
+        FastKind::Fixed => {
+            if let Some(tables) = fixed_tables() {
+                inflate_fast_packed(state, input, next_in, output, next_out, start, msg, tables);
+            }
+        }
+        // inflate() does not call it then.
+        FastKind::None => {}
+    }
+}
+
+/// The masks of the roots of [`FastTables::len`] and [`FastTables::dist`],
+/// `LEN_ROOT` and `DIST_ROOT` bits.
+const LEN_ROOT_MASK: usize = (1 << LEN_ROOT) - 1;
+const DIST_ROOT_MASK: usize = (1 << DIST_ROOT) - 1;
+/// The tables' sizes, powers of two past the most they take, which every
+/// index is masked to, so that the compiler leaves out the bounds checks.
+const LEN_SPAN: usize = 4096;
+const DIST_SPAN: usize = 512;
+const _: () = assert!(LEN_SPAN >= ENOUGH_LENS_FAST && DIST_SPAN >= ENOUGH_DISTS_FAST);
+
+/// What an entry of [`FastTables`] is: a literal, a link to a sub-table,
+/// the end of the block, or an invalid code; a length or distance base is
+/// none of them.
+const LITERAL: u32 = 1 << 15;
+const SUBTABLE: u32 = 1 << 14;
+const END: u32 = 1 << 13;
+const INVALID: u32 = 1 << 12;
+
+/// The fast loop's tables of a block's codes: zlib's, built with roots of 11
+/// and 8 bits where zlib's are of 9 and 6, so that fewer codes take a
+/// sub-table, each entry made a word that says all of what it is, so that
+/// the loop decodes a code with one load and one test.
+///
+/// An entry's bits 0 to 7 are the bits the code takes, its extra bits with
+/// it; bits 8 to 11 the code's own length, which the extra bits come after
+/// (for a link, the sub-table's index bits); bits 12 to 15 what it is
+/// ([`LITERAL`], [`SUBTABLE`], [`END`], [`INVALID`], or none for a base);
+/// bits 16 to 31 its value: the literal, the base, or the sub-table's
+/// start. A sub-table is indexed by the bits after the root's, which a link
+/// does not take: its entries take the whole code.
+///
+/// zlib's checks of the code are those of its own tables, and so is what
+/// each code takes, invalid ones too: these are made from them.
+#[derive(Clone)]
+pub(crate) struct FastTables {
+    len: [u32; LEN_SPAN],
+    dist: [u32; DIST_SPAN],
+}
+
+impl FastTables {
+    pub(crate) fn boxed() -> Box<FastTables> {
+        Box::new(FastTables {
+            len: [0; LEN_SPAN],
+            dist: [0; DIST_SPAN],
+        })
+    }
+
+    /// The tables made from zlib's: `lens`, the literal/length table and its
+    /// sub-tables, with a root of `len_bits`, and `dists`, the distance
+    /// table, of `dist_bits`. `false` where a root is larger than this has
+    /// room for, which zlib's never are.
+    pub(crate) fn make(
+        &mut self,
+        lens: &[Code],
+        len_bits: u32,
+        dists: &[Code],
+        dist_bits: u32,
+    ) -> bool {
+        made_from(lens, len_bits, LEN_ROOT, &mut self.len)
+            && made_from(dists, dist_bits, DIST_ROOT, &mut self.dist)
+    }
+}
+
+/// `codes`, zlib's table and its sub-tables with a root of `bits`, made into
+/// `out`, whose root is `root` bits. Where `bits` is less, as where the
+/// code's longest is shorter than `root`, zlib's table has no sub-table: its
+/// entries are repeated, as each index's low bits find the same entry.
+fn made_from(codes: &[Code], bits: u32, root: u32, out: &mut [u32]) -> bool {
+    let full = 1usize << root;
+    if bits > root || codes.len() > out.len() || codes.len() < 1 << bits {
+        return false;
+    }
+    if bits < root {
+        let low = (1usize << bits) - 1;
+        for (i, entry) in out[..full].iter_mut().enumerate() {
+            *entry = packed(codes[i & low], 0);
+        }
+    } else {
+        for (entry, &code) in out[..full].iter_mut().zip(&codes[..full]) {
+            *entry = packed(code, 0);
+        }
+        for (entry, &code) in out[full..codes.len()].iter_mut().zip(&codes[full..]) {
+            *entry = packed(code, root);
+        }
+    }
+    true
+}
+
+/// zlib's entry `code` as a word of [`FastTables`]; `under` the root's bits
+/// for an entry of a sub-table, whose `bits` are those past them, 0 for the
+/// root's.
+fn packed(code: Code, under: u32) -> u32 {
+    let op = u32::from(code.op);
+    let length = u32::from(code.bits) + under;
+    let value = u32::from(code.val) << 16;
+    if op == 0 {
+        LITERAL | value | length
+    } else if op & 16 != 0 {
+        // A base, its extra bits after the code.
+        value | (length << 8) | (length + (op & 15))
+    } else if op & 64 == 0 {
+        // A link: `op` index bits, the sub-table at `val`.
+        SUBTABLE | value | (op << 8)
+    } else if op & 32 != 0 {
+        END | length
+    } else {
+        INVALID | length
+    }
+}
+
+/// The tables of the fixed codes (`inffixed.h`'s, built again with roots of
+/// 11 and 8 bits), made once.
+fn fixed_tables() -> Option<&'static FastTables> {
+    static FIXED: OnceLock<Option<Box<FastTables>>> = OnceLock::new();
+    FIXED
+        .get_or_init(|| {
+            let mut lens = [0u16; 320];
+            lens[..144].fill(8);
+            lens[144..256].fill(9);
+            lens[256..280].fill(7);
+            lens[280..288].fill(8);
+            lens[288..].fill(5);
+            let mut work = [0u16; 288];
+            let mut codes = vec![Code::new(0, 0, 0); ENOUGH_LENS_FAST + ENOUGH_DISTS_FAST];
+            let mut next = 0;
+            let mut len_bits = LEN_ROOT;
+            let lens_built = build_table(
+                CodeType::Lens,
+                &lens[..288],
+                288,
+                &mut codes,
+                &mut next,
+                &mut len_bits,
+                &mut work,
+                ENOUGH_LENS_FAST,
+                ENOUGH_DISTS_FAST,
+            );
+            let dist_start = next;
+            let mut dist_bits = DIST_ROOT;
+            let dists_built = build_table(
+                CodeType::Dists,
+                &lens[288..],
+                32,
+                &mut codes,
+                &mut next,
+                &mut dist_bits,
+                &mut work,
+                ENOUGH_LENS_FAST,
+                ENOUGH_DISTS_FAST,
+            );
+            let mut tables = FastTables::boxed();
+            let made = lens_built == 0
+                && dists_built == 0
+                && tables.make(
+                    &codes[..dist_start],
+                    len_bits,
+                    &codes[dist_start..next],
+                    dist_bits,
+                );
+            made.then_some(tables)
+        })
+        .as_deref()
+}
+
+/// The entry of the sub-table that `link` points to, in `table`, for the
+/// bits of `hold` after the root's `root`.
+#[inline(always)]
+fn sub_index(link: u32, hold: u64, root: u32) -> usize {
+    let index_bits = (link >> 8) & 0xF;
+    (link >> 16) as usize + ((hold >> root) as usize & ((1usize << index_bits) - 1))
+}
+
+/// The value of a base entry `entry`, its extra bits read from `hold`.
+#[inline(always)]
+fn based(entry: u32, hold: u64) -> u32 {
+    let taken = entry & 0xFF;
+    let code = (entry >> 8) & 0xF;
+    (entry >> 16) + (((hold as u32) & ((1u32 << taken) - 1)) >> code)
+}
+
+/// [`inflate_fast`] with [`FastTables`]: zlib's loop, each code decoded
+/// from its word.
+#[allow(clippy::too_many_arguments)]
+fn inflate_fast_packed(
+    state: &mut InflateState,
+    input: &[u8],
+    next_in: &mut usize,
+    output: &mut [u8],
+    next_out: &mut usize,
+    start: usize,
+    msg: &mut Option<&'static str>,
+    tables: &FastTables,
+) {
+    let mut inp = *next_in;
+    let last = input.len() - 6;
+    let mut out = *next_out;
+    let beg = out - (start - (output.len() - out));
+    let end = out + (output.len() - out - 257);
+    let mut hold = state.hold;
+    let mut bits = state.bits;
+    let mut mode = None;
 
     {
-        let window = &state.window[..];
-        // Differs from zlib: every index into these is masked with
-        // `TABLE_SPAN - 1`, which changes none (see `fast_table`), so that
-        // the compiler leaves out the bounds checks.
-        let lcode = state.fast_table(state.lencode); // local strm->lencode
-        let dcode = state.fast_table(state.distcode); // local strm->distcode
-        const SPAN: usize = TABLE_SPAN - 1;
-
-        // decode literals and length/distances until end-of-block or not
-        // enough input data or output space
-        'outer: loop {
-            // refill to 56 bits or more
+        // What a match that reaches into the window takes, read only then.
+        let window = Window {
+            bytes: &state.window[..],
+            wsize: state.wsize,
+            whave: state.whave,
+            wnext: state.wnext,
+            sane: state.sane,
+        };
+        let len_table = &tables.len;
+        let dist_table = &tables.dist;
+        loop {
             if inp + 8 <= input.len() {
                 hold |= read_word(input, inp) << bits;
                 inp += ((63 - bits) >> 3) as usize;
@@ -85,163 +299,202 @@ pub(crate) fn inflate_fast(
             } else {
                 refill_end(input, &mut inp, &mut hold, &mut bits);
             }
-            let mut here = lcode[(hold & lmask) as usize & SPAN];
-            // dolen:
-            loop {
-                let op = u32::from(here.bits);
-                hold >>= op;
-                bits -= op;
-                let mut op = u32::from(here.op);
-                if op == 0 {
-                    // literal
-                    output[out] = here.val as u8;
-                    out += 1;
-                } else if op & 16 != 0 {
-                    // length base
-                    let mut len = u32::from(here.val);
-                    op &= 15; // number of extra bits
-                    if op != 0 {
-                        len += (hold as u32) & ((1u32 << op) - 1);
-                        hold >>= op;
-                        bits -= op;
-                    }
-                    here = dcode[(hold & dmask) as usize & SPAN];
-                    // dodist:
-                    loop {
-                        let op = u32::from(here.bits);
-                        hold >>= op;
-                        bits -= op;
-                        let mut op = u32::from(here.op);
-                        if op & 16 != 0 {
-                            // distance base
-                            let mut dist = u32::from(here.val);
-                            op &= 15; // number of extra bits
-                            dist += (hold as u32) & ((1u32 << op) - 1);
-                            hold >>= op;
-                            bits -= op;
-                            let dist = dist as usize;
-                            let mut len = len as usize;
-                            let op = out - beg; // max distance in output
-                            if dist > op {
-                                // see if copy from window
-                                let mut op = dist - op; // distance back in window
-                                if op > whave && sane {
-                                    *msg = Some("invalid distance too far back");
-                                    mode = Some(Mode::Bad);
-                                    break 'outer;
-                                }
-                                // Where the rest of the copy comes from: the
-                                // window at `from`, or the output if
-                                // `from_window` is false.
-                                let mut from;
-                                let mut from_window = true;
-                                if wnext == 0 {
-                                    // very common case
-                                    from = wsize - op;
-                                    if op < len {
-                                        // some from window
-                                        len -= op;
-                                        output[out..out + op]
-                                            .copy_from_slice(&window[from..from + op]);
-                                        out += op;
-                                        from = out - dist; // rest from output
-                                        from_window = false;
-                                    }
-                                } else if wnext < op {
-                                    // wrap around window
-                                    from = wsize + wnext - op;
-                                    op -= wnext;
-                                    if op < len {
-                                        // some from end of window
-                                        len -= op;
-                                        output[out..out + op]
-                                            .copy_from_slice(&window[from..from + op]);
-                                        out += op;
-                                        from = 0;
-                                        if wnext < len {
-                                            // some from start of window
-                                            let op = wnext;
-                                            len -= op;
-                                            output[out..out + op].copy_from_slice(&window[..op]);
-                                            out += op;
-                                            from = out - dist; // rest from output
-                                            from_window = false;
-                                        }
-                                    }
-                                } else {
-                                    // contiguous in window
-                                    from = wnext - op;
-                                    if op < len {
-                                        // some from window
-                                        len -= op;
-                                        output[out..out + op]
-                                            .copy_from_slice(&window[from..from + op]);
-                                        out += op;
-                                        from = out - dist; // rest from output
-                                        from_window = false;
-                                    }
-                                }
-                                if from_window {
-                                    output[out..out + len]
-                                        .copy_from_slice(&window[from..from + len]);
-                                    out += len;
-                                } else {
-                                    copy_from_output(output, &mut out, from, len);
-                                }
-                            } else {
-                                // copy direct from output
-                                let from = out - dist;
-                                copy_from_output(output, &mut out, from, len);
-                            }
-                        } else if op & 64 == 0 {
-                            // 2nd level distance code
-                            let index =
-                                usize::from(here.val) + (hold & ((1u64 << op) - 1)) as usize;
-                            here = dcode[index & SPAN];
-                            continue;
-                        } else {
-                            *msg = Some("invalid distance code");
-                            mode = Some(Mode::Bad);
-                            break 'outer;
+            // Room for two more literals after this code, decoded without
+            // going round: each is decoded where zlib decodes it, in its
+            // fast loop, as past three codes' bits (33 at most, literals of
+            // the root) the loop's test still holds with six bytes more left,
+            // and so it does with two bytes more of output space. (Added to
+            // `last` rather than taken from `inp`: inflate() may call the
+            // loop with a byte in the bit buffer, so right after a refill
+            // `inp` may be less than the bytes it holds.)
+            let room = inp + 6 <= last + (bits >> 3) as usize && out + 2 < end;
+            let mut entry = len_table[hold as usize & LEN_ROOT_MASK];
+            if entry & SUBTABLE != 0 {
+                entry = len_table[sub_index(entry, hold, LEN_ROOT) & (LEN_SPAN - 1)];
+            }
+            // The code taken, whatever it is, its extra bits read from
+            // `used`, the bits before it.
+            let used = hold;
+            let taken = entry & 0xFF;
+            hold >>= taken;
+            bits -= taken;
+            if entry & LITERAL != 0 {
+                output[out] = (entry >> 16) as u8;
+                out += 1;
+                if room {
+                    // Up to two more, while they are literals of the root,
+                    // from the bits the refill left: 48 or more, of which a
+                    // literal of a sub-table takes 15 and two of the root
+                    // 22.
+                    let next = len_table[hold as usize & LEN_ROOT_MASK];
+                    if next & LITERAL != 0 {
+                        let taken = next & 0xFF;
+                        hold >>= taken;
+                        bits -= taken;
+                        output[out] = (next >> 16) as u8;
+                        out += 1;
+                        let next = len_table[hold as usize & LEN_ROOT_MASK];
+                        if next & LITERAL != 0 {
+                            let taken = next & 0xFF;
+                            hold >>= taken;
+                            bits -= taken;
+                            output[out] = (next >> 16) as u8;
+                            out += 1;
                         }
-                        break;
                     }
-                } else if op & 64 == 0 {
-                    // 2nd level length code
-                    let index = usize::from(here.val) + (hold & ((1u64 << op) - 1)) as usize;
-                    here = lcode[index & SPAN];
-                    continue;
-                } else if op & 32 != 0 {
-                    // end-of-block
-                    mode = Some(Mode::Type);
-                    break 'outer;
-                } else {
-                    *msg = Some("invalid literal/length code");
-                    mode = Some(Mode::Bad);
-                    break 'outer;
                 }
+            } else if entry & (END | INVALID) == 0 {
+                let len = based(entry, used) as usize;
+                let mut entry = dist_table[hold as usize & DIST_ROOT_MASK];
+                if entry & SUBTABLE != 0 {
+                    entry = dist_table[sub_index(entry, hold, DIST_ROOT) & (DIST_SPAN - 1)];
+                }
+                let used = hold;
+                let taken = entry & 0xFF;
+                hold >>= taken;
+                bits -= taken;
+                if entry & INVALID != 0 {
+                    *msg = Some("invalid distance code");
+                    mode = Some(Mode::Bad);
+                    break;
+                }
+                let dist = based(entry, used) as usize;
+                if dist <= out - beg {
+                    // copy direct from output
+                    let from = out - dist;
+                    copy_from_output(output, &mut out, from, len);
+                } else {
+                    match window.copy(output, out, beg, dist, len) {
+                        Some(after) => out = after,
+                        None => {
+                            *msg = Some("invalid distance too far back");
+                            mode = Some(Mode::Bad);
+                            break;
+                        }
+                    }
+                }
+            } else if entry & END != 0 {
+                mode = Some(Mode::Type);
+                break;
+            } else {
+                *msg = Some("invalid literal/length code");
+                mode = Some(Mode::Bad);
                 break;
             }
-            // the bytes used so far end at inp - bits / 8
             if !(inp - (bits >> 3) as usize <= last && out < end) {
                 break;
             }
         }
     }
 
-    // return unused bytes (on entry, bits < 8, so in won't go too far back)
     let len = bits >> 3;
     inp -= len as usize;
     bits -= len << 3;
     hold &= (1u64 << bits) - 1;
 
-    // update state and return
     *next_in = inp;
     *next_out = out;
     state.hold = hold;
     state.bits = bits;
     if let Some(mode) = mode {
         state.mode = mode;
+    }
+}
+
+/// The window and what says how much of it is there, as inflate_fast()
+/// reads them for a match that starts before the output inflate() was given.
+struct Window<'a> {
+    bytes: &'a [u8],
+    wsize: usize,
+    whave: usize,
+    wnext: usize,
+    sane: bool,
+}
+
+impl Window<'_> {
+    /// The copy of a match of `len` bytes from `dist` back to `out`, which
+    /// starts before `beg`, the output inflate() was given: from the window,
+    /// then the output, as zlib's loop copies it; where the output is then.
+    /// `None` where it starts further back than the window holds, and
+    /// `sane`. Not inlined, so that the loop keeps none of this in its
+    /// registers; and `out` given and given back, not borrowed, so that the
+    /// loop keeps its own in one.
+    #[inline(never)]
+    fn copy(
+        &self,
+        output: &mut [u8],
+        out: usize,
+        beg: usize,
+        dist: usize,
+        len: usize,
+    ) -> Option<usize> {
+        let mut at = out;
+        let out = &mut at;
+        let Window {
+            bytes: window,
+            wsize,
+            whave,
+            wnext,
+            sane,
+        } = *self;
+        let mut len = len;
+        // see if copy from window
+        let mut op = dist - (*out - beg); // distance back in window
+        if op > whave && sane {
+            return None;
+        }
+        let mut from;
+        let mut from_window = true;
+        if wnext == 0 {
+            // very common case
+            from = wsize - op;
+            if op < len {
+                // some from window
+                len -= op;
+                output[*out..*out + op].copy_from_slice(&window[from..from + op]);
+                *out += op;
+                from = *out - dist; // rest from output
+                from_window = false;
+            }
+        } else if wnext < op {
+            // wrap around window
+            from = wsize + wnext - op;
+            op -= wnext;
+            if op < len {
+                // some from end of window
+                len -= op;
+                output[*out..*out + op].copy_from_slice(&window[from..from + op]);
+                *out += op;
+                from = 0;
+                if wnext < len {
+                    // some from start of window
+                    let op = wnext;
+                    len -= op;
+                    output[*out..*out + op].copy_from_slice(&window[..op]);
+                    *out += op;
+                    from = *out - dist; // rest from output
+                    from_window = false;
+                }
+            }
+        } else {
+            // contiguous in window
+            from = wnext - op;
+            if op < len {
+                // some from window
+                len -= op;
+                output[*out..*out + op].copy_from_slice(&window[from..from + op]);
+                *out += op;
+                from = *out - dist; // rest from output
+                from_window = false;
+            }
+        }
+        if from_window {
+            output[*out..*out + len].copy_from_slice(&window[from..from + len]);
+            *out += len;
+        } else {
+            copy_from_output(output, out, from, len);
+        }
+        Some(at)
     }
 }
 

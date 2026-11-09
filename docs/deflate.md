@@ -66,10 +66,12 @@ AMD Ryzen 9 9950X (x86-64, Linux), November 2026, the Silesia corpus compressed 
 
 | | Mean | Range | At 0.95× or more |
 |---|---|---|---|
-| In one call | 1.49× zlib | 1.12–2.04× | 36 of 36 |
-| Streaming, in pieces of 16 KiB as zlib's `zpipe.c` | 1.28× | 1.03–1.54× | 36 of 36 |
+| In one call | 1.61× zlib | 1.20–1.97× | 36 of 36 |
+| Streaming, in pieces of 16 KiB as zlib's `zpipe.c` | 1.29× | 1.09–1.47× | 36 of 36 |
 
-It was 0.82× in one call (0.71–0.86×) and 0.90× streaming before the speed work, all of it in `inflate_fast`, and 0.97× (0.89–1.07×) and 1.04× (0.94–1.15×) before its last item, whole pieces. What made the difference, measured at level 6 in one call:
+It was 0.82× in one call (0.71–0.86×) and 0.90× streaming before the speed work, all of it in `inflate_fast`; 0.97× (0.89–1.07×) and 1.04× (0.94–1.15×) before whole pieces; and 1.49× (1.12–2.04×) and 1.27× (1.01–1.51×) before tables of its own. What made the difference, measured at level 6 in one call:
+
+- **Tables of its own, a word an entry.** A dynamic block's tables are built with roots of 11 and 8 bits where zlib's are of 9 and 6 (`LEN_ROOT`, `DIST_ROOT`; `enough 286 11 15` and `enough 30 8 15` give their room, 2,340 and 400 entries), so that fewer codes take a sub-table; and the fast loop's tables (`FastTables`) are made from them, each entry a word that says what it is (a literal, a link, the end of the block, an invalid code, or a base), the bits it takes with its extra bits, and its value, so that a code is one load and one test, and its extra bits come with it. inflate()'s own decoding takes the same bits from roots of 11 and 8 as from 9 and 6, and stops in the same places: a code is decoded once as many bits as it has are there, whatever the root, and `tests/oracle.rs`, which compares `avail_in`, `total_in` and `inflateMark` after each call, finds no difference. Fixed blocks keep `inffixed.h`'s tables, and the loop has tables made once for them. After a literal, two more literals of the root are decoded without going round, where the loop's test is known to hold for them (six bytes more of input left, two more bytes of output space): each where zlib's loop decodes it. The window's part of a match is copied by a function of its own, which takes the output's position and gives it back, so that the loop keeps its own registers. 1.49× to 1.61× in one call: `osdb`, `mr`, `reymont` and `x-ray` 17–23% faster, `ooffice` and `mozilla` 15%; `sao`, `nci` and `dickens` at level 1, almost all literals, 1–4% slower. One ZIP entry of 2.3 GB of programs and libraries inflates in 2.93 s where it took 3.31 s, CRC included, as zlib-rs takes 2.80 s without its CRC. The state is 11 KB larger for the room, and the tables 18 KB, made with the first dynamic block. Tried on zlib's own tables, and slower: looking the next code up before the refill (−3%), three pieces copied whatever a short match's length (−1%), the loop made twice with constant masks for roots of 9 and 6 (−3%), and literals decoded without going round (−6%), which only the words of these tables made worth it.
 
 - **Whole pieces, sixteen bytes at a time.** Where the output has room for a piece past a match, a match at least eight bytes back is copied in whole pieces, the last one too, writing up to 15 bytes past the match into space the output has not reached yet, as zlib-ng and libdeflate copy; sixteen bytes at a time where the match starts sixteen or more back. The last piece cut to the match, byte by byte, was most of a copy's cost on text, whose matches are short. 0.97× to 1.49× over the levels; text at level 1 gains the most (dickens and reymont 0.89× to 2.0×), x-ray the least (1.0× to 1.12×). Inflating the 2.3 GB of a computer's own programs and libraries, as one ZIP entry, takes 3.60 s where it took 4.55 s, CRC included. Pieces of 32 bytes made little more difference (1%), and are not in the port. `Inflate::inflate` may so write over the bytes of `output` past what it says it wrote, as zlib-ng's does; zlib writes none.
 
@@ -78,11 +80,11 @@ It was 0.82× in one call (0.71–0.86×) and 0.90× streaming before the speed 
   Where the loop stops has to be zlib's too, or an error found by one loop and not the other leaves a different `inflateMark`. zlib's loop stops when fewer than six bytes are left past those it has pulled, which depends on when it pulled them; but it then gives back the bytes it did not use, and inflate() calls it again at once if six or more are left. So zlib decodes a code in its fast loop exactly when six bytes or more are left past the bytes already used, and the port's loop tests that, which costs nothing. The first version of the speed work needed eight bytes to enter the loop, and `tests/oracle.rs` found the difference.
 - **Matches copied eight bytes at a time**, when they start at least eight bytes back, each piece read from bytes already written. zlib copies three bytes per loop; byte by byte, every one was a bounds check. +3%.
 - **Runs of one byte filled**: matches one byte back, the commonest of those that overlap. +2%, and 11% on `mr`.
-- **Tables of a fixed size.** `inflate_fast` takes each code table as an array of 1024 entries (the most a table needs is 852), so an index masked with 1023 needs no bounds check. +1%.
+- **Tables of a fixed size.** `inflate_fast` took each code table as an array of 1024 entries (the most a table needed was 852), so that an index masked with 1023 needed no bounds check. +1%. Its own tables have 4,096 and 512 entries for the same reason.
 
 Tried, and not worth it: copying matches two to seven bytes back eight bytes at a time too, from the nearest multiple of their distance that is eight or more back. That made decompression 9% slower on average, and is not in the port.
 
-The slowest input is now x-ray, an image with few matches, mostly literals. arm64 is not measured yet.
+The slowest input is now `sao`, star positions that are almost all literals. arm64 is not measured yet.
 
 ### Deflate64
 
@@ -136,7 +138,7 @@ On an AMD Ryzen 9 9950X (16 cores, 32 threads), November 2026, 546 MB of mixed f
 | `adler32.c` | `adler32.rs` | done | the definition; the trailers of zlib streams |
 | `crc32.c`, `crc32.h` | `crc32.rs` | done; with `unsafe-fast`, arm64's CRC-32 instructions where zlib uses them, and x86-64's carry-less multiplication (`PCLMULQDQ`), which zlib does not use, folding as zlib-ng does: 22 GB/s where the braided code runs at 7.2 (see [unsafe.md](unsafe.md)) | `crc32.h`'s tables; the definition; the trailers of gzip streams; the instructions against the braided code |
 | `inftrees.{h,c}`, `inffixed.h` | `inftrees.rs`, `inffixed.rs` | done | `inffixed.h` rebuilt; `infcover.c`'s `cover_trees`; every dynamic block in `tests/zlib.rs` |
-| `inffast.{h,c}` | `inffast.rs` | done | `tests/zlib.rs`; `tests/oracle.rs`; `infcover.c`'s `cover_fast` |
+| `inffast.{h,c}` | `inffast.rs` | done; its own tables of roots of 11 and 8 bits, made from zlib's | `tests/zlib.rs`; `tests/oracle.rs`; `infcover.c`'s `cover_fast` |
 | `inflate.{h,c}` | `inflate.rs` | done | `tests/zlib.rs`; `tests/oracle.rs`, for every function and flush; `infcover.c`'s `cover_support`, `cover_wrap` and `cover_inflate` |
 | `trees.{h,c}` | `trees.rs` | done | `trees.h`'s tables; every block of `tests/deflate.rs` and `tests/oracle.rs` |
 | `deflate.{h,c}` | `deflate.rs` | done | `tests/deflate.rs`, byte for byte, call by call; `tests/oracle.rs`, for every function, strategy, memory level and flush |
