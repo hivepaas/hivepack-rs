@@ -219,6 +219,7 @@ impl<R: ReadAt> Archive<R> {
             Some(Layer::new(Decompress::new(
                 st.comp_method,
                 check_consistency,
+                have_comp_size.then_some(st.comp_size),
             )?))
         } else {
             None

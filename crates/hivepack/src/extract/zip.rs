@@ -453,9 +453,10 @@ fn write_entries<R: ReadAt, T: Target>(
 }
 
 /// [`write_entries`] in `threads` threads at most: the directories first, on
-/// this thread, in order; then the files, each taken by the next thread that is
-/// free and written by it whole, straight from the archive into the file. As
-/// many files are open, and as many pieces of data held, as there are threads.
+/// this thread, in order; then the files, the largest first, each taken by the
+/// next thread that is free and written by it whole, straight from the archive
+/// into the file. As many files are open, and as many pieces of data held, as
+/// there are threads.
 ///
 /// The threads share `run`, which tells [`Options::progress`] and asks
 /// [`Options::on_damaged`] one at a time, and what all files have written,
@@ -491,6 +492,9 @@ fn write_at_once<R: ReadAt + Sync, T: Target + Sync>(
         summary.directories += 1;
         run.entry_done();
     }
+    // The largest first, as 7z's folders are: one taken last would be written
+    // by its thread alone, after the others are done.
+    files.sort_by_key(|item| std::cmp::Reverse(item.size));
 
     let next = AtomicUsize::new(0);
     let total = AtomicU64::new(0);
