@@ -104,7 +104,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     # ubuntu-latest, which builds every oracle and compares with zstd's
     # corpora, took 53 minutes before XAR extraction's tests were added.
-    timeout-minutes: 90
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -115,10 +115,14 @@ jobs:
             groups: core,generated,fuzz
             cache: core-generated-fuzz
             unsafe-fast: true
+          # Its whole suite as packwing builds hivepack, every format through
+          # the unsafe-fast decoders and arm64's CRC-32 instructions; the
+          # others' as the crate's default, which main runs both ways.
           - os: ubuntu-24.04-arm
             groups: core,generated
             cache: core-generated
             unsafe-fast: true
+            features: hivepack/unsafe-fast,hivepack/memory
           - os: macos-latest
             groups: core,generated
             cache: core-generated
@@ -128,6 +132,9 @@ jobs:
             cache: core
     env:
       HIVEPACK_TESTDATA_REQUIRED: ${{ matrix.groups }}
+      # Set on main and with the label full-ci: what a pull request leaves
+      # out runs then.
+      FULL: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) && '1' || '' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -156,18 +163,24 @@ jobs:
           args=()
           for group in ${HIVEPACK_TESTDATA_REQUIRED//,/ }; do args+=(--group "$group"); done
           python scripts/testdata.py fetch "${args[@]}"
-      - run: cargo test --workspace --locked
+      - run: cargo test --workspace --locked ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
+      # On main, every system's whole suite as packwing builds it too.
+      - if: env.FULL && !matrix.features
+        run: cargo test --workspace --locked --features hivepack/unsafe-fast,hivepack/memory
       - run: cargo test -p hivepack --locked --features rar,memory --test extract_rar --test extract_rar_threads --test rar_oracle --test rar_threads --test memory_limits
       # hivepack::memory, off by default: its tests on each system (on
       # Windows, its own process in a job object), and the example that
       # wires it to the coders.
       - run: cargo test -p hivepack --locked --no-default-features --features memory
       - run: cargo test -p hivepack --locked --features memory --test memory_wiring
-      - if: matrix.unsafe-fast
+      # The unsafe-fast code on its own: on Linux on every pull request, and
+      # on main on every system. arm64's CRC-32 on macOS too, whose
+      # processors packwing runs on most, detected there through its own call.
+      - if: matrix.unsafe-fast || env.FULL
         run: cargo test -p hivepack --locked --no-default-features --features zstd,zstd-unsafe-fast
-      - if: matrix.unsafe-fast
+      - if: matrix.unsafe-fast || env.FULL
         run: cargo test -p hivepack --locked --no-default-features --features lz4,lz4-unsafe-fast
-      - if: matrix.unsafe-fast
+      - if: matrix.unsafe-fast || env.FULL || matrix.os == 'macos-latest'
         run: cargo test -p hivepack --locked --no-default-features --features deflate,deflate-unsafe-fast
 
   cross:
@@ -279,15 +292,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fuzz
-      - run: cargo fuzz run --target aarch64-unknown-linux-gnu --features unsafe-fast hw_crc -- -max_total_time=${FUZZ_SECONDS:-120} -rss_limit_mb=4096
+      - run: cargo fuzz run --target aarch64-unknown-linux-gnu --features unsafe-fast hw_crc -- -max_total_time=120 -rss_limit_mb=4096
 
   fuzz:
     name: Fuzz (unsafe-fast)
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 120
     env:
       # Each target's time on a pull request; empty on main and with full-ci,
-      # where each runs as long as its step says.
+      # where each runs as long as its step says. The targets of the
+      # unsafe-fast code always run their whole time.
+      FULL: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) && '1' || '' }}
       FUZZ_SECONDS: ${{ (github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-ci')) && '10' || '' }}
     steps:
       - uses: actions/checkout@v7
@@ -309,7 +324,7 @@ jobs:
           find testdata -name '*.zst' -exec cp {} fuzz/corpus/decompress/ \;
       # The prebuilt cargo-fuzz is a musl binary and would default to that
       # target, which the sanitizer does not support.
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu --features unsafe-fast decompress -- -max_total_time=${FUZZ_SECONDS:-180}
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu --features unsafe-fast decompress -- -max_total_time=180
       - name: Seed the compressor's corpus with the committed files
         run: |
           mkdir -p fuzz/corpus/compress
@@ -319,7 +334,7 @@ jobs:
       # while: more than libFuzzer's 2 GB.
       # With the `unsafe-fast` feature: the row match finder's other order,
       # with its prefetches. compress_stream fuzzes the safe one.
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu --features unsafe-fast compress -- -max_total_time=${FUZZ_SECONDS:-120} -rss_limit_mb=4096
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu --features unsafe-fast compress -- -max_total_time=120 -rss_limit_mb=4096
       - name: Seed the streaming compressor's corpus with the same files
         run: cp -r fuzz/corpus/compress fuzz/corpus/compress_stream
       - run: cargo fuzz run --target x86_64-unknown-linux-gnu compress_stream -- -max_total_time=${FUZZ_SECONDS:-120} -rss_limit_mb=4096
@@ -555,9 +570,9 @@ jobs:
                   pathlib.Path(f"fuzz/corpus/lz4/r{i}m{mode}").write_bytes(bytes([mode]) + bytes(8) + data)
           PY
       # With the `unsafe-fast` feature: the decoder's unchecked fast loop.
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu --features unsafe-fast lz4 -- -max_total_time=${FUZZ_SECONDS:-60} -rss_limit_mb=4096
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu --features unsafe-fast lz4 -- -max_total_time=60 -rss_limit_mb=4096
       # The processor's instructions against the safe code.
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu --features unsafe-fast hw_crc -- -max_total_time=${FUZZ_SECONDS:-120} -rss_limit_mb=4096
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu --features unsafe-fast hw_crc -- -max_total_time=120 -rss_limit_mb=4096
       - name: Seed the 7z corpus
         run: |
           mkdir -p fuzz/corpus/sevenz
@@ -722,3 +737,18 @@ jobs:
               pathlib.Path(f"fuzz/corpus/xz_encode/r{i}").write_bytes(bytes([mode]) + i.to_bytes(8, "little") + data)
           PY
       - run: cargo fuzz run --target x86_64-unknown-linux-gnu xz_encode -- -max_total_time=${FUZZ_SECONDS:-90} -rss_limit_mb=4096
+      # On main, the formats fuzzed again as packwing builds hivepack: their
+      # zstd, lz4 and deflate through the unsafe-fast code, on the corpora
+      # the runs above grew.
+      - if: env.FULL
+        run: cargo fuzz run --target x86_64-unknown-linux-gnu --features unsafe-fast zip_open -- -max_total_time=60
+      - if: env.FULL
+        run: cargo fuzz run --target x86_64-unknown-linux-gnu --features unsafe-fast zip_edit -- -max_total_time=60
+      - if: env.FULL
+        run: cargo fuzz run --target x86_64-unknown-linux-gnu --features unsafe-fast extract -- -max_total_time=60
+      - if: env.FULL
+        run: cargo fuzz run --target x86_64-unknown-linux-gnu --features unsafe-fast sevenz -- -max_total_time=60 -rss_limit_mb=4096
+      - if: env.FULL
+        run: cargo fuzz run --target x86_64-unknown-linux-gnu --features unsafe-fast extract_7z -- -max_total_time=60 -rss_limit_mb=4096
+      - if: env.FULL
+        run: cargo fuzz run --target x86_64-unknown-linux-gnu --features unsafe-fast open -- -max_total_time=60
