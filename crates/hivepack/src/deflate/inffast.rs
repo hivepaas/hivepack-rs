@@ -271,19 +271,48 @@ fn read_word(input: &[u8], pos: usize) -> u64 {
 /// `*out`, so that the copy repeats when they overlap.
 ///
 /// Differs from zlib: zlib copies three bytes per loop. When the bytes are
-/// at least eight back, the port copies eight at a time, each piece read
-/// before it is written, and a run of one byte (one back) it fills, which
-/// give the same bytes.
+/// at least eight back, the port copies eight at a time, sixteen when they
+/// are sixteen back, each piece read before it is written; a run of one
+/// byte (one back) it fills, which give the same bytes. Where `output` has
+/// room for a whole piece past the copy, the last piece is copied whole, as
+/// zlib-ng copies: what it writes past the copy is in the output's space,
+/// and nothing reads it before the output's next bytes, or the next call's,
+/// write over it.
 #[inline(always)]
 fn copy_from_output(output: &mut [u8], out: &mut usize, from: usize, len: usize) {
     let dst = *out;
+    let dist = dst - from;
+    if dist >= 16 && dst + len + 16 <= output.len() {
+        let mut i = 0;
+        while i < len {
+            let at = dst + i;
+            let mut piece = [0; 16];
+            piece.copy_from_slice(&output[at - dist..at - dist + 16]);
+            output[at..at + 16].copy_from_slice(&piece);
+            i += 16;
+        }
+        *out += len;
+        return;
+    }
+    if dist >= 8 && dst + len + 8 <= output.len() {
+        let mut i = 0;
+        while i < len {
+            let at = dst + i;
+            let mut piece = [0; 8];
+            piece.copy_from_slice(&output[at - dist..at - dist + 8]);
+            output[at..at + 8].copy_from_slice(&piece);
+            i += 8;
+        }
+        *out += len;
+        return;
+    }
     let mut i = 0;
-    if dst - from == 1 {
+    if dist == 1 {
         // A run of one byte.
         let byte = output[from];
         output[dst..dst + len].fill(byte);
         i = len;
-    } else if dst - from >= 8 {
+    } else if dist >= 8 {
         while i + 8 <= len {
             let mut piece = [0; 8];
             piece.copy_from_slice(&output[from + i..from + i + 8]);
@@ -296,4 +325,38 @@ fn copy_from_output(output: &mut [u8], out: &mut usize, from: usize, len: usize)
         i += 1;
     }
     *out += len;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every distance up to 40 and length from 3 to 258, with no room to a
+    /// little past the copy: the bytes written are those of a copy a byte
+    /// at a time, and none past the output's end is reached.
+    #[test]
+    fn copies_are_those_of_one_byte_at_a_time() {
+        for dist in 1..=40 {
+            for len in 3..=258 {
+                for room in [0, 1, 7, 8, 15, 16, 17, 40] {
+                    let size = 64 + len + room;
+                    let start: Vec<u8> = (0..size).map(|i| (i * 7 + 3) as u8).collect();
+                    let dst = 64;
+                    let mut expected = start.clone();
+                    for i in 0..len {
+                        expected[dst + i] = expected[dst - dist + i];
+                    }
+                    let mut output = start.clone();
+                    let mut out = dst;
+                    copy_from_output(&mut output, &mut out, dst - dist, len);
+                    assert_eq!(out, dst + len);
+                    assert_eq!(
+                        output[..dst + len],
+                        expected[..dst + len],
+                        "{dist} back, {len} long, {room} past"
+                    );
+                }
+            }
+        }
+    }
 }
