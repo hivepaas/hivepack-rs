@@ -34,33 +34,17 @@
 
 use crate::deflate::adler32::{ADLER32_INIT, adler32};
 use crate::deflate::crc32::crc32;
-use crate::deflate::inffast::inflate_fast;
+use crate::deflate::inffast::{FastTables, inflate_fast};
 use crate::deflate::inffixed::{DISTFIX, LENFIX};
-use crate::deflate::inftrees::{Code, CodeType, ENOUGH, ENOUGH_LENS, inflate_fixed, inflate_table};
+use crate::deflate::inftrees::{
+    Code, CodeType, DIST_ROOT, ENOUGH, ENOUGH_DISTS_FAST, ENOUGH_LENS_FAST, LEN_ROOT, build_table,
+    inflate_fixed, inflate_table,
+};
 
-/// How many entries [`InflateState::fast_table`] gives: a power of two at
-/// least `ENOUGH_LENS`, the most entries a table and its sub-tables take.
-pub(crate) const TABLE_SPAN: usize = 1024;
-
-/// The size of `codes`: `ENOUGH` would do, but with `TABLE_SPAN` entries
-/// from the start of the distance table, which starts at most
-/// `ENOUGH_LENS` entries in, every table has `TABLE_SPAN` entries.
-const CODES_SIZE: usize = ENOUGH_LENS + TABLE_SPAN;
+/// The size of `codes`: a dynamic block's tables of 11 and 8 bits, the
+/// most they take; the code lengths' table takes fewer.
+const CODES_SIZE: usize = ENOUGH_LENS_FAST + ENOUGH_DISTS_FAST;
 const _: () = assert!(CODES_SIZE >= ENOUGH);
-
-/// `table` at the start of `TABLE_SPAN` entries, the rest invalid codes.
-const fn span<const N: usize>(table: &[Code; N]) -> [Code; TABLE_SPAN] {
-    let mut span = [Code::new(64, 1, 0); TABLE_SPAN];
-    let mut i = 0;
-    while i < N {
-        span[i] = table[i];
-        i += 1;
-    }
-    span
-}
-
-static LENFIX_SPAN: [Code; TABLE_SPAN] = span(&LENFIX);
-static DISTFIX_SPAN: [Code; TABLE_SPAN] = span(&DISTFIX);
 
 use crate::deflate::zutil::{
     DEF_WBITS, Error, ErrorCode, Flush, Result, Status, Z_BUF_ERROR, Z_DATA_ERROR, Z_DEFLATED,
@@ -146,6 +130,17 @@ pub(crate) enum Table {
     LenFix,
     DistFix,
     Codes(usize),
+}
+
+/// Which tables of its own inflate_fast() decodes the block's codes with:
+/// none (zlib's), the fixed codes', or those built for the block.
+///
+/// Differs from zlib, which has only its own.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum FastKind {
+    None,
+    Fixed,
+    Own,
 }
 
 /// What a gzip header said, as `inflateGetHeader` asks inflate() to fill
@@ -285,6 +280,10 @@ pub(crate) struct InflateState {
     pub lenbits: u32,
     /// index bits for distcode
     pub distbits: u32,
+    /// Differs from zlib: the tables inflate_fast() decodes with, and those
+    /// built for the last dynamic block, made with the first, about 29 KB.
+    pub fast_kind: FastKind,
+    pub fast: Option<Box<FastTables>>,
     // dynamic table building
     /// number of code length code lengths
     pub ncode: u32,
@@ -302,7 +301,8 @@ pub(crate) struct InflateState {
     pub work: [u16; 288],
     /// space for code tables
     ///
-    /// Differs from zlib: longer than `ENOUGH` (see `CODES_SIZE`).
+    /// Differs from zlib: longer than `ENOUGH`, for roots of 11 and 8 bits
+    /// (see `CODES_SIZE`).
     pub codes: [Code; CODES_SIZE],
     /// if false, allow invalid distance too far
     pub sane: bool,
@@ -320,21 +320,6 @@ impl InflateState {
             Table::LenFix => &LENFIX,
             Table::DistFix => &DISTFIX,
             Table::Codes(start) => &self.codes[start..],
-        }
-    }
-
-    /// The same table as an array of `TABLE_SPAN` entries, for
-    /// inflate_fast(): every index into a table is below `ENOUGH_LENS`, so
-    /// masking it with `TABLE_SPAN - 1` changes nothing, and lets the
-    /// compiler leave out the bounds check.
-    #[inline(always)]
-    pub(crate) fn fast_table(&self, table: Table) -> &[Code; TABLE_SPAN] {
-        match table {
-            Table::LenFix => &LENFIX_SPAN,
-            Table::DistFix => &DISTFIX_SPAN,
-            // The distance table starts at most ENOUGH_LENS entries in, so
-            // there is always a full span; the fixed table is never used.
-            Table::Codes(start) => self.codes[start..].first_chunk().unwrap_or(&LENFIX_SPAN),
         }
     }
 
@@ -479,6 +464,8 @@ impl Inflate {
             distcode: Table::Codes(0),
             lenbits: 0,
             distbits: 0,
+            fast_kind: FastKind::None,
+            fast: None,
             ncode: 0,
             nlen: 0,
             ndist: 0,
@@ -534,6 +521,7 @@ impl Inflate {
         state.bits = 0;
         state.lencode = Table::Codes(0);
         state.distcode = Table::Codes(0);
+        state.fast_kind = FastKind::None;
         state.next = 0;
         state.sane = true;
         state.back = -1;
@@ -1096,6 +1084,7 @@ impl Inflate {
                     state.next = 0;
                     state.lencode = Table::Codes(0);
                     state.distcode = Table::Codes(0);
+                    state.fast_kind = FastKind::None;
                     state.lenbits = 7;
                     let InflateState {
                         lens,
@@ -1181,9 +1170,13 @@ impl Inflate {
                     // or distbits values here (9 and 6) without reading the
                     // comments in inftrees.h concerning the ENOUGH
                     // constants, which depend on those values
+                    //
+                    // Differs from zlib: roots of 11 and 8 bits, with the
+                    // room they take, for the fast loop's tables (see
+                    // `LEN_ROOT`).
                     state.next = 0;
                     state.lencode = Table::Codes(0);
-                    state.lenbits = 9;
+                    state.lenbits = LEN_ROOT;
                     let nlen = state.nlen as usize;
                     let ndist = state.ndist as usize;
                     let InflateState {
@@ -1194,7 +1187,7 @@ impl Inflate {
                         work,
                         ..
                     } = state;
-                    let r = inflate_table(
+                    let r = build_table(
                         CodeType::Lens,
                         &lens[..],
                         nlen,
@@ -1202,13 +1195,16 @@ impl Inflate {
                         next_code,
                         lenbits,
                         work,
+                        ENOUGH_LENS_FAST,
+                        ENOUGH_DISTS_FAST,
                     );
                     if r != 0 {
                         bad!("invalid literal/lengths set");
                         continue;
                     }
-                    state.distcode = Table::Codes(state.next);
-                    state.distbits = 6;
+                    let dist_start = state.next;
+                    state.distcode = Table::Codes(dist_start);
+                    state.distbits = DIST_ROOT;
                     let InflateState {
                         lens,
                         codes,
@@ -1217,7 +1213,7 @@ impl Inflate {
                         work,
                         ..
                     } = state;
-                    let r = inflate_table(
+                    let r = build_table(
                         CodeType::Dists,
                         &lens[nlen..],
                         ndist,
@@ -1225,11 +1221,24 @@ impl Inflate {
                         next_code,
                         distbits,
                         work,
+                        ENOUGH_LENS_FAST,
+                        ENOUGH_DISTS_FAST,
                     );
                     if r != 0 {
                         bad!("invalid distances set");
                         continue;
                     }
+                    // Differs from zlib: the fast loop's tables, made from
+                    // these.
+                    let mut fast = state.fast.take().unwrap_or_else(FastTables::boxed);
+                    let built = fast.make(
+                        &state.codes[..dist_start],
+                        state.lenbits,
+                        &state.codes[dist_start..state.next],
+                        state.distbits,
+                    );
+                    state.fast = Some(fast);
+                    state.fast_kind = if built { FastKind::Own } else { FastKind::None };
                     state.mode = Mode::Len_;
                     if flush == Flush::Trees {
                         break 'inf_leave;
@@ -1239,7 +1248,9 @@ impl Inflate {
                     state.mode = Mode::Len;
                 }
                 Mode::Len => {
-                    if have >= 6 && left >= 258 {
+                    // Differs from zlib: with no tables of its own, the fast
+                    // loop is not there, and this decodes as it does.
+                    if have >= 6 && left >= 258 && state.fast_kind != FastKind::None {
                         // RESTORE()
                         state.hold = hold;
                         state.bits = bits;

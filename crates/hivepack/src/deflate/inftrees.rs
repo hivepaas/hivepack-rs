@@ -35,6 +35,16 @@ pub(crate) const ENOUGH_LENS: usize = 852;
 pub(crate) const ENOUGH_DISTS: usize = 592;
 pub(crate) const ENOUGH: usize = ENOUGH_LENS + ENOUGH_DISTS;
 
+/// The roots of a dynamic block's tables, 11 and 8 bits, where zlib's are 9
+/// and 6, and the most entries they take (`enough 286 11 15`, `enough 30 8
+/// 15`). Differs from zlib, for the fast loop's tables, made from them (see
+/// `inffast.rs`): inflate()'s own decoding takes the same bits from them,
+/// and stops in the same place, whatever the roots.
+pub(crate) const LEN_ROOT: u32 = 11;
+pub(crate) const DIST_ROOT: u32 = 8;
+pub(crate) const ENOUGH_LENS_FAST: usize = 2340;
+pub(crate) const ENOUGH_DISTS_FAST: usize = 400;
+
 /// `MAXBITS`: the longest code.
 const MAXBITS: usize = 15;
 
@@ -87,6 +97,34 @@ pub(crate) fn inflate_table(
     next: &mut usize,
     bits: &mut u32,
     work: &mut [u16],
+) -> i32 {
+    build_table(
+        ty,
+        lens,
+        codes,
+        table,
+        next,
+        bits,
+        work,
+        ENOUGH_LENS,
+        ENOUGH_DISTS,
+    )
+}
+
+/// [`inflate_table`] with `enough_lens` and `enough_dists` for `ENOUGH_LENS`
+/// and `ENOUGH_DISTS`, for roots other than 9 and 6 bits: the fast loop's
+/// tables are built so, with roots of 11 and 8 bits.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_table(
+    ty: CodeType,
+    lens: &[u16],
+    codes: usize,
+    table: &mut [Code],
+    next: &mut usize,
+    bits: &mut u32,
+    work: &mut [u16],
+    enough_lens: usize,
+    enough_dists: usize,
 ) -> i32 {
     // number of codes of each length
     let mut count = [0u16; MAXBITS + 1];
@@ -179,8 +217,8 @@ pub(crate) fn inflate_table(
     let mask = used - 1; // mask for comparing low
 
     // check available table space
-    if (ty == CodeType::Lens && used as usize > ENOUGH_LENS)
-        || (ty == CodeType::Dists && used as usize > ENOUGH_DISTS)
+    if (ty == CodeType::Lens && used as usize > enough_lens)
+        || (ty == CodeType::Dists && used as usize > enough_dists)
     {
         return 1;
     }
@@ -256,8 +294,8 @@ pub(crate) fn inflate_table(
 
             // check for enough space
             used += 1 << curr;
-            if (ty == CodeType::Lens && used as usize > ENOUGH_LENS)
-                || (ty == CodeType::Dists && used as usize > ENOUGH_DISTS)
+            if (ty == CodeType::Lens && used as usize > enough_lens)
+                || (ty == CodeType::Dists && used as usize > enough_dists)
             {
                 return 1;
             }
@@ -292,6 +330,7 @@ pub(crate) fn inflate_fixed(state: &mut InflateState) {
     state.lenbits = 9;
     state.distcode = Table::DistFix;
     state.distbits = 5;
+    state.fast_kind = crate::deflate::inflate::FastKind::Fixed;
 }
 
 #[cfg(test)]
