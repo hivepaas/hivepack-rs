@@ -153,116 +153,31 @@ pub fn crc32(crc: u32, buf: &[u8]) -> u32 {
         return unsafe { arm_crc32(crc, buf) };
     }
     #[cfg(all(feature = "deflate-unsafe-fast", target_arch = "x86_64", not(miri)))]
-    if buf.len() >= FOLD_LEAST
-        && std::arch::is_x86_feature_detected!("pclmulqdq")
-        && std::arch::is_x86_feature_detected!("sse4.1")
-    {
-        // SAFETY: the processor has the `pclmulqdq` and `sse4.1` features,
-        // just checked, which is all `fold_crc32` asks of its caller.
+    if buf.len() >= crate::clmul::LEAST && crate::clmul::available() {
+        // SAFETY: the processor has the `pclmulqdq` feature, just checked,
+        // and `sse2`, which every x86-64 has: all `fold_crc32` asks of its
+        // caller.
         #[allow(unsafe_code)]
         return unsafe { fold_crc32(crc, buf) };
     }
     crc32_braided(crc, buf)
 }
 
-/// The least that [`fold_crc32`] is given: four blocks of 16 bytes, its four
-/// lanes. Less goes to the braided calculation, as fast for so little.
+/// The keys that fold zlib's CRC-32, of the polynomial in its normal order.
 #[cfg(all(feature = "deflate-unsafe-fast", target_arch = "x86_64", not(miri)))]
-const FOLD_LEAST: usize = 64;
+const KEYS: crate::clmul::Keys = crate::clmul::Keys::new(0x04C1_1DB7, 32);
 
-/// The CRC of `buf`, at least [`FOLD_LEAST`] bytes, by folding: four lanes
-/// of 128 bits, each multiplied without carries by x^512 mod p(x) and the
-/// next 64 bytes added, then folded into one, 16 bytes at a time, and
-/// reduced to 32 bits by Barrett's reduction. Intel's "Fast CRC Computation
-/// for Generic Polynomials Using PCLMULQDQ Instruction" (2009), as zlib-ng's
-/// `crc32_fold_pclmulqdq`, crc32fast and Linux's `crc32-pclmul` compute
-/// it, with their constants for the reflected polynomial; the bytes past the
-/// last block of 16 go to the braided calculation.
-///
-/// Every step is safe code: `std::arch`'s intrinsics are, in a function
-/// with their features. Calling it takes `unsafe`, as the compiler refuses a
-/// call to a function with a `target_feature` otherwise.
+/// The CRC of `buf`, at least [`crate::clmul::LEAST`] bytes, its blocks of
+/// 16 folded with the processor's carry-less multiplication
+/// ([`crate::clmul::fold`]), the block that comes out and the bytes after
+/// them by the braided calculation. zlib has none of it; zlib-ng folds so.
 #[cfg(all(feature = "deflate-unsafe-fast", target_arch = "x86_64", not(miri)))]
-#[target_feature(enable = "pclmulqdq,sse4.1")]
+#[target_feature(enable = "pclmulqdq,sse2")]
 fn fold_crc32(crc: u32, buf: &[u8]) -> u32 {
-    use std::arch::x86_64::{
-        __m128i, _mm_and_si128, _mm_clmulepi64_si128, _mm_cvtsi32_si128, _mm_extract_epi32,
-        _mm_set_epi32, _mm_set_epi64x, _mm_srli_si128, _mm_xor_si128,
-    };
-    // x^(4*128+32) and x^(4*128-32) mod p(x), reflected, for four lanes;
-    // x^(128+32) and x^(128-32) for one; x^64 for the last 64 bits; p(x)
-    // and its Barrett constant, floor(x^64 / p(x)).
-    const K1: i64 = 0x1_5444_2bd4;
-    const K2: i64 = 0x1_c6e4_1596;
-    const K3: i64 = 0x1_7519_97d0;
-    const K4: i64 = 0x0_ccaa_009e;
-    const K5: i64 = 0x1_63cd_6124;
-    const P_X: i64 = 0x1_DB71_0641;
-    const U_PRIME: i64 = 0x1_F701_1641;
-
-    /// 16 bytes, the first the lowest.
-    #[inline]
-    #[target_feature(enable = "pclmulqdq,sse4.1")]
-    fn load(block: &[u8; 16]) -> __m128i {
-        let low = u64::from_le_bytes([
-            block[0], block[1], block[2], block[3], block[4], block[5], block[6], block[7],
-        ]);
-        let high = u64::from_le_bytes([
-            block[8], block[9], block[10], block[11], block[12], block[13], block[14], block[15],
-        ]);
-        _mm_set_epi64x(high as i64, low as i64)
-    }
-    /// `lane` folded over the 128 bits of `keys` and `next` added.
-    #[inline]
-    #[target_feature(enable = "pclmulqdq,sse4.1")]
-    fn fold(lane: __m128i, next: __m128i, keys: __m128i) -> __m128i {
-        let low = _mm_clmulepi64_si128::<0x00>(lane, keys);
-        let high = _mm_clmulepi64_si128::<0x11>(lane, keys);
-        _mm_xor_si128(_mm_xor_si128(next, low), high)
-    }
-
     let (blocks, rest) = buf.as_chunks::<16>();
-    // At least four, as `FOLD_LEAST` is.
-    let Some((first, blocks)) = blocks.split_first_chunk::<4>() else {
-        return crc32_braided(crc, buf);
-    };
-    let (fours, ones) = blocks.as_chunks::<4>();
-
-    // Four lanes, the CRC so far added to the first.
-    let mut x3 = _mm_xor_si128(load(&first[0]), _mm_cvtsi32_si128(!crc as i32));
-    let mut x2 = load(&first[1]);
-    let mut x1 = load(&first[2]);
-    let mut x0 = load(&first[3]);
-    let k1k2 = _mm_set_epi64x(K2, K1);
-    for four in fours {
-        x3 = fold(x3, load(&four[0]), k1k2);
-        x2 = fold(x2, load(&four[1]), k1k2);
-        x1 = fold(x1, load(&four[2]), k1k2);
-        x0 = fold(x0, load(&four[3]), k1k2);
-    }
-    // Into one lane, and the blocks of 16 left.
-    let k3k4 = _mm_set_epi64x(K4, K3);
-    let mut x = fold(x3, x2, k3k4);
-    x = fold(x, x1, k3k4);
-    x = fold(x, x0, k3k4);
-    for one in ones {
-        x = fold(x, load(one), k3k4);
-    }
-    // 128 bits to 64, then to 32 with Barrett's reduction.
-    let low32 = _mm_set_epi32(0, 0, 0, !0);
-    let x = _mm_xor_si128(
-        _mm_clmulepi64_si128::<0x10>(x, k3k4),
-        _mm_srli_si128::<8>(x),
-    );
-    let x = _mm_xor_si128(
-        _mm_clmulepi64_si128::<0x00>(_mm_and_si128(x, low32), _mm_set_epi64x(0, K5)),
-        _mm_srli_si128::<4>(x),
-    );
-    let pu = _mm_set_epi64x(U_PRIME, P_X);
-    let t1 = _mm_clmulepi64_si128::<0x10>(_mm_and_si128(x, low32), pu);
-    let t2 = _mm_clmulepi64_si128::<0x00>(_mm_and_si128(t1, low32), pu);
-    let crc = !(_mm_extract_epi32::<1>(_mm_xor_si128(x, t2)) as u32);
-    crc32_braided(crc, rest)
+    let block = crate::clmul::fold(u64::from(!crc), blocks, &KEYS);
+    // From a state of 0, which is !0 before it is inverted.
+    crc32_braided(crc32_braided(!0, &block), rest)
 }
 
 /// `crc32_z`'s `ARMCRC32` branch, without its alignment to words, as loading
@@ -436,9 +351,7 @@ mod tests {
     #[cfg(all(feature = "deflate-unsafe-fast", target_arch = "x86_64", not(miri)))]
     #[test]
     fn folding_is_braided() {
-        if !(std::arch::is_x86_feature_detected!("pclmulqdq")
-            && std::arch::is_x86_feature_detected!("sse4.1"))
-        {
+        if !crate::clmul::available() {
             return;
         }
         let mut state = 0x9E37_79B9_7F4A_7C15u64;
@@ -451,7 +364,7 @@ mod tests {
             })
             .collect();
         for start in 0..16 {
-            for len in (FOLD_LEAST..400).chain([1000, 4096, 8000]) {
+            for len in (crate::clmul::LEAST..400).chain([1000, 4096, 8000]) {
                 let piece = &bytes[start..start + len];
                 for from in [0, 1, 0xFFFF_FFFF, 0x1234_5678] {
                     // SAFETY: the processor has the features, checked above.

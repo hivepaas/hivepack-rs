@@ -49,10 +49,11 @@ full = ["age", "bzip2", "cpio", "crypto", "deflate", "extract", "iso", "lz4", "o
 memory = ["dep:libc", "dep:rustix", "dep:windows-sys"]
 
 # Faster code with some `unsafe` in it, off by default: docs/unsafe.md.
-unsafe-fast = ["zstd-unsafe-fast", "lz4-unsafe-fast", "deflate-unsafe-fast"]
+unsafe-fast = ["zstd-unsafe-fast", "lz4-unsafe-fast", "deflate-unsafe-fast", "xz-unsafe-fast"]
 zstd-unsafe-fast = []
 lz4-unsafe-fast = []
 deflate-unsafe-fast = []
+xz-unsafe-fast = []
 
 # One feature for each format; the ones it needs come with it.
 
