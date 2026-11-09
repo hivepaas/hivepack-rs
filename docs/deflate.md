@@ -134,7 +134,7 @@ On an AMD Ryzen 9 9950X (16 cores, 32 threads), November 2026, 546 MB of mixed f
 |---|---|---|---|
 | `zlib.h`, `zconf.h`, `zutil.{h,c}` (the parts inflate uses) | `zutil.rs` | done | the return codes and messages in every comparison |
 | `adler32.c` | `adler32.rs` | done | the definition; the trailers of zlib streams |
-| `crc32.c`, `crc32.h` | `crc32.rs` | done | `crc32.h`'s tables; the definition; the trailers of gzip streams |
+| `crc32.c`, `crc32.h` | `crc32.rs` | done; with `unsafe-fast`, arm64's CRC-32 instructions where zlib uses them, and x86-64's carry-less multiplication (`PCLMULQDQ`), which zlib does not use, folding as zlib-ng does: 22 GB/s where the braided code runs at 7.2 (see [unsafe.md](unsafe.md)) | `crc32.h`'s tables; the definition; the trailers of gzip streams; the instructions against the braided code |
 | `inftrees.{h,c}`, `inffixed.h` | `inftrees.rs`, `inffixed.rs` | done | `inffixed.h` rebuilt; `infcover.c`'s `cover_trees`; every dynamic block in `tests/zlib.rs` |
 | `inffast.{h,c}` | `inffast.rs` | done | `tests/zlib.rs`; `tests/oracle.rs`; `infcover.c`'s `cover_fast` |
 | `inflate.{h,c}` | `inflate.rs` | done | `tests/zlib.rs`; `tests/oracle.rs`, for every function and flush; `infcover.c`'s `cover_support`, `cover_wrap` and `cover_inflate` |
@@ -150,7 +150,7 @@ On an AMD Ryzen 9 9950X (16 cores, 32 threads), November 2026, 546 MB of mixed f
 - `infback.c`: `inflateBack`, a callback interface to the same decoder.
 - `gzlib.c`, `gzread.c`, `gzwrite.c`, `gzclose.c`: reading and writing gzip files. The gzip format itself is in `inflate.c` and is ported.
 - Parts that exist only because zlib is in C: custom allocators (`zalloc`, `zfree`), the version checks of `inflateInit_` and `deflateInit_`, the `method` argument of `deflateInit2` (always `Z_DEFLATED`), the checks of a null or uninitialised stream, and building the CRC tables on first use (`DYNAMIC_CRC_TABLE`).
-- Build options that zlib leaves off by default: `INFLATE_STRICT`, `INFLATE_ALLOW_INVALID_DISTANCE_TOOFAR_ARRR` (so `inflateUndermine` always fails, as in a default build), `PKZIP_BUG_WORKAROUND`, `BUILDFIXED`, the ARMv8 CRC instructions, and in the compressor `FASTEST`, `LIT_MEM`, `UNALIGNED_OK`, `FORCE_STATIC`, `FORCE_STORED`, `GEN_TREES_H` and `ZLIB_DEBUG`.
+- Build options that zlib leaves off by default: `INFLATE_STRICT`, `INFLATE_ALLOW_INVALID_DISTANCE_TOOFAR_ARRR` (so `inflateUndermine` always fails, as in a default build), `PKZIP_BUG_WORKAROUND`, `BUILDFIXED`, and in the compressor `FASTEST`, `LIT_MEM`, `UNALIGNED_OK`, `FORCE_STATIC`, `FORCE_STORED`, `GEN_TREES_H` and `ZLIB_DEBUG`.
 - `contrib/`, except `infback9`.
 
 ## Following new releases
