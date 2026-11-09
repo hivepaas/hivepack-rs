@@ -1,9 +1,15 @@
 name: CI
 
 on:
+  # A pull request runs what is quick: the s390x job left out, each fuzz
+  # target for 10 s. Labelled full-ci, it runs as main does; main runs it
+  # all, on every push. One that changes only docs runs nothing.
   pull_request:
-    # `labeled`: the label s390x runs that job on a pull request.
+    # `labeled`: the label full-ci runs it all on a pull request.
     types: [opened, synchronize, reopened, labeled]
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
   push:
     branches: [main]
   workflow_dispatch:
@@ -176,11 +182,11 @@ jobs:
       matrix:
         # 32-bit, and big-endian: the format is little-endian and the port
         # must read it so on every machine. s390x is emulated, and slow: it
-        # runs on main, by hand, and on a pull request labelled s390x; i686
+        # runs on main, by hand, and on a pull request labelled full-ci; i686
         # on every pull request.
         target: >-
           ${{ fromJSON(
-          (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 's390x'))
+          (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci'))
           && '["i686-unknown-linux-gnu", "s390x-unknown-linux-gnu"]'
           || '["i686-unknown-linux-gnu"]') }}
     env:
@@ -255,6 +261,10 @@ jobs:
     name: Fuzz (unsafe-fast, arm64)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
+    env:
+      # Each target's time on a pull request; empty on main and with full-ci,
+      # where each runs as long as its step says.
+      FUZZ_SECONDS: ${{ (github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-ci')) && '10' || '' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -269,12 +279,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fuzz
-      - run: cargo fuzz run --target aarch64-unknown-linux-gnu --features unsafe-fast hw_crc -- -max_total_time=120 -rss_limit_mb=4096
+      - run: cargo fuzz run --target aarch64-unknown-linux-gnu --features unsafe-fast hw_crc -- -max_total_time=${FUZZ_SECONDS:-120} -rss_limit_mb=4096
 
   fuzz:
     name: Fuzz (unsafe-fast)
     runs-on: ubuntu-latest
     timeout-minutes: 75
+    env:
+      # Each target's time on a pull request; empty on main and with full-ci,
+      # where each runs as long as its step says.
+      FUZZ_SECONDS: ${{ (github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-ci')) && '10' || '' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -295,7 +309,7 @@ jobs:
           find testdata -name '*.zst' -exec cp {} fuzz/corpus/decompress/ \;
       # The prebuilt cargo-fuzz is a musl binary and would default to that
       # target, which the sanitizer does not support.
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu --features unsafe-fast decompress -- -max_total_time=180
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu --features unsafe-fast decompress -- -max_total_time=${FUZZ_SECONDS:-180}
       - name: Seed the compressor's corpus with the committed files
         run: |
           mkdir -p fuzz/corpus/compress
@@ -305,13 +319,13 @@ jobs:
       # while: more than libFuzzer's 2 GB.
       # With the `unsafe-fast` feature: the row match finder's other order,
       # with its prefetches. compress_stream fuzzes the safe one.
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu --features unsafe-fast compress -- -max_total_time=120 -rss_limit_mb=4096
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu --features unsafe-fast compress -- -max_total_time=${FUZZ_SECONDS:-120} -rss_limit_mb=4096
       - name: Seed the streaming compressor's corpus with the same files
         run: cp -r fuzz/corpus/compress fuzz/corpus/compress_stream
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu compress_stream -- -max_total_time=120 -rss_limit_mb=4096
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu compress_stream -- -max_total_time=${FUZZ_SECONDS:-120} -rss_limit_mb=4096
       - name: Seed the sequence API's corpus with the same files
         run: cp -r fuzz/corpus/compress fuzz/corpus/sequences
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu sequences -- -max_total_time=60 -rss_limit_mb=4096
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu sequences -- -max_total_time=${FUZZ_SECONDS:-60} -rss_limit_mb=4096
       # Units cut at their newlines (a third byte of 1), into rooms of 1 KB
       # and 4 KB.
       - name: Seed the dictionary builder's corpus with the systemd units
@@ -326,11 +340,11 @@ jobs:
               cat "$unit"
             } > "fuzz/corpus/zdict/u$i"
           done
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu zdict -- -max_total_time=90 -rss_limit_mb=4096
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu divsufsort -- -max_total_time=60 -rss_limit_mb=4096
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu inflate -- -max_total_time=120
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu deflate -- -max_total_time=120
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu inflate9 -- -max_total_time=90
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu zdict -- -max_total_time=${FUZZ_SECONDS:-90} -rss_limit_mb=4096
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu divsufsort -- -max_total_time=${FUZZ_SECONDS:-60} -rss_limit_mb=4096
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu inflate -- -max_total_time=${FUZZ_SECONDS:-120}
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu deflate -- -max_total_time=${FUZZ_SECONDS:-120}
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu inflate9 -- -max_total_time=${FUZZ_SECONDS:-90}
       - name: Seed the ZIP corpus with the recorded archives
         run: |
           mkdir -p fuzz/corpus/zip_open
@@ -346,7 +360,7 @@ jobs:
               data = line.split("\t")[0].split(" ")[-1]
               pathlib.Path(f"fuzz/corpus/zip_open/d{i}").write_bytes(b"" if data == "-" else bytes.fromhex(data))
           PY
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu zip_open -- -max_total_time=120
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu zip_open -- -max_total_time=${FUZZ_SECONDS:-120}
       - name: Seed the PPMd corpus with the recorded streams
         run: |
           mkdir -p fuzz/corpus/zip_ppmd
@@ -361,7 +375,7 @@ jobs:
                   stream = b"" if data == "-" else bytes.fromhex(data)
                   pathlib.Path(f"fuzz/corpus/zip_ppmd/s{i}").write_bytes(params.to_bytes(2, "little") + stream)
           PY
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu zip_ppmd -- -max_total_time=60
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu zip_ppmd -- -max_total_time=${FUZZ_SECONDS:-60}
       - name: Seed the split corpus with Info-ZIP's split archives
         run: |
           mkdir -p fuzz/corpus/zip_split
@@ -375,7 +389,7 @@ jobs:
               head = bytes([len(data) - 1]) + b"".join(struct.pack("<I", len(d)) for d in data[:-1])
               pathlib.Path(f"fuzz/corpus/zip_split/{last.stem}").write_bytes(head + b"".join(data))
           PY
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu zip_split -- -max_total_time=60
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu zip_split -- -max_total_time=${FUZZ_SECONDS:-60}
       - name: Seed the editing corpus with the same archives, behind a few edits
         run: |
           mkdir -p fuzz/corpus/zip_edit
@@ -390,7 +404,7 @@ jobs:
               edits = bytes([2, 14 + 17 * (i % 4), i % 256, 15, 0])
               pathlib.Path(f"fuzz/corpus/zip_edit/d{i}").write_bytes(edits + path.read_bytes())
           PY
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu zip_edit -- -max_total_time=90
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu zip_edit -- -max_total_time=${FUZZ_SECONDS:-90}
       - name: Seed the extraction corpus with the same archives, behind a choice of options
         run: |
           mkdir -p fuzz/corpus/extract
@@ -399,7 +413,7 @@ jobs:
           for i, path in enumerate(sorted(pathlib.Path("fuzz/corpus/zip_open").iterdir())):
               pathlib.Path(f"fuzz/corpus/extract/{path.name}").write_bytes(bytes([i % 256]) + path.read_bytes())
           PY
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu extract -- -max_total_time=60
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu extract -- -max_total_time=${FUZZ_SECONDS:-60}
       - name: Seed the RAR corpus with the recorded archives
         run: |
           mkdir -p fuzz/corpus/rar_headers
@@ -413,7 +427,7 @@ jobs:
               data = b"" if words[2] == "-" else bytes.fromhex(words[2])
               pathlib.Path(f"fuzz/corpus/rar_headers/r{i}").write_bytes(bytes([int(words[1])]) + data)
           PY
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu rar_headers -- -max_total_time=45
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu rar_headers -- -max_total_time=${FUZZ_SECONDS:-45}
       - name: Seed the RAR test corpus with the recorded archives
         run: |
           mkdir -p fuzz/corpus/rar_test
@@ -425,7 +439,7 @@ jobs:
               data = b"" if word == "-" else bytes.fromhex(word)
               pathlib.Path(f"fuzz/corpus/rar_test/r{i}").write_bytes(data)
           PY
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu rar_test -- -max_total_time=45
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu rar_test -- -max_total_time=${FUZZ_SECONDS:-45}
       - name: Seed the RAR unpacking corpus with the recorded inputs
         run: |
           mkdir -p fuzz/corpus/rar_unpack
@@ -435,7 +449,7 @@ jobs:
           for i, line in enumerate(l for l in lines if l and not l.startswith("#")):
               pathlib.Path(f"fuzz/corpus/rar_unpack/r{i}").write_bytes(bytes.fromhex(line.split("\t")[0]))
           PY
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu rar_unpack -- -max_total_time=45
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu rar_unpack -- -max_total_time=${FUZZ_SECONDS:-45}
       - name: Seed the corpus of RAR's older algorithms with the recorded inputs
         run: |
           mkdir -p fuzz/corpus/rar_unpack_old
@@ -445,7 +459,7 @@ jobs:
           for i, line in enumerate(l for l in lines if l and not l.startswith("#")):
               pathlib.Path(f"fuzz/corpus/rar_unpack_old/r{i}").write_bytes(bytes.fromhex(line.split("\t")[0]))
           PY
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu rar_unpack_old -- -max_total_time=45
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu rar_unpack_old -- -max_total_time=${FUZZ_SECONDS:-45}
       - name: Seed the corpus of encrypted RAR archives with the recorded inputs
         run: |
           mkdir -p fuzz/corpus/rar_password
@@ -455,7 +469,7 @@ jobs:
           for i, line in enumerate(l for l in lines if l and not l.startswith("#")):
               pathlib.Path(f"fuzz/corpus/rar_password/r{i}").write_bytes(bytes.fromhex(line.split("\t")[0]))
           PY
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu rar_password -- -max_total_time=45
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu rar_password -- -max_total_time=${FUZZ_SECONDS:-45}
       - name: Seed the corpus of RAR QuickOpen records with the recorded inputs
         run: |
           mkdir -p fuzz/corpus/rar_quick_open
@@ -465,7 +479,7 @@ jobs:
           for i, line in enumerate(l for l in lines if l and not l.startswith("#")):
               pathlib.Path(f"fuzz/corpus/rar_quick_open/r{i}").write_bytes(bytes.fromhex(line.split("\t")[0]))
           PY
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu rar_quick_open -- -max_total_time=45
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu rar_quick_open -- -max_total_time=${FUZZ_SECONDS:-45}
       - name: Seed the corpus of RAR volumes with the recorded inputs
         run: |
           mkdir -p fuzz/corpus/rar_volumes
@@ -475,7 +489,7 @@ jobs:
           for i, line in enumerate(l for l in lines if l and not l.startswith("#")):
               pathlib.Path(f"fuzz/corpus/rar_volumes/r{i}").write_bytes(bytes.fromhex(line.split("\t")[0]))
           PY
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu rar_volumes -- -max_total_time=45
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu rar_volumes -- -max_total_time=${FUZZ_SECONDS:-45}
       - name: Seed the bzip2 corpus
         run: |
           mkdir -p fuzz/corpus/bzip2
@@ -490,7 +504,7 @@ jobs:
               mode = b"\x01" if words[0] == "compress" else b"\x00"
               pathlib.Path(f"fuzz/corpus/bzip2/r{i}").write_bytes(mode + bytes(8) + data)
           PY
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu bzip2 -- -max_total_time=90
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu bzip2 -- -max_total_time=${FUZZ_SECONDS:-90}
       - name: Seed the age corpus with the recorded files
         run: |
           mkdir -p fuzz/corpus/age
@@ -503,9 +517,9 @@ jobs:
               data = line.split("\t")[0].split(" ")[2]
               pathlib.Path(f"fuzz/corpus/age/r{i}").write_bytes(b"" if data == "-" else bytes.fromhex(data))
           PY
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu age -- -max_total_time=60
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu age_encrypt -- -max_total_time=30
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu age_recipients -- -max_total_time=30
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu age -- -max_total_time=${FUZZ_SECONDS:-60}
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu age_encrypt -- -max_total_time=${FUZZ_SECONDS:-30}
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu age_recipients -- -max_total_time=${FUZZ_SECONDS:-30}
       - name: Seed the identity file corpus with the recorded ones
         run: |
           mkdir -p fuzz/corpus/age_keys
@@ -521,8 +535,8 @@ jobs:
                       pathlib.Path(f"fuzz/corpus/age_keys/r{n}").write_bytes(b"" if data == "-" else bytes.fromhex(data))
                       n += 1
           PY
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu age_keys -- -max_total_time=30
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu sign -- -max_total_time=30
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu age_keys -- -max_total_time=${FUZZ_SECONDS:-30}
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu sign -- -max_total_time=${FUZZ_SECONDS:-30}
       - name: Seed the lz4 corpus
         run: |
           mkdir -p fuzz/corpus/lz4
@@ -541,9 +555,9 @@ jobs:
                   pathlib.Path(f"fuzz/corpus/lz4/r{i}m{mode}").write_bytes(bytes([mode]) + bytes(8) + data)
           PY
       # With the `unsafe-fast` feature: the decoder's unchecked fast loop.
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu --features unsafe-fast lz4 -- -max_total_time=60 -rss_limit_mb=4096
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu --features unsafe-fast lz4 -- -max_total_time=${FUZZ_SECONDS:-60} -rss_limit_mb=4096
       # The processor's instructions against the safe code.
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu --features unsafe-fast hw_crc -- -max_total_time=120 -rss_limit_mb=4096
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu --features unsafe-fast hw_crc -- -max_total_time=${FUZZ_SECONDS:-120} -rss_limit_mb=4096
       - name: Seed the 7z corpus
         run: |
           mkdir -p fuzz/corpus/sevenz
@@ -554,13 +568,13 @@ jobs:
           for i, line in enumerate(l for l in lines if not l.startswith("#")):
               pathlib.Path(f"fuzz/corpus/sevenz/r{i}").write_bytes(bytes.fromhex(line.split("\t")[0]))
           PY
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu sevenz -- -max_total_time=60 -rss_limit_mb=4096
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu sevenz_write -- -max_total_time=60 -rss_limit_mb=4096
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu sevenz -- -max_total_time=${FUZZ_SECONDS:-60} -rss_limit_mb=4096
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu sevenz_write -- -max_total_time=${FUZZ_SECONDS:-60} -rss_limit_mb=4096
       - name: Seed the 7z extraction corpus with testdata/7z, behind a byte of options
         run: |
           mkdir -p fuzz/corpus/extract_7z
           for f in testdata/7z/*.7z; do { printf '\x12'; cat "$f"; } > "fuzz/corpus/extract_7z/$(basename "$f")"; done
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu extract_7z -- -max_total_time=60 -rss_limit_mb=4096
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu extract_7z -- -max_total_time=${FUZZ_SECONDS:-60} -rss_limit_mb=4096
       - name: Seed the corpus of RAR extraction with the recorded inputs
         run: |
           mkdir -p fuzz/corpus/extract_rar
@@ -570,17 +584,17 @@ jobs:
           for i, line in enumerate(l for l in lines if l and not l.startswith("#")):
               pathlib.Path(f"fuzz/corpus/extract_rar/r{i}").write_bytes(bytes([i % 256]) + bytes.fromhex(line.split("\t")[0]))
           PY
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu extract_rar -- -max_total_time=60 -rss_limit_mb=4096
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu extract_rar -- -max_total_time=${FUZZ_SECONDS:-60} -rss_limit_mb=4096
       - name: Seed the tar corpus with Go's test archives
         run: |
           mkdir -p fuzz/corpus/tar
           cp testdata/go-tar/*.tar fuzz/corpus/tar/
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu tar -- -max_total_time=60
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu tar -- -max_total_time=${FUZZ_SECONDS:-60}
       - name: Seed the tar writing corpus with the same archives
         run: |
           mkdir -p fuzz/corpus/tar_write
           cp testdata/go-tar/*.tar fuzz/corpus/tar_write/
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu tar_write -- -max_total_time=60
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu tar_write -- -max_total_time=${FUZZ_SECONDS:-60}
       - name: Seed the tar extraction corpus with the same archives, behind a choice of options
         run: |
           mkdir -p fuzz/corpus/extract_tar
@@ -589,12 +603,12 @@ jobs:
           for i, path in enumerate(sorted(pathlib.Path("testdata/go-tar").glob("*.tar"))):
               pathlib.Path(f"fuzz/corpus/extract_tar/{path.name}").write_bytes(bytes([i % 256]) + path.read_bytes())
           PY
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu extract_tar -- -max_total_time=60
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu extract_tar -- -max_total_time=${FUZZ_SECONDS:-60}
       - name: Seed the ISO 9660 corpus with libarchive's test images
         run: |
           mkdir -p fuzz/corpus/iso
           for f in testdata/libarchive-iso/*.iso.xz; do xz -dc "$f" > "fuzz/corpus/iso/$(basename "$f" .xz)"; done
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu iso -- -max_total_time=60 -rss_limit_mb=4096
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu iso -- -max_total_time=${FUZZ_SECONDS:-60} -rss_limit_mb=4096
       - name: Seed the ISO 9660 extraction corpus with the same images, behind a choice of options
         run: |
           mkdir -p fuzz/corpus/extract_iso
@@ -603,17 +617,17 @@ jobs:
           for i, path in enumerate(sorted(pathlib.Path("fuzz/corpus/iso").glob("*.iso"))):
               pathlib.Path(f"fuzz/corpus/extract_iso/{path.name}").write_bytes(bytes([i % 256]) + path.read_bytes())
           PY
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu extract_iso -- -max_total_time=60 -rss_limit_mb=4096
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu extract_iso -- -max_total_time=${FUZZ_SECONDS:-60} -rss_limit_mb=4096
       - name: Seed the XAR corpus with the archives of macOS's xar and pkgbuild
         run: |
           mkdir -p fuzz/corpus/xar
           cp testdata/xar/*.xar testdata/xar/*.pkg fuzz/corpus/xar/
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu xar -- -max_total_time=60 -rss_limit_mb=4096
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu xar -- -max_total_time=${FUZZ_SECONDS:-60} -rss_limit_mb=4096
       - name: Seed the XAR extraction corpus with the same archives behind a byte of options
         run: |
           mkdir -p fuzz/corpus/extract_xar
           for f in fuzz/corpus/xar/*; do { printf '\x22'; cat "$f"; } > "fuzz/corpus/extract_xar/$(basename "$f")"; done
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu extract_xar -- -max_total_time=60 -rss_limit_mb=4096
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu extract_xar -- -max_total_time=${FUZZ_SECONDS:-60} -rss_limit_mb=4096
       - name: Seed the cpio corpus with the recorded archives
         run: |
           mkdir -p fuzz/corpus/cpio
@@ -627,12 +641,12 @@ jobs:
               data = line.split("\t")[0].split(" ")[-1]
               pathlib.Path(f"fuzz/corpus/cpio/r{i}").write_bytes(b"" if data == "-" else bytes.fromhex(data))
           PY
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu cpio -- -max_total_time=60
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu cpio -- -max_total_time=${FUZZ_SECONDS:-60}
       - name: Seed the cpio extraction corpus with the same archives behind a byte of options
         run: |
           mkdir -p fuzz/corpus/extract_cpio
           for f in fuzz/corpus/cpio/r*; do { printf '\x22'; cat "$f"; } > "fuzz/corpus/extract_cpio/$(basename "$f")"; done
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu extract_cpio -- -max_total_time=60
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu extract_cpio -- -max_total_time=${FUZZ_SECONDS:-60}
       - name: Seed the layers corpus with the recorded age files and what they hold
         run: |
           mkdir -p fuzz/corpus/open
@@ -656,15 +670,15 @@ jobs:
               pbzx += struct.pack(">QQ", len(c), len(stored)) + stored
           pathlib.Path("fuzz/corpus/open/pbzx").write_bytes(b"\0" + pbzx)
           PY
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu open -- -max_total_time=30
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu open -- -max_total_time=${FUZZ_SECONDS:-30}
       - name: Seed the UDF corpus with the descriptors of the test images
         run: python3 tools/udf-images/seed.py fuzz/corpus/udf
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu udf -- -max_total_time=60 -rss_limit_mb=4096 -max_len=400000
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu udf -- -max_total_time=${FUZZ_SECONDS:-60} -rss_limit_mb=4096 -max_len=400000
       - name: Seed the UDF extraction corpus with the same images behind a byte of options
         run: |
           mkdir -p fuzz/corpus/extract_udf
           for f in fuzz/corpus/udf/*; do { printf '\x22'; cat "$f"; } > "fuzz/corpus/extract_udf/$(basename "$f")"; done
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu extract_udf -- -max_total_time=60 -rss_limit_mb=4096 -max_len=400000
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu extract_udf -- -max_total_time=${FUZZ_SECONDS:-60} -rss_limit_mb=4096 -max_len=400000
       - name: Seed the xz corpus
         run: |
           mkdir -p fuzz/corpus/xz
@@ -689,7 +703,7 @@ jobs:
               data = b"" if words[-1] == "-" else bytes.fromhex(words[-1])
               pathlib.Path(f"fuzz/corpus/xz/m{i}").write_bytes(bytes([6]) + i.to_bytes(8, "little") + data)
           PY
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu xz -- -max_total_time=90 -rss_limit_mb=4096
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu xz -- -max_total_time=${FUZZ_SECONDS:-90} -rss_limit_mb=4096
       - name: Seed the xz_encode corpus
         run: |
           mkdir -p fuzz/corpus/xz_encode
@@ -707,4 +721,4 @@ jobs:
               data = b"" if words[-1] == "-" else bytes.fromhex(words[-1])
               pathlib.Path(f"fuzz/corpus/xz_encode/r{i}").write_bytes(bytes([mode]) + i.to_bytes(8, "little") + data)
           PY
-      - run: cargo fuzz run --target x86_64-unknown-linux-gnu xz_encode -- -max_total_time=90 -rss_limit_mb=4096
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu xz_encode -- -max_total_time=${FUZZ_SECONDS:-90} -rss_limit_mb=4096
