@@ -89,7 +89,7 @@
 //! # }
 //! ```
 
-#![forbid(unsafe_code)]
+#![cfg_attr(not(feature = "xz-unsafe-fast"), forbid(unsafe_code))]
 // Loops keep liblzma's indices, so the port reads side by side with the C.
 #![allow(clippy::needless_range_loop)]
 
@@ -126,7 +126,16 @@ pub(crate) use stream_decoder::first_block_memusage;
 
 use core::fmt;
 
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub use check::fuzz_crcs;
 pub use check::{CHECK_ID_MAX, Check};
+
+/// Whether this build has the `unsafe-fast` feature: CRC32 and CRC64 folded
+/// with the processor's carry-less multiplication on x86-64. Cargo turns a
+/// feature on for the whole build as soon as one crate asks for it, so a
+/// program can check which it got.
+pub const UNSAFE_FAST: bool = cfg!(feature = "xz-unsafe-fast");
 pub use common::{
     Action, CONCATENATED, FAIL_FAST, IGNORE_CHECK, TELL_ANY_CHECK, TELL_NO_CHECK,
     TELL_UNSUPPORTED_CHECK,

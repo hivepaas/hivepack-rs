@@ -5,9 +5,11 @@
 //! liblzma computes its CRC tables in `crc32_tablegen.c` and
 //! `crc64_tablegen.c` and keeps them as source; the port computes the
 //! same tables while compiling, slice-by-eight as liblzma's generic code
-//! reads them, and a test checks them against their definitions. It has
-//! none of liblzma's CLMUL, ARM64 or LoongArch versions, which give the
-//! same values.
+//! reads them, and a test checks them against their definitions. With
+//! `unsafe-fast`, on x86-64, it folds them with the processor's carry-less
+//! multiplication where liblzma's CLMUL version does (`crate::clmul`); it
+//! has none of liblzma's ARM64 or LoongArch versions, which give the same
+//! values.
 
 /// `lzma_check`: the type of the integrity check of a Stream, with the
 /// same numbers. Any value up to [`CHECK_ID_MAX`] can be in a Stream's
@@ -136,8 +138,58 @@ static CRC32_TABLE: [[u64; 256]; 8] = crc_tables::<8>(0xEDB8_8320, 32);
 /// `lzma_crc64_table`, slice-by-eight.
 static CRC64_TABLE: [[u64; 256]; 8] = crc_tables::<8>(0xC96C_5795_D787_0F42, 64);
 
-/// `lzma_crc32`: the CRC32 of `buf` after `crc`.
+/// Whether the processor folds the CRCs of `len` bytes: with `unsafe-fast`,
+/// on x86-64 with `PCLMULQDQ`, from [`crate::clmul::LEAST`] bytes, as
+/// liblzma's `crc_x86_clmul.h` folds them where it is built with it.
+#[cfg(all(feature = "xz-unsafe-fast", target_arch = "x86_64", not(miri)))]
+fn folds(len: usize) -> bool {
+    len >= crate::clmul::LEAST && crate::clmul::available()
+}
+
+/// The keys that fold the CRC32 and the CRC64, of their polynomials in the
+/// normal order.
+#[cfg(all(feature = "xz-unsafe-fast", target_arch = "x86_64", not(miri)))]
+const CRC32_KEYS: crate::clmul::Keys = crate::clmul::Keys::new(0x04C1_1DB7, 32);
+#[cfg(all(feature = "xz-unsafe-fast", target_arch = "x86_64", not(miri)))]
+const CRC64_KEYS: crate::clmul::Keys = crate::clmul::Keys::new(0x42F0_E1EB_A9EA_3693, 64);
+
+/// `lzma_crc32`: the CRC32 of `buf` after `crc`, folded where [`folds`]
+/// says, from slice-by-eight otherwise.
 pub(crate) fn crc32(buf: &[u8], crc: u32) -> u32 {
+    #[cfg(all(feature = "xz-unsafe-fast", target_arch = "x86_64", not(miri)))]
+    if folds(buf.len()) {
+        // SAFETY: the processor has the `pclmulqdq` feature, just checked,
+        // and `sse2`, which every x86-64 has: all `fold_crc32` asks.
+        #[allow(unsafe_code)]
+        return unsafe { fold_crc32(buf, crc) };
+    }
+    crc32_sliced(buf, crc)
+}
+
+/// [`crc32`]'s blocks of 16 folded, the block that comes out and the bytes
+/// after them from slice-by-eight.
+#[cfg(all(feature = "xz-unsafe-fast", target_arch = "x86_64", not(miri)))]
+#[target_feature(enable = "pclmulqdq,sse2")]
+fn fold_crc32(buf: &[u8], crc: u32) -> u32 {
+    let (blocks, rest) = buf.as_chunks::<16>();
+    let block = crate::clmul::fold(u64::from(!crc), blocks, &CRC32_KEYS);
+    // From a state of 0, which is !0 before it is inverted.
+    crc32_sliced(rest, crc32_sliced(&block, !0))
+}
+
+/// xz's CRC32 and CRC64 of `buf` from `start`, each as [`crc32`] and
+/// [`crc64`] compute it and from slice-by-eight, to compare with.
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub fn fuzz_crcs(buf: &[u8], start: u64) -> ((u32, u32), (u64, u64)) {
+    (
+        (crc32(buf, start as u32), crc32_sliced(buf, start as u32)),
+        (crc64(buf, start), crc64_sliced(buf, start)),
+    )
+}
+
+/// [`crc32`] from slice-by-eight.
+fn crc32_sliced(buf: &[u8], crc: u32) -> u32 {
     let t = &CRC32_TABLE;
     let mut crc = u64::from(!crc);
     let (chunks, rest) = buf.as_chunks::<8>();
@@ -159,8 +211,30 @@ pub(crate) fn crc32(buf: &[u8], crc: u32) -> u32 {
     !(crc as u32)
 }
 
-/// `lzma_crc64`: the CRC64 of `buf` after `crc`.
+/// `lzma_crc64`: the CRC64 of `buf` after `crc`, folded where [`folds`]
+/// says, from slice-by-eight otherwise.
 pub(crate) fn crc64(buf: &[u8], crc: u64) -> u64 {
+    #[cfg(all(feature = "xz-unsafe-fast", target_arch = "x86_64", not(miri)))]
+    if folds(buf.len()) {
+        // SAFETY: as in `crc32`.
+        #[allow(unsafe_code)]
+        return unsafe { fold_crc64(buf, crc) };
+    }
+    crc64_sliced(buf, crc)
+}
+
+/// [`crc64`]'s blocks of 16 folded, the block that comes out and the bytes
+/// after them from slice-by-eight.
+#[cfg(all(feature = "xz-unsafe-fast", target_arch = "x86_64", not(miri)))]
+#[target_feature(enable = "pclmulqdq,sse2")]
+fn fold_crc64(buf: &[u8], crc: u64) -> u64 {
+    let (blocks, rest) = buf.as_chunks::<16>();
+    let block = crate::clmul::fold(!crc, blocks, &CRC64_KEYS);
+    crc64_sliced(rest, crc64_sliced(&block, !0))
+}
+
+/// [`crc64`] from slice-by-eight.
+fn crc64_sliced(buf: &[u8], crc: u64) -> u64 {
     let t = &CRC64_TABLE;
     let mut crc = !crc;
     let (chunks, rest) = buf.as_chunks::<8>();
@@ -381,5 +455,43 @@ mod tests {
                 assert_eq!(crc64(piece, 0), bitwise64(piece), "crc64 {start} {len}");
             }
         }
+    }
+
+    /// The folding against slice-by-eight, called itself where the processor
+    /// has its instruction, whatever `crc32` and `crc64` choose: every
+    /// length from its least to past a few rounds of four lanes, at every
+    /// offset of a block, from several values; and in pieces.
+    #[cfg(all(feature = "xz-unsafe-fast", target_arch = "x86_64", not(miri)))]
+    #[test]
+    fn folding_is_sliced() {
+        if !crate::clmul::available() {
+            return;
+        }
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let data: Vec<u8> = (0..8192)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect();
+        for start in 0..16 {
+            for len in (crate::clmul::LEAST..400).chain([1000, 4096, 8000]) {
+                let piece = &data[start..start + len];
+                for from in [0, 1, u64::MAX, 0x0123_4567_89AB_CDEF] {
+                    // SAFETY: the processor has the feature, checked above.
+                    #[allow(unsafe_code)]
+                    let (folded32, folded64) =
+                        unsafe { (fold_crc32(piece, from as u32), fold_crc64(piece, from)) };
+                    assert_eq!(folded32, crc32_sliced(piece, from as u32), "{start} {len}");
+                    assert_eq!(folded64, crc64_sliced(piece, from), "{start} {len}");
+                }
+            }
+        }
+        let whole = crc64(&data, 0);
+        let pieces = data.chunks(777).fold(0, |crc, piece| crc64(piece, crc));
+        assert_eq!(whole, pieces);
+        assert_eq!(whole, crc64_sliced(&data, 0));
     }
 }

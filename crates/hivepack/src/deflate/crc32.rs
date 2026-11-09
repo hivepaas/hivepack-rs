@@ -141,7 +141,9 @@ fn read_word(buf: &[u8], pos: usize) -> u64 {
 ///
 /// Port of `crc32_z` (and `crc32`), `crc32.c`. The ARMv8 CRC instructions,
 /// which zlib uses only when built for a processor that has them, are here
-/// with the `unsafe-fast` feature, if the processor has them.
+/// with the `unsafe-fast` feature, if the processor has them; and so is
+/// x86-64's carry-less multiplication (`PCLMULQDQ`), as zlib-ng and Linux
+/// fold with it, where zlib has none.
 pub fn crc32(crc: u32, buf: &[u8]) -> u32 {
     #[cfg(all(feature = "deflate-unsafe-fast", target_arch = "aarch64"))]
     if std::arch::is_aarch64_feature_detected!("crc") {
@@ -150,7 +152,32 @@ pub fn crc32(crc: u32, buf: &[u8]) -> u32 {
         #[allow(unsafe_code)]
         return unsafe { arm_crc32(crc, buf) };
     }
+    #[cfg(all(feature = "deflate-unsafe-fast", target_arch = "x86_64", not(miri)))]
+    if buf.len() >= crate::clmul::LEAST && crate::clmul::available() {
+        // SAFETY: the processor has the `pclmulqdq` feature, just checked,
+        // and `sse2`, which every x86-64 has: all `fold_crc32` asks of its
+        // caller.
+        #[allow(unsafe_code)]
+        return unsafe { fold_crc32(crc, buf) };
+    }
     crc32_braided(crc, buf)
+}
+
+/// The keys that fold zlib's CRC-32, of the polynomial in its normal order.
+#[cfg(all(feature = "deflate-unsafe-fast", target_arch = "x86_64", not(miri)))]
+const KEYS: crate::clmul::Keys = crate::clmul::Keys::new(0x04C1_1DB7, 32);
+
+/// The CRC of `buf`, at least [`crate::clmul::LEAST`] bytes, its blocks of
+/// 16 folded with the processor's carry-less multiplication
+/// ([`crate::clmul::fold`]), the block that comes out and the bytes after
+/// them by the braided calculation. zlib has none of it; zlib-ng folds so.
+#[cfg(all(feature = "deflate-unsafe-fast", target_arch = "x86_64", not(miri)))]
+#[target_feature(enable = "pclmulqdq,sse2")]
+fn fold_crc32(crc: u32, buf: &[u8]) -> u32 {
+    let (blocks, rest) = buf.as_chunks::<16>();
+    let block = crate::clmul::fold(u64::from(!crc), blocks, &KEYS);
+    // From a state of 0, which is !0 before it is inverted.
+    crc32_braided(crc32_braided(!0, &block), rest)
 }
 
 /// `crc32_z`'s `ARMCRC32` branch, without its alignment to words, as loading
@@ -316,6 +343,43 @@ mod tests {
     }
 
     use super::*;
+
+    /// The folding against the braided calculation, called itself where the
+    /// processor has its instructions, whatever `crc32` chooses: every
+    /// length from its least to past a few rounds of four lanes, at every
+    /// offset of a block, from several values.
+    #[cfg(all(feature = "deflate-unsafe-fast", target_arch = "x86_64", not(miri)))]
+    #[test]
+    fn folding_is_braided() {
+        if !crate::clmul::available() {
+            return;
+        }
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let bytes: Vec<u8> = (0..8192)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect();
+        for start in 0..16 {
+            for len in (crate::clmul::LEAST..400).chain([1000, 4096, 8000]) {
+                let piece = &bytes[start..start + len];
+                for from in [0, 1, 0xFFFF_FFFF, 0x1234_5678] {
+                    // SAFETY: the processor has the features, checked above.
+                    #[allow(unsafe_code)]
+                    let folded = unsafe { fold_crc32(from, piece) };
+                    assert_eq!(folded, crc32_braided(from, piece), "{start} {len} {from:x}");
+                }
+            }
+        }
+        // As one call, and in pieces.
+        let whole = crc32(0, &bytes);
+        let pieces = bytes.chunks(777).fold(0, crc32);
+        assert_eq!(whole, pieces);
+        assert_eq!(whole, reference(0, &bytes));
+    }
 
     /// The definition, one bit at a time.
     fn reference(crc: u32, buf: &[u8]) -> u32 {
