@@ -9,6 +9,9 @@
 // failure.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+#[path = "threads_support/mod.rs"]
+mod threads_support;
+
 #[path = "sevenz_support/mod.rs"]
 mod support;
 
@@ -24,8 +27,8 @@ use hivepack::sevenz::{
 use support::{Oracle, Rng, scratch, seven_zip};
 
 /// The threads each test is run with.
-fn threads() -> [Threads; 4] {
-    [Threads::One, Threads::of(2), Threads::of(8), Threads::Auto]
+fn threads() -> Vec<Threads> {
+    threads_support::chosen([Threads::One, Threads::of(2), Threads::of(8), Threads::Auto])
 }
 
 /// A file's name and data, or a directory's name.
@@ -591,7 +594,7 @@ fn damage_reads_as_with_one_thread() {
                 bad
             };
             let one = read_all(&bad, password, Threads::One);
-            for threads in [Threads::of(2), Threads::of(8)] {
+            for threads in threads_support::chosen([Threads::of(2), Threads::of(8)]) {
                 let what = format!("{blocks:?} {filter:?} {password:?} round {round}: {threads:?}");
                 let got = read_all(&bad, password, threads);
                 if filter == Filter::None {
@@ -697,7 +700,7 @@ fn extraction_in_threads() {
     };
     let (asked, files) = asked_with(Threads::One);
     assert!(!asked.is_empty());
-    for threads in [Threads::of(2), Threads::Auto] {
+    for threads in threads_support::chosen([Threads::of(2), Threads::Auto]) {
         let (asked_mt, files_mt) = asked_with(threads);
         assert_eq!(asked_mt, asked, "{threads:?}");
         // The files read whole are the same.

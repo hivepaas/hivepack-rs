@@ -8,6 +8,9 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+#[path = "threads_support/mod.rs"]
+mod threads_support;
+
 #[path = "extract_support/mod.rs"]
 mod support;
 
@@ -24,8 +27,8 @@ use hivepack::sevenz::{Archive, Lzma2Blocks, Method, NewEntry, WriteOptions, Wri
 use support::{Scratch, listing, options};
 
 /// One thread, two, eight, and as many as the machine runs.
-fn every_threads() -> [Threads; 4] {
-    [Threads::One, Threads::of(2), Threads::of(8), Threads::Auto]
+fn every_threads() -> Vec<Threads> {
+    threads_support::chosen([Threads::One, Threads::of(2), Threads::of(8), Threads::Auto])
 }
 
 /// What goes in an archive.
@@ -215,6 +218,17 @@ fn the_same(label: &str, data: &[u8], change: impl Fn(&mut Options)) -> Vec<usiz
     reporting
 }
 
+/// How many threads wrote with the most threads given, in the order of
+/// [`every_threads`]: eight, or two under emulation
+/// ([`threads_support::chosen`]).
+fn most(reporting: &[usize]) -> usize {
+    let at = every_threads()
+        .iter()
+        .position(|t| *t == Threads::of(8))
+        .unwrap_or(reporting.len().saturating_sub(1));
+    reporting.get(at).copied().unwrap_or(0)
+}
+
 #[test]
 fn what_is_written_is_the_same() {
     let puts = many();
@@ -222,7 +236,7 @@ fn what_is_written_is_the_same() {
     let reporting = the_same("apart", &data, |_| {});
     // Several threads wrote, where asked to.
     assert_eq!(reporting[0], 1);
-    assert!(reporting[2] > 1, "{reporting:?}");
+    assert!(most(&reporting) > 1, "{reporting:?}");
     let scratch = Scratch::new();
     extract(&data, &scratch.out(), &with_threads(Threads::of(4), |_| {})).unwrap();
     for put in &puts {
@@ -260,7 +274,7 @@ fn solid_blocks_are_the_same() {
     );
     assert!(Archive::open(Cursor::new(&data)).unwrap().folders() > 4);
     let reporting = the_same("solid", &data, |_| {});
-    assert!(reporting[2] > 1, "{reporting:?}");
+    assert!(most(&reporting) > 1, "{reporting:?}");
     // With a password, the key made once for all the threads.
     let data = archive(
         &many(),
