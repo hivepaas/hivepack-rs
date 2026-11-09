@@ -5,6 +5,9 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+#[path = "threads_support/mod.rs"]
+mod threads_support;
+
 #[path = "extract_support/mod.rs"]
 mod support;
 
@@ -22,13 +25,13 @@ use hivepack::zip::{Archive, OpenFlags};
 use support::{Entry, MTIME, Scratch, extract, listing, options, zip};
 
 /// One thread, two, eight, and as many as the machine runs.
-fn every_threads() -> [Threads; 4] {
-    [
+fn every_threads() -> Vec<Threads> {
+    threads_support::chosen([
         Threads::One,
         Threads::Exactly(NonZeroU32::new(2).unwrap()),
         Threads::Exactly(NonZeroU32::new(8).unwrap()),
         Threads::Auto,
-    ]
+    ])
 }
 
 /// Text that deflates, different for each `seed`.

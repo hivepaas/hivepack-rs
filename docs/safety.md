@@ -6,7 +6,7 @@ These rules hold for every module of the crate. CI checks the parts a tool can c
 
 Each module's `mod.rs` starts with `#![forbid(unsafe_code)]`; the crate as a whole sets `unsafe_code = "deny"`, for the modules with an `unsafe-fast` feature. `forbid` cannot be lifted by an `allow` further in, so no `unsafe` block, `unsafe fn` or `#[no_mangle]` compiles anywhere.
 
-The exceptions are all opt-in: the `unsafe-fast` feature of `hivepack::zstd`, `hivepack::lz4` and `hivepack::deflate`, and the system calls of `hivepack::memory` on Windows and macOS, behind its feature `memory` (see [unsafe.md](unsafe.md)). Without the feature, those modules forbid unsafe code too, and `hivepack::memory` is not built. Adding an exception takes all of these steps:
+The exceptions are all opt-in: the `unsafe-fast` feature of `hivepack::zstd`, `hivepack::lz4`, `hivepack::deflate` and `hivepack::xz`, and the system calls of `hivepack::memory` on Windows and macOS, behind its feature `memory` (see [unsafe.md](unsafe.md)). Without the feature, those modules forbid unsafe code too, and `hivepack::memory` is not built. Adding an exception takes all of these steps:
 
 1. Show with numbers from `tools/zstd-bench` (same machine, interleaved rounds) that the safe code misses the speed target in [porting.md](porting.md), and that the unsafe code closes the gap.
 2. Keep the unsafe code in one module, as small as it can be. Every block gets a `// SAFETY:` comment that says why it is sound, and preconditions are checked once at the module's entry.

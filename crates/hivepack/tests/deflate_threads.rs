@@ -5,6 +5,9 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+#[path = "threads_support/mod.rs"]
+mod threads_support;
+
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -53,8 +56,8 @@ fn input(len: usize, seed: u64) -> Vec<u8> {
     data
 }
 
-fn threads() -> [Threads; 4] {
-    [Threads::One, Threads::of(2), Threads::of(8), Threads::Auto]
+fn threads() -> Vec<Threads> {
+    threads_support::chosen([Threads::One, Threads::of(2), Threads::of(8), Threads::Auto])
 }
 
 /// Room for `len` bytes compressed, header and trailer.

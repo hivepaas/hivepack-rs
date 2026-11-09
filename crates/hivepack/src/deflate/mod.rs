@@ -62,7 +62,8 @@ mod trees;
 mod zutil;
 
 /// Whether this build has the `unsafe-fast` feature: CRC-32 with the
-/// processor's instructions on arm64. Cargo turns a feature on for the whole
+/// processor's instructions on arm64, and folded with its carry-less
+/// multiplication on x86-64. Cargo turns a feature on for the whole
 /// build as soon as one crate asks for it, so a program can check which it got.
 pub const UNSAFE_FAST: bool = cfg!(feature = "deflate-unsafe-fast");
 

@@ -621,6 +621,10 @@ impl Inflate {
     /// `ErrorCode::Data` means that the input is not a valid stream, and
     /// [`Error::msg`] says why.
     ///
+    /// Differs from zlib: up to 15 bytes of `output` past what it wrote may
+    /// be written over, as zlib-ng's inflate() does, where zlib writes none:
+    /// a match is copied in whole pieces where there is room for them.
+    ///
     /// Port of `inflate`, `inflate.c`.
     pub fn inflate(
         &mut self,

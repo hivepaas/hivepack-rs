@@ -1,0 +1,6 @@
+# cross, which CI's 32-bit and big-endian jobs run the tests with: what of the
+# host's environment goes into the container. `HIVEPACK_EMULATED` makes the
+# tests that compare threads run one and two only (tests/threads_support):
+# s390x is emulated, i686 is not.
+[build.env]
+passthrough = ["HIVEPACK_EMULATED"]

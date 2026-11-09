@@ -5,6 +5,9 @@
 
 #![allow(clippy::unwrap_used, clippy::field_reassign_with_default)]
 
+#[path = "threads_support/mod.rs"]
+mod threads_support;
+
 use std::io::{self, Cursor, Write};
 use std::num::NonZeroU32;
 use std::process::{Command, Stdio};
@@ -18,12 +21,12 @@ use hivepack::zip::{
 };
 
 /// The thread counts compared with one.
-fn many() -> [Threads; 3] {
-    [
+fn many() -> Vec<Threads> {
+    threads_support::chosen([
         Threads::Exactly(NonZeroU32::new(2).unwrap()),
         Threads::Exactly(NonZeroU32::new(8).unwrap()),
         Threads::Auto,
-    ]
+    ])
 }
 
 /// Words that compress as text does.
@@ -882,7 +885,7 @@ fn encrypted_on_the_thread_writing() {
         };
         let one = write(Threads::One);
         assert!(one.0.1.is_ok());
-        for threads in [two, Threads::Auto] {
+        for threads in threads_support::chosen([two, Threads::Auto]) {
             let got = write(threads);
             assert!(got.0.1 == one.0.1, "{threads:?}, {stream}");
             assert!(got.0.0 == one.0.0, "{threads:?}, {stream}: bytes differ");

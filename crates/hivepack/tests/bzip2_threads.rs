@@ -8,6 +8,9 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+#[path = "threads_support/mod.rs"]
+mod threads_support;
+
 #[path = "bzip2_support/mod.rs"]
 mod support;
 
@@ -22,8 +25,8 @@ use hivepack::open::{Layer, Opener};
 use support::Rng;
 
 /// One thread, two, eight, and as many as the machine has.
-fn threads() -> [Threads; 4] {
-    [Threads::One, Threads::of(2), Threads::of(8), Threads::Auto]
+fn threads() -> Vec<Threads> {
+    threads_support::chosen([Threads::One, Threads::of(2), Threads::of(8), Threads::Auto])
 }
 
 /// Data of every kind bzip2 meets, `len` bytes: words with indents of
