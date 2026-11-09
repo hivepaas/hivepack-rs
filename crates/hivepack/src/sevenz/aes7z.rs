@@ -22,12 +22,10 @@
 //! without hashing, with a key of zeros: those are refused here, as nothing
 //! writes them, and a file that reads with any password is no better for it.
 
-use std::sync::Arc;
-
 use crate::crypto::{AES_BLOCK_LENGTH, Aes, Sha256};
 
 use crate::sevenz::error::{Error, Result};
-use crate::sevenz::lzma2_mt::{Lzma2Threads, Spare};
+use crate::sevenz::lzma2_mt::Lzma2Threads;
 
 /// `k_AES`.
 pub(crate) const K_AES: u32 = 0x6F1_0701;
@@ -130,13 +128,9 @@ fn derive_key(cycles: u32, salt: &[u8], password: &[u8]) -> [u8; 32] {
 /// What decoding a folder needs from `Options`, and the keys it has made.
 pub(crate) struct Decoding {
     pub(crate) limit: u64,
-    /// The threads an LZMA2 coder may use, at least one.
-    pub(crate) threads: u32,
-    /// The most the jobs of an LZMA2 coder in threads may hold, besides what
-    /// is left of `limit`: no more by default.
-    pub(crate) jobs: u64,
-    /// The threads its jobs share with other folders decoded at once.
-    pub(crate) spare: Option<Arc<Spare>>,
+    /// How an LZMA2 coder may decode in threads: one, the caller's, by
+    /// default, its jobs held to what is left of `limit` alone.
+    pub(crate) lzma2: Lzma2Threads,
     /// In UTF-16LE.
     password: Option<Vec<u8>>,
     max_key_cycles: u32,
@@ -147,9 +141,10 @@ impl Decoding {
     pub(crate) fn new(limit: u64, password: Option<&str>, max_key_cycles: u32) -> Self {
         let mut decoding = Decoding {
             limit,
-            threads: 1,
-            jobs: u64::MAX,
-            spare: None,
+            lzma2: Lzma2Threads {
+                jobs: u64::MAX,
+                ..Lzma2Threads::one()
+            },
             password: None,
             max_key_cycles,
             keys: Vec::new(),
@@ -162,11 +157,7 @@ impl Decoding {
 
     /// The threads an LZMA2 coder may use, and what their jobs may hold.
     pub(crate) fn lzma2(&self) -> Lzma2Threads {
-        Lzma2Threads {
-            threads: self.threads,
-            jobs: self.jobs,
-            spare: self.spare.clone(),
-        }
+        self.lzma2.clone()
     }
 
     /// The password from now on; the keys made from another are forgotten.

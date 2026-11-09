@@ -31,7 +31,10 @@
 //! it if there is one. Jobs wait while those given and not yet read would
 //! take more than what is left of `Options::decoder_memory_limit`, or than
 //! what an extraction gives the folder of `extract::Options::memory_limit`
-//! ([`Lzma2Threads::jobs`]). Where an extraction decodes folders at once, each
+//! ([`Lzma2Threads::jobs`]); an extraction with a limit or a budget of its own
+//! gives them that alone ([`Lzma2Threads::own`]), and with a budget each job
+//! holds its memory from it as it is given, waiting for those before it where
+//! it does not fit ([`Lzma2Threads::hold`]). Where an extraction decodes folders at once, each
 //! job in flight beyond the first takes one of the threads they share
 //! ([`Spare`]), and the others wait for one. A job that would hold more than
 //! the memory, or more than [`PACKED_MOST`] or
@@ -68,13 +71,37 @@ pub(crate) const UNPACKED_MOST: u64 = 1 << 30;
 
 /// How an LZMA2 coder may decode in threads: in up to `threads`, its jobs
 /// holding no more than `jobs` bytes beside what is left of the folder's limit,
-/// and, where folders are decoded at once, those beyond the first in flight
-/// each taking one of the `spare` threads they share.
+/// or `jobs` alone where they are `own`, and, where folders are decoded at
+/// once, those beyond the first in flight each taking one of the `spare`
+/// threads they share.
 #[derive(Clone, Debug)]
 pub(crate) struct Lzma2Threads {
     pub(crate) threads: u32,
     pub(crate) jobs: u64,
     pub(crate) spare: Option<Arc<Spare>>,
+    /// `jobs` is memory an extraction gives the jobs of its own limit or
+    /// budget: they are held to it alone, not to what is left of
+    /// `Options::decoder_memory_limit` too, which bounds what the archive asks
+    /// for, its dictionaries and models, not what the threads read ahead.
+    pub(crate) own: bool,
+    /// Where each job's memory is held from as it is given, until its output
+    /// is read: a job that does not fit waits for those before it; the first
+    /// is always given.
+    pub(crate) hold: Option<JobMemory>,
+}
+
+/// Memory held for a job, given back when it is dropped.
+pub(crate) type JobHeld = Box<dyn Send>;
+
+/// Where the jobs' memory is held from: `bytes` held, or `None` where they do
+/// not fit, an extraction's [`Budget`](crate::memory::Budget).
+#[derive(Clone)]
+pub(crate) struct JobMemory(pub(crate) Arc<dyn Fn(u64) -> Option<JobHeld> + Send + Sync>);
+
+impl std::fmt::Debug for JobMemory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("JobMemory")
+    }
 }
 
 impl Lzma2Threads {
@@ -84,6 +111,8 @@ impl Lzma2Threads {
             threads: 1,
             jobs: 0,
             spare: None,
+            own: false,
+            hold: None,
         }
     }
 }
@@ -265,8 +294,10 @@ pub(crate) struct Lzma2Mt {
     budget: u64,
     workers: Workers<(), Job, Done>,
     /// The memory each job given takes, the oldest first, until all its
-    /// output is read.
-    costs: VecDeque<u64>,
+    /// output is read, and what is held of it.
+    costs: VecDeque<(u64, Option<JobHeld>)>,
+    /// Where the jobs' memory is held from.
+    hold: Option<JobMemory>,
     /// The job whose output is being read.
     head: Option<Done>,
     /// A job gathered that waits for memory.
@@ -333,7 +364,11 @@ impl Lzma2Mt {
         Ok(Lzma2Mt {
             dict,
             serial_dict,
-            budget: (*limit).min(lzma2.jobs),
+            budget: match lzma2.own {
+                true => lzma2.jobs,
+                false => (*limit).min(lzma2.jobs),
+            },
+            hold: lzma2.hold,
             workers: Workers::new(lzma2.threads, "sevenz-lzma2", decode_job, job_lost),
             costs: VecDeque::new(),
             head: None,
@@ -503,12 +538,18 @@ impl Lzma2Mt {
                 },
             };
             let cost = job.cost();
-            let taken: u64 = self.costs.iter().sum();
+            let taken: u64 = self.costs.iter().map(|&(cost, _)| cost).sum();
             if !self.costs.is_empty() && taken.saturating_add(cost) > self.budget {
                 self.held = Some(job);
                 return Ok(());
             }
-            self.costs.push_back(cost);
+            let held = self.hold.as_ref().and_then(|hold| (hold.0)(cost));
+            if held.is_none() && self.hold.is_some() && !self.costs.is_empty() {
+                // Not in what is left of the budget: after those before it.
+                self.held = Some(job);
+                return Ok(());
+            }
+            self.costs.push_back((cost, held));
             if job.end != JobEnd::Reset && self.workers.pending() == 0 {
                 // Nothing to do beside it.
                 self.workers.do_here(job);
@@ -681,7 +722,7 @@ mod tests {
         let lzma2 = Lzma2Threads {
             threads,
             jobs: u64::MAX,
-            spare: None,
+            ..Lzma2Threads::one()
         };
         decode_with(packed, size, lzma2, limit, piece)
     }
@@ -750,6 +791,7 @@ mod tests {
                 threads: 8,
                 jobs: u64::MAX,
                 spare: Some(Arc::clone(&spare)),
+                ..Lzma2Threads::one()
             };
             let (got, made, _) = decode_with(&packed, data.len() as u64, lzma2, 1 << 32, 65536);
             assert!(got == Ok(data.clone()), "{free} free");
@@ -760,7 +802,7 @@ mod tests {
         let lzma2 = Lzma2Threads {
             threads: 8,
             jobs: 1 << 20,
-            spare: None,
+            ..Lzma2Threads::one()
         };
         let (got, _, _) = decode_with(&packed, data.len() as u64, lzma2, 1 << 32, 65536);
         assert!(got == Ok(data));
@@ -832,6 +874,85 @@ mod tests {
             let (one, ..) = decode(&bad, size, 1, 1 << 32, 65536);
             let (many, ..) = decode(&bad, size, 4, 1 << 32, 65536);
             assert_eq!(one.err(), many.err(), "at {at}");
+        }
+    }
+
+    /// Memory that `room` bytes hold for the jobs, and the most held at once.
+    fn held_within(
+        room: u64,
+    ) -> (
+        JobMemory,
+        Arc<std::sync::atomic::AtomicU64>,
+        Arc<std::sync::atomic::AtomicU64>,
+    ) {
+        use std::sync::atomic::AtomicU64;
+        struct Back(u64, Arc<AtomicU64>);
+        impl Drop for Back {
+            fn drop(&mut self) {
+                self.1.fetch_sub(self.0, Ordering::AcqRel);
+            }
+        }
+        let held = Arc::new(AtomicU64::new(0));
+        let most = Arc::new(AtomicU64::new(0));
+        let (now, top) = (Arc::clone(&held), Arc::clone(&most));
+        let hold = JobMemory(Arc::new(move |bytes| {
+            if now.load(Ordering::Acquire).saturating_add(bytes) > room {
+                return None;
+            }
+            let after = now.fetch_add(bytes, Ordering::AcqRel) + bytes;
+            top.fetch_max(after, Ordering::AcqRel);
+            Some(Box::new(Back(bytes, Arc::clone(&now))) as JobHeld)
+        }));
+        (hold, held, most)
+    }
+
+    /// Jobs held from memory as they are given, and given back as their
+    /// output is read: one that does not fit waits for those before it, the
+    /// first given whatever is left.
+    #[test]
+    fn jobs_are_held_as_they_are_given() {
+        let data = text(3 << 20, 5);
+        let packed = blocks(&data, 300_000);
+        for room in [0, 1 << 20, u64::MAX] {
+            let (hold, held, most) = held_within(room);
+            let lzma2 = Lzma2Threads {
+                threads: 8,
+                jobs: u64::MAX,
+                hold: Some(hold),
+                ..Lzma2Threads::one()
+            };
+            let (got, made, _) = decode_with(&packed, data.len() as u64, lzma2, 1 << 32, 65536);
+            assert!(got == Ok(data.clone()), "{room}");
+            let most = most.load(Ordering::Acquire);
+            assert!(most <= room, "{most} held of {room}");
+            if room == u64::MAX {
+                assert!(made > 1 && most > 0, "{made} threads, {most} held");
+            }
+            assert_eq!(held.load(Ordering::Acquire), 0, "given back");
+        }
+    }
+
+    /// An extraction's own jobs are held to `jobs` alone, not to what the
+    /// folder's limit leaves once its dictionary is counted.
+    #[test]
+    fn own_jobs_are_not_held_to_the_limit() {
+        let data = text(3 << 20, 6);
+        let packed = blocks(&data, 300_000);
+        // The dictionary, and a byte.
+        let limit = (1 << 16) + 1;
+        for own in [false, true] {
+            let lzma2 = Lzma2Threads {
+                threads: 8,
+                jobs: 64 << 20,
+                own,
+                ..Lzma2Threads::one()
+            };
+            let (got, made, serial) = decode_with(&packed, data.len() as u64, lzma2, limit, 65536);
+            assert!(got == Ok(data.clone()), "own: {own}");
+            match own {
+                true => assert!(made > 1 && !serial, "{made} threads"),
+                false => assert!(serial, "{made} threads"),
+            }
         }
     }
 }

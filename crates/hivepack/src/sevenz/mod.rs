@@ -76,8 +76,10 @@ pub use writer::{
 use aes7z::{Decoding, MAX_KEY_CYCLES};
 use arc_in::ArEx;
 use dec::FolderDecoder;
+#[cfg(all(feature = "extract", feature = "memory"))]
+pub(crate) use lzma2_mt::JobHeld;
 #[cfg(feature = "extract")]
-pub(crate) use lzma2_mt::{Lzma2Threads, Spare};
+pub(crate) use lzma2_mt::{JobMemory, Lzma2Threads, Spare};
 
 use crate::threads::Threads;
 
@@ -223,17 +225,16 @@ impl<R: Read + Seek> Archive<R> {
     /// errors too, though with a filter after LZMA2 one may be met a file
     /// later (`docs/7z.md`). Other folders are decoded as before.
     pub fn set_threads(&mut self, threads: Threads) {
-        self.decoding.threads = threads.count();
+        self.decoding.lzma2.threads = threads.count().max(1);
     }
 
     /// How LZMA2 is decoded in threads from the next folder on, at least one,
     /// for how it was.
     #[cfg(feature = "extract")]
     pub(crate) fn swap_lzma2(&mut self, lzma2: Lzma2Threads) -> Lzma2Threads {
-        let before = self.decoding.lzma2();
-        self.decoding.threads = lzma2.threads.max(1);
-        self.decoding.jobs = lzma2.jobs;
-        self.decoding.spare = lzma2.spare;
+        let threads = lzma2.threads.max(1);
+        let before = std::mem::replace(&mut self.decoding.lzma2, lzma2);
+        self.decoding.lzma2.threads = threads;
         before
     }
 

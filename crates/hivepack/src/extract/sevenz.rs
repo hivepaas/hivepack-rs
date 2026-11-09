@@ -16,7 +16,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::sevenz::{Archive, Entry, Files, FolderFiles, Lzma2Threads, Spare};
+use crate::sevenz::{Archive, Entry, Files, FolderFiles, JobMemory, Lzma2Threads, Spare};
 
 use crate::extract::destination::Target;
 use crate::extract::error::{Error, ErrorKind};
@@ -261,7 +261,11 @@ fn links<'a, R: Read + Seek>(
 /// a piece at a time: `R` needs no more than [`Read`] and [`Seek`]. Each thread
 /// holds its folder's decoder, whose dictionaries and models the archive says:
 /// the threads are lowered until they fit [`Options::memory_limit`] and
-/// `Options::memory_budget`, one always allowed. The threads left over, and
+/// `Options::memory_budget`, one always allowed. LZMA2's blocks decoded ahead
+/// take what those leave, not also what `decoder_memory_limit` of
+/// [`crate::sevenz::Options`] leaves, which bounds the archive's dictionaries
+/// and models; with the budget, each block holds its memory from it while it
+/// waits to be read. The threads left over, and
 /// those whose folders are done as the last ones are decoded, decode LZMA2
 /// whose stream resets its dictionary on the way, as 7-Zip writes it in
 /// threads and [`crate::sevenz::Lzma2Blocks`] does, a block in each, in place
@@ -391,11 +395,30 @@ fn threading<R: Read + Seek>(
     };
     #[cfg(not(feature = "memory"))]
     let held = None;
+    // The jobs' memory is the extraction's to give where it has a limit or a
+    // budget: `decoder_memory_limit` bounds what the archive asks for.
+    #[cfg(feature = "memory")]
+    let hold = match &options.memory_budget {
+        Some(budget) if threads > 1 => {
+            let budget = budget.clone();
+            Some(JobMemory(std::sync::Arc::new(move |bytes| {
+                budget
+                    .try_hold(bytes)
+                    .map(|held| Box::new(held) as crate::sevenz::JobHeld)
+            })))
+        }
+        _ => None,
+    };
+    #[cfg(not(feature = "memory"))]
+    let hold: Option<JobMemory> = None;
+    let own = options.memory_limit.is_some() || hold.is_some();
     let jobs = |n: u32| {
-        limit
-            .saturating_sub(need(n))
-            .min(archive.decoder_memory_limit())
-            / u64::from(n.max(1))
+        let room = limit.saturating_sub(need(n));
+        let room = match own {
+            true => room,
+            false => room.min(archive.decoder_memory_limit()),
+        };
+        room / u64::from(n.max(1))
     };
     Threading {
         workers,
@@ -403,11 +426,15 @@ fn threading<R: Read + Seek>(
             threads,
             jobs: jobs(workers),
             spare: Some(Spare::new(threads.saturating_sub(workers))),
+            own,
+            hold: hold.clone(),
         },
         alone: Lzma2Threads {
             threads,
             jobs: jobs(1),
             spare: None,
+            own,
+            hold,
         },
         _held: held,
     }
@@ -437,7 +464,7 @@ fn extract_into<R: Read + Seek, T: Target>(
     let before = archive.swap_lzma2(Lzma2Threads {
         threads: options.threads.count(),
         jobs: u64::MAX,
-        spare: None,
+        ..Lzma2Threads::one()
     });
     let extracted = extract_with(archive, make, options, at_once, write);
     archive.swap_lzma2(before);

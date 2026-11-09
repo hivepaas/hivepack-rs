@@ -118,6 +118,26 @@ impl Budget {
         (threads, held)
     }
 
+    /// `bytes` held, if they fit what is left of the budget, until the
+    /// [`Held`] is dropped: for memory a job takes a piece at a time, each
+    /// given back as it is done with, where [`Budget::hold_threads`] holds what
+    /// its threads need for all of it at once. `None` where they do not fit,
+    /// and nothing held then: the job waits for its own pieces to be given
+    /// back, or goes on without one more.
+    pub fn try_hold(&self, bytes: u64) -> Option<Held> {
+        let mut account = self.lock();
+        let left = account.bytes.saturating_sub(account.held);
+        if bytes > left {
+            return None;
+        }
+        account.held = account.held.saturating_add(bytes);
+        drop(account);
+        Some(Held {
+            bytes,
+            account: Arc::clone(&self.account),
+        })
+    }
+
     fn lock(&self) -> MutexGuard<'_, Account> {
         lock(&self.account)
     }
@@ -294,5 +314,24 @@ mod tests {
         assert!(half.bytes() > 0);
         assert!(Budget::of_available(1, 0).is_none());
         assert_eq!(half.held(), 0);
+    }
+
+    #[test]
+    fn a_hold_is_what_fits_or_nothing() {
+        let budget = Budget::new(10 * MIB);
+        let threads = budget.hold_threads(1, |_| 4 * MIB).1;
+        let piece = budget.try_hold(5 * MIB).unwrap();
+        assert_eq!((piece.bytes(), budget.held()), (5 * MIB, 9 * MIB));
+        // Past what is left: nothing held.
+        assert!(budget.try_hold(2 * MIB).is_none());
+        assert_eq!(budget.held(), 9 * MIB);
+        let last = budget.try_hold(MIB).unwrap();
+        assert_eq!(budget.left(), 0);
+        drop(piece);
+        drop(threads);
+        assert_eq!(budget.held(), MIB);
+        drop(last);
+        assert_eq!(budget.held(), 0);
+        assert!(budget.try_hold(11 * MIB).is_none());
     }
 }

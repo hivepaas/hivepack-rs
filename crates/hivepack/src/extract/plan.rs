@@ -446,7 +446,8 @@ pub struct Options {
     /// thread has a window as large as the archive's dictionary asks, and
     /// PPMd's model in RAR 4; 7z's ([`extract_7z`](crate::extract::extract_7z)),
     /// whose every thread has its folder's dictionaries and models, LZMA2's
-    /// blocks decoded ahead taking what they leave. The threads are lowered
+    /// blocks decoded ahead taking what they leave, where they would
+    /// otherwise be held to `sevenz::Options::decoder_memory_limit`. The threads are lowered
     /// until what they take, counted for the most each may hold, fits; one is
     /// always allowed, as it takes what extracting without threads does. For
     /// tar and cpio, the data read and handed to threads to write, 32 MiB at
