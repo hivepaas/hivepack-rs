@@ -595,6 +595,7 @@ fn add_data<R: ReadAt + ?Sized, W: Write + Seek>(
         true => Some(Layer::new(Decompress::new(
             st.comp_method,
             check_consistency,
+            (st.valid & stat::COMP_SIZE != 0).then_some(st.comp_size),
         )?)),
         false => None,
     };
