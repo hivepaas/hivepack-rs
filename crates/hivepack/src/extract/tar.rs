@@ -24,7 +24,7 @@ use crate::tar::{
     TYPE_X_GLOBAL_HEADER, Time,
 };
 
-use crate::extract::destination::{Counted, Destination, Staging, Target, TargetFile};
+use crate::extract::destination::{Counted, Destination, Staging, Target, TargetFile, Walk};
 use crate::extract::error::{Error, ErrorKind};
 use crate::extract::name::{Name, NameError};
 use crate::extract::plan::Settled;
@@ -592,7 +592,7 @@ fn spool_item(item: &Item) -> Item {
         raw_name: item.raw_name.clone(),
         text: item.text.clone(),
         name: Ok(Name {
-            components: vec![SPOOL.to_owned(), item.index.to_string()],
+            components: vec![item.index.to_string()],
             is_dir: false,
         }),
         kind: Kind::File,
@@ -616,7 +616,13 @@ fn once<R: Read, F: FnMut() -> io::Result<R>>(
     options: &Options,
 ) -> Result<Summary, Error> {
     let r = open().map_err(|e| Error::global(ErrorKind::Io(e)))?;
-    let spool = &staging.data;
+    // The files' data, each named by its index, at the root of a destination
+    // of its own, the private folder's `data`: each is made without opening
+    // a directory for it.
+    let spool = &staging
+        .data
+        .within(&[SPOOL.to_owned()])
+        .map_err(Error::global)?;
     // Counted as each entry moves into place, the totals known.
     run.quiet(true);
     let read = match writer_threads(options, u64::MAX) {
@@ -658,6 +664,7 @@ fn once<R: Read, F: FnMut() -> io::Result<R>>(
     };
 
     // What is in the destination already, before anything moves.
+    let mut walk = Walk::default();
     for item in entries.iter().filter_map(placed) {
         let Ok(name) = &item.name else {
             continue;
@@ -672,12 +679,16 @@ fn once<R: Read, F: FnMut() -> io::Result<R>>(
                 &name.components,
                 item.kind == Kind::Dir,
                 file && options.overwrite,
+                &mut walk,
             )
             .map_err(|kind| item.error(kind))?;
     }
+    // Its handles closed before anything moves, as Windows wants.
+    drop(walk);
 
     // Moving into place, in the archive's order.
-    let data = spool.open_dir(&[SPOOL.to_owned()]).map_err(Error::global)?;
+    let data = spool.open_dir(&[]).map_err(Error::global)?;
+    let mut walk = Walk::default();
     let mut summary = Summary {
         skipped,
         renamed: settled.renamed,
@@ -730,7 +741,13 @@ fn once<R: Read, F: FnMut() -> io::Result<R>>(
                 match spooled.remove(&item.index) {
                     Some(Spooled::Whole(bytes)) => {
                         destination
-                            .place(&data, &spooled_name, components, options.overwrite)
+                            .place(
+                                &data,
+                                &spooled_name,
+                                components,
+                                options.overwrite,
+                                &mut walk,
+                            )
                             .map_err(error)?;
                         summary.files += 1;
                         summary.bytes += bytes;
@@ -740,7 +757,13 @@ fn once<R: Read, F: FnMut() -> io::Result<R>>(
                         (OnDamaged::Keep, damage) => {
                             destination.damaged(&damage);
                             destination
-                                .place(&data, &spooled_name, components, options.overwrite)
+                                .place(
+                                    &data,
+                                    &spooled_name,
+                                    components,
+                                    options.overwrite,
+                                    &mut walk,
+                                )
                                 .map_err(error)?;
                             run.damaged(damage, Some(kept));
                             summary.files += 1;
@@ -909,7 +932,7 @@ fn spool_from(
     options: &Options,
 ) -> Result<Spooled, Error> {
     let spooled = spool_item(item);
-    let components = &[SPOOL.to_owned(), item.index.to_string()];
+    let components = &[item.index.to_string()];
     let error = |kind| item.error(kind);
     let file = spool
         .create_file(&spooled, components, Some(item.size), options)

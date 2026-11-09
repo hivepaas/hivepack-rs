@@ -213,24 +213,28 @@ impl<'a> Destination<'a> {
     /// with `overwrite`; anything else in the way is refused, as writing it
     /// would refuse it ([`ErrorKind::NotADirectory`] on the way or for a
     /// directory, [`ErrorKind::Exists`] for the rest).
+    /// The parents are opened through `walk`, which keeps them for the next
+    /// entry's.
     pub(crate) fn in_the_way(
         &self,
         components: &[String],
         dir: bool,
         overwrite: bool,
+        walk: &mut Walk,
     ) -> Result<(), ErrorKind> {
         let Some((last, parents)) = components.split_last() else {
             return Ok(());
         };
-        let mut at = self.root.try_clone().map_err(ErrorKind::Io)?;
-        for component in parents {
-            match at.open_dir_nofollow(component) {
-                Ok(next) => at = next,
+        let on_way = walk.keep(parents);
+        for component in &parents[on_way..] {
+            let from = walk.deepest(&self.root);
+            match from.open_dir_nofollow(component) {
+                Ok(next) => walk.dirs.push((component.clone(), next)),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-                Err(e) => return Err(not_a_directory(&at, component, e)),
+                Err(e) => return Err(not_a_directory(from, component, e)),
             }
         }
-        match at.symlink_metadata(last) {
+        match walk.deepest(&self.root).symlink_metadata(last) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(ErrorKind::Io(e)),
             Ok(there) if dir && there.is_dir() => Ok(()),
@@ -245,23 +249,27 @@ impl<'a> Destination<'a> {
     /// removing it from `from`. With `overwrite`, a file there is replaced by
     /// a rename. Where the file system has no hard links (FAT32, exFAT), the
     /// file is renamed after one more look.
+    ///
+    /// The parents are opened, and made, through `walk`, which keeps them for
+    /// the next entry's.
     pub(crate) fn place(
         &self,
         from: &Dir,
         name: &str,
         components: &[String],
         overwrite: bool,
+        walk: &mut Walk,
     ) -> Result<(), ErrorKind> {
         let (last, parents) = split(components)?;
-        let dir = self.directory(parents)?;
-        let rename = || from.rename(name, &dir, last).map_err(ErrorKind::Io);
+        let dir = self.walk_to(parents, walk)?;
+        let rename = || from.rename(name, dir, last).map_err(ErrorKind::Io);
         let there = |e: io::Error| match dir.symlink_metadata(last) {
             Ok(metadata) if overwrite && metadata.is_file() => rename(),
             Ok(_) => Err(ErrorKind::Exists),
             Err(found) if found.kind() == io::ErrorKind::NotFound => Err(ErrorKind::Io(e)),
             Err(found) => Err(ErrorKind::Io(found)),
         };
-        match from.hard_link(name, &dir, last) {
+        match from.hard_link(name, dir, last) {
             Ok(()) => {
                 let _ = from.remove_file(name);
                 Ok(())
@@ -324,6 +332,40 @@ impl<'a> Destination<'a> {
             }
         }
         Ok(dir)
+    }
+
+    /// [`Destination::directory`] through `walk`: the directories on the way
+    /// to the last ones it was given kept, those after opened, or made, from
+    /// the deepest of them.
+    pub(crate) fn walk_to<'w>(
+        &'w self,
+        components: &[String],
+        walk: &'w mut Walk,
+    ) -> Result<&'w Dir, ErrorKind> {
+        let on_way = walk.keep(components);
+        for component in &components[on_way..] {
+            let dir = walk.deepest(&self.root);
+            let (next, created) = match dir.open_dir_nofollow(component) {
+                Ok(next) => (next, false),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    let created = match dir.create_dir(component) {
+                        Ok(()) => true,
+                        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => false,
+                        Err(e) => return Err(ErrorKind::Io(e)),
+                    };
+                    match dir.open_dir_nofollow(component) {
+                        Ok(next) => (next, created),
+                        Err(e) => return Err(not_a_directory(dir, component, e)),
+                    }
+                }
+                Err(e) => return Err(not_a_directory(dir, component, e)),
+            };
+            if let (true, Some(origin)) = (created, self.origin) {
+                origin.write_dir(&next).map_err(ErrorKind::Origin)?;
+            }
+            walk.dirs.push((component.clone(), next));
+        }
+        Ok(walk.deepest(&self.root))
     }
 
     /// Creates the file `name` in `dir`, which must not be there, not even
@@ -419,6 +461,38 @@ impl<'a> Destination<'a> {
 }
 
 /// Whether `options` asks something restored that `item` keeps.
+/// The directories opened on the way to the last entry's, from a
+/// destination's root down, each with its name: the next entry's are opened
+/// from the deepest that is on its way too, as an archive's entries one
+/// after another are mostly in the same directory, where each was opened
+/// from the root again. Each was opened without following a link, as
+/// [`Destination::directory`] opens them, and is used by its handle. For one
+/// thread going through the entries in turn, and one destination.
+#[derive(Default)]
+pub(crate) struct Walk {
+    dirs: Vec<(String, Dir)>,
+}
+
+impl Walk {
+    /// How many of `components` are on the way already: those after them are
+    /// let go of.
+    fn keep(&mut self, components: &[String]) -> usize {
+        let same = self
+            .dirs
+            .iter()
+            .zip(components)
+            .take_while(|((name, _), component)| name == *component)
+            .count();
+        self.dirs.truncate(same);
+        same
+    }
+
+    /// The deepest directory on the way, or `root`.
+    fn deepest<'d>(&'d self, root: &'d Dir) -> &'d Dir {
+        self.dirs.last().map_or(root, |(_, dir)| dir)
+    }
+}
+
 fn wants_kept(item: &Item, options: &Options) -> bool {
     (options.owners != Owners::Ignore && item.owner.is_some())
         || (options.xattrs && !item.xattrs.is_empty())
@@ -729,6 +803,11 @@ impl Target for Destination<'_> {
         options: &Options,
     ) -> Result<std::fs::File, ErrorKind> {
         let (last, parents) = split(components)?;
+        if parents.is_empty() {
+            // At the root, as a private folder's files are: no handle of its
+            // own to open.
+            return Ok(Destination::create_file(&self.root, last, options.overwrite)?.into_std());
+        }
         let dir = Destination::directory(self, parents)?;
         Ok(Destination::create_file(&dir, last, options.overwrite)?.into_std())
     }

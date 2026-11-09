@@ -188,6 +188,55 @@ fn extracts_files_directories_and_dot_slash_names() {
     }
 }
 
+/// Files whose parents go deeper, back up and across from one entry to the
+/// next, with no directory entries, some parents there already, and one name
+/// a prefix of another's: each lands where it is named, as the directories
+/// opened for the last one are kept for the next.
+#[test]
+fn files_land_where_named_as_the_directories_change() {
+    let s = Scratch::new();
+    std::fs::create_dir_all(s.out().join("a/b")).unwrap();
+    let names: [&[u8]; 9] = [
+        b"a/b/c/one",
+        b"a/b/two",
+        b"a/x/three",
+        b"a/b/c/d/four",
+        b"five",
+        b"a/b/c/six",
+        b"ab/seven",
+        b"a/b/cd/eight",
+        b"a/nine",
+    ];
+    let entries: Vec<E<'_>> = names.iter().map(|&name| E::File(name, name)).collect();
+    let summary = extract(&tar(&entries), &s.out(), &portable()).unwrap();
+    assert_eq!(summary.files, 9);
+    for name in names {
+        let path = s.out().join(std::str::from_utf8(name).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), name, "{}", path.display());
+    }
+    assert_eq!(
+        listing(&s.out()),
+        [
+            "a/",
+            "a/b/",
+            "a/b/c/",
+            "a/b/c/d/",
+            "a/b/c/d/four",
+            "a/b/c/one",
+            "a/b/c/six",
+            "a/b/cd/",
+            "a/b/cd/eight",
+            "a/b/two",
+            "a/nine",
+            "a/x/",
+            "a/x/three",
+            "ab/",
+            "ab/seven",
+            "five",
+        ]
+    );
+}
+
 #[test]
 fn refused_names_write_nothing() {
     let cases: [(&[u8], NameError); 7] = [
