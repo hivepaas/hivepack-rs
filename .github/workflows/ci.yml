@@ -2,6 +2,8 @@ name: CI
 
 on:
   pull_request:
+    # `labeled`: the label s390x runs that job on a pull request.
+    types: [opened, synchronize, reopened, labeled]
   push:
     branches: [main]
   workflow_dispatch:
@@ -173,14 +175,28 @@ jobs:
       fail-fast: false
       matrix:
         # 32-bit, and big-endian: the format is little-endian and the port
-        # must read it so on every machine.
-        target: [i686-unknown-linux-gnu, s390x-unknown-linux-gnu]
+        # must read it so on every machine. s390x is emulated, and slow: it
+        # runs on main, by hand, and on a pull request labelled s390x; i686
+        # on every pull request.
+        target: >-
+          ${{ fromJSON(
+          (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 's390x'))
+          && '["i686-unknown-linux-gnu", "s390x-unknown-linux-gnu"]'
+          || '["i686-unknown-linux-gnu"]') }}
+    env:
+      # The tests comparing threads run one and two only where the machine
+      # is emulated (Cross.toml, tests/threads_support).
+      HIVEPACK_EMULATED: ${{ startsWith(matrix.target, 's390x') && '1' || '' }}
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Rust
         run: rustup toolchain install
+      # What cross builds goes into target/, as cargo's does.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cross
