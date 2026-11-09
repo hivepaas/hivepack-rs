@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 use std::io::{self, Read};
 use std::path::Path;
+use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::tar::{
@@ -413,7 +414,11 @@ pub(crate) fn plan_links<S>(
 /// the files handed before it to be written, and symbolic links are created
 /// once every thread is done. What is written is the same, and so is the
 /// summary. The first error stops the other threads, and is the one returned.
-pub fn extract_tar<R: Read, F: FnMut() -> io::Result<R>>(
+/// Into a folder, where the archive is read once, `open`'s reader is read
+/// ahead by a thread of its own, a MiB at a time: a compressed tar is
+/// decompressed there while the caller's thread reads the archive, as
+/// `zstd -dc | tar x` runs in two processes; so the reader is `Send`.
+pub fn extract_tar<R: Read + Send, F: FnMut() -> io::Result<R>>(
     open: F,
     destination: &Path,
     options: &Options,
@@ -541,7 +546,7 @@ fn extract_into<R: Read, F: FnMut() -> io::Result<R>, T: Target>(
 /// ended, then moved into place. If anything fails, the private folder goes,
 /// and the destination too if this made it and it is empty: nothing of the
 /// archive is left.
-fn extract_once<R: Read, F: FnMut() -> io::Result<R>>(
+fn extract_once<R: Read + Send, F: FnMut() -> io::Result<R>>(
     mut open: F,
     path: &Path,
     options: &Options,
@@ -560,6 +565,120 @@ fn extract_once<R: Read, F: FnMut() -> io::Result<R>>(
         let _ = std::fs::remove_dir(path);
     }
     result
+}
+
+/// What a thread reading ahead reads at a time, and how many of those may
+/// wait to be read.
+const AHEAD: usize = 1 << 20;
+const AHEAD_PIECES: usize = 4;
+
+/// `r` read ahead by a thread of its own while `use_it` reads what it read,
+/// [`AHEAD`] bytes at a time, at most [`AHEAD_PIECES`] of them waiting: a
+/// compressed tar's decompression, on that thread, goes on while the caller's
+/// reads the archive and hands its files to the threads that write them, as
+/// `zstd -dc | tar x` runs in two processes. What is read, and the errors,
+/// are `r`'s, in order. Once `use_it` is done, the thread stops at its next
+/// piece. Where no thread can be made, the reader's first read says why.
+fn read_ahead<R: Read + Send, T>(r: R, use_it: impl FnOnce(Ahead) -> T) -> T {
+    std::thread::scope(|scope| {
+        let (full, read) = mpsc::sync_channel::<io::Result<Vec<u8>>>(AHEAD_PIECES);
+        let (back, empty) = mpsc::sync_channel::<Vec<u8>>(AHEAD_PIECES + 2);
+        let started = std::thread::Builder::new()
+            .name("tar-read-ahead".into())
+            .spawn_scoped(scope, move || {
+                let mut r = r;
+                loop {
+                    let mut piece = empty.try_recv().unwrap_or_default();
+                    piece.resize(AHEAD, 0);
+                    let mut got = 0;
+                    let read = loop {
+                        match r.read(&mut piece[got..]) {
+                            Ok(0) => break Ok(()),
+                            Ok(n) => {
+                                got += n;
+                                if got == piece.len() {
+                                    break Ok(());
+                                }
+                            }
+                            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                            Err(e) => break Err(e),
+                        }
+                    };
+                    piece.truncate(got);
+                    let end = got == 0;
+                    let sent = match read {
+                        Ok(()) if end => full.send(Ok(piece)).map(|()| true),
+                        Ok(()) => full.send(Ok(piece)).map(|()| false),
+                        Err(e) => {
+                            if got > 0 {
+                                let _ = full.send(Ok(piece));
+                            }
+                            full.send(Err(e)).map(|()| true)
+                        }
+                    };
+                    // Ended, or no one is reading any more.
+                    if sent.unwrap_or(true) {
+                        break;
+                    }
+                }
+            });
+        use_it(Ahead {
+            read,
+            back,
+            piece: Vec::new(),
+            at: 0,
+            ended: false,
+            unstarted: started.err(),
+        })
+    })
+}
+
+/// What [`read_ahead`]'s thread read, as a reader.
+struct Ahead {
+    read: mpsc::Receiver<io::Result<Vec<u8>>>,
+    back: mpsc::SyncSender<Vec<u8>>,
+    piece: Vec<u8>,
+    at: usize,
+    ended: bool,
+    /// Why the thread could not be made, if it could not.
+    unstarted: Option<io::Error>,
+}
+
+impl Read for Ahead {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if let Some(e) = self.unstarted.take() {
+            self.ended = true;
+            return Err(e);
+        }
+        while self.at == self.piece.len() {
+            if self.ended || buf.is_empty() {
+                return Ok(0);
+            }
+            match self.read.recv() {
+                Ok(Ok(piece)) => {
+                    if piece.is_empty() {
+                        self.ended = true;
+                    }
+                    let done = std::mem::replace(&mut self.piece, piece);
+                    let _ = self.back.try_send(done);
+                    self.at = 0;
+                }
+                Ok(Err(e)) => {
+                    self.ended = true;
+                    return Err(e);
+                }
+                // The thread is gone without a word: not one that ended.
+                Err(_) => {
+                    self.ended = true;
+                    return Err(io::Error::other("the thread reading ahead is gone"));
+                }
+            }
+        }
+        let n = buf.len().min(self.piece.len() - self.at);
+        buf[..n].copy_from_slice(&self.piece[self.at..self.at + n]);
+        self.at += n;
+        Ok(n)
+    }
 }
 
 /// The directory of a private folder that files' data is written to.
@@ -608,7 +727,7 @@ fn spool_item(item: &Item) -> Item {
 
 /// The archive read once, into `staging`, then checked and moved into
 /// `destination`.
-fn once<R: Read, F: FnMut() -> io::Result<R>>(
+fn once<R: Read + Send, F: FnMut() -> io::Result<R>>(
     open: &mut F,
     destination: &Destination<'_>,
     staging: &Staging<'_>,
@@ -626,8 +745,10 @@ fn once<R: Read, F: FnMut() -> io::Result<R>>(
     // Counted as each entry moves into place, the totals known.
     run.quiet(true);
     let read = match writer_threads(options, u64::MAX) {
-        Some(writing) => with_writers(spool, run, options, &writing, |writers| {
-            read_once(r, spool, run, options, Some(writers))
+        Some(writing) => read_ahead(r, |r| {
+            with_writers(spool, run, options, &writing, |writers| {
+                read_once(r, spool, run, options, Some(writers))
+            })
         }),
         None => read_once(r, spool, run, options, None),
     };
@@ -1316,4 +1437,62 @@ fn owner_of(h: &crate::tar::Header) -> Option<Owner> {
         user: h.uname.clone(),
         group: h.gname.clone(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What is read ahead is what the reader gives, at lengths around a
+    /// piece's; an error comes after the bytes before it, in order.
+    #[test]
+    fn read_ahead_is_the_reader() {
+        for len in [
+            0,
+            1,
+            4095,
+            AHEAD - 1,
+            AHEAD,
+            AHEAD + 1,
+            3 * AHEAD + 7,
+            9 * AHEAD,
+        ] {
+            let data: Vec<u8> = (0..len).map(|i| (i * 7 + i / 977) as u8).collect();
+            let got = read_ahead(&data[..], |mut r| {
+                let mut out = Vec::new();
+                r.read_to_end(&mut out).map(|_| out)
+            });
+            assert!(got.is_ok_and(|got| got == data), "{len}");
+        }
+        /// Some bytes, then an error.
+        struct Failing(usize);
+        impl Read for Failing {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if self.0 == 0 {
+                    return Err(io::Error::other("damaged"));
+                }
+                let n = buf.len().min(self.0).min(1000);
+                buf[..n].fill(7);
+                self.0 -= n;
+                Ok(n)
+            }
+        }
+        let (read, error) = read_ahead(Failing(AHEAD + 5000), |mut r| {
+            let mut out = Vec::new();
+            let error = r.read_to_end(&mut out).err().map(|e| e.to_string());
+            (out.len(), error)
+        });
+        assert_eq!((read, error.as_deref()), (AHEAD + 5000, Some("damaged")));
+    }
+
+    /// A reader that stops early lets the thread go: the call returns.
+    #[test]
+    fn read_ahead_stops_with_its_reader() {
+        let data = vec![1u8; 20 * AHEAD];
+        let first = read_ahead(&data[..], |mut r| {
+            let mut b = [0u8; 10];
+            r.read_exact(&mut b).map(|()| b[0])
+        });
+        assert!(first.is_ok_and(|b| b == 1));
+    }
 }
