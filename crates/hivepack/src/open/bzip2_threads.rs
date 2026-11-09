@@ -46,6 +46,12 @@ const MAX_PIECE: usize = 2 << 20;
 /// KB at most.
 const MAX_OUTPUT: usize = 4 << 20;
 
+/// The most a block of a stream decodes to: 900,000 symbols at block size
+/// 9, the most as runs of four bytes and their count, each five giving 255
+/// bytes, 45.9 MB. A block of [`BlockThreads`] past [`MAX_OUTPUT`] is decoded
+/// on the caller's thread, within this.
+const MAX_BLOCK_OUTPUT: usize = 46 << 20;
+
 /// What the input is read in.
 const READ: usize = 256 << 10;
 
@@ -55,14 +61,15 @@ const START_LEN: usize = 10;
 /// The most bytes the decoder takes in `threads` threads, two pieces in
 /// flight for each: for each piece, what was read (twice, while the rest
 /// goes to one thread) and what it decodes to; for each thread, a decoder;
-/// and what is read and not in a piece, the output being read, and the
-/// decoder of one thread that may take what is left.
+/// and what is read and not in a piece, the output being read (a block's
+/// whole where it is decoded on the caller's thread), and the decoder of one
+/// thread that may take what is left.
 pub(super) fn memory_usage(threads: u32) -> u64 {
     let threads = u64::from(threads);
     let decoder = crate::bzip2::decompress_memory();
     let read = (MAX_PIECE + READ) as u64;
     let piece = 2 * read + MAX_OUTPUT as u64;
-    threads * (2 * piece + decoder) + 2 * read + MAX_OUTPUT as u64 + decoder + (1 << 20)
+    threads * (2 * piece + decoder) + 2 * read + MAX_BLOCK_OUTPUT as u64 + decoder + (1 << 20)
 }
 
 /// The threads to decode in, at most `threads`, whose [`memory_usage`] fits
@@ -521,14 +528,17 @@ type MagicFn = fn(&[u8], u64, u64, bool) -> Result<(u64, bool), u64>;
 enum BlockOutcome {
     /// Its output and its CRC, and where it ended, in bits.
     Block { data: Vec<u8>, crc: u32, end: u64 },
+    /// It decodes to more than it was let: the caller's thread decodes it,
+    /// with more room.
+    TooLarge,
     /// Anything else: one thread reads from its start.
     Other,
 }
 
 /// A block of a stream of blocks of `level` × 100,000 bytes, its magic at
 /// bit `start`, `bytes` from the byte that bit is in: decoded as the decoder
-/// of one thread would from there.
-fn decode_block(level: i32, bytes: &[u8], start: u64) -> BlockOutcome {
+/// of one thread would from there, to at most `most` bytes.
+fn decode_block(level: i32, bytes: &[u8], start: u64, most: usize) -> BlockOutcome {
     let off = (start % 8) as u32;
     let (bits, live, input) = match (off, bytes.split_first()) {
         (0, _) => (0, 0, bytes),
@@ -565,9 +575,9 @@ fn decode_block(level: i32, bytes: &[u8], start: u64) -> BlockOutcome {
             }
             // It wants more input than the block has.
             Ok(false) if written < out.len() => return BlockOutcome::Other,
-            Ok(false) if out.len() >= MAX_OUTPUT => return BlockOutcome::Other,
+            Ok(false) if out.len() >= most => return BlockOutcome::TooLarge,
             Ok(false) => {
-                let more = (out.len() * 2).min(MAX_OUTPUT);
+                let more = (out.len() * 2).min(most);
                 out.reserve_exact(more - out.len());
                 out.resize(more, 0);
             }
@@ -694,7 +704,9 @@ impl<R: Read> BlockThreads<R> {
                         let to = (at.div_ceil(8) - self.base) as usize;
                         let bytes = self.input[from..to].to_vec();
                         let level = self.level;
-                        let outcome = self.pool.run(move || decode_block(level, &bytes, start));
+                        let outcome = self
+                            .pool
+                            .run(move || decode_block(level, &bytes, start, MAX_OUTPUT));
                         self.jobs.push_back(BlockJob {
                             start,
                             end: at,
@@ -721,6 +733,17 @@ impl<R: Read> BlockThreads<R> {
                     }
                 }
             }
+        }
+    }
+
+    /// The block from bit `start` to bit `end`, decoded on this thread, to
+    /// at most [`MAX_BLOCK_OUTPUT`] bytes.
+    fn decode_here(&self, start: u64, end: u64) -> BlockOutcome {
+        let from = (start / 8 - self.base) as usize;
+        let to = (end.div_ceil(8) - self.base) as usize;
+        match self.input.get(from..to) {
+            Some(bytes) => decode_block(self.level, bytes, start, MAX_BLOCK_OUTPUT),
+            None => BlockOutcome::Other,
         }
     }
 
@@ -772,7 +795,14 @@ impl<R: Read> Read for BlockThreads<R> {
             self.fill();
             let ours = self.jobs.front().is_some_and(|job| job.start == self.pos);
             let job = if ours { self.jobs.pop_front() } else { None };
-            match job.map(|job| (job.end, job.outcome.wait())) {
+            let outcome = job.map(|job| match job.outcome.wait() {
+                // Runs of the same byte decode to more than a thread holds:
+                // decoded here, where the decoder of one thread would decode
+                // it, and the threads go on after it.
+                BlockOutcome::TooLarge => (job.end, self.decode_here(job.start, job.end)),
+                outcome => (job.end, outcome),
+            });
+            match outcome {
                 Some((at, BlockOutcome::Block { data, crc, end })) if end == at => {
                     self.combined = self.combined.rotate_left(1) ^ crc;
                     self.taken += 1;
@@ -922,6 +952,36 @@ mod tests {
         let read = read_all(&mut threaded);
         let taken = threaded.blocks.as_ref().map_or(0, |b| b.taken);
         (alone, read, taken)
+    }
+
+    /// Blocks of runs of one byte, as programs and disk images have, decode
+    /// to more than a thread holds (at block size 1, 5.1 MB of 100,000
+    /// symbols): each is decoded on the caller's thread, and the threads
+    /// take the blocks after it, where one thread used to read all the rest.
+    #[test]
+    fn blocks_too_large_for_a_thread_are_decoded_on_the_callers() {
+        let mut data = text(300_000);
+        data.extend(vec![0u8; 12 << 20]);
+        data.extend(text(300_000));
+        data.extend(vec![7u8; 6 << 20]);
+        data.extend(text(250_000));
+        let file = one_stream(&data);
+        // Every block's magic in the stream.
+        let mut blocks = 0;
+        let mut from = 32;
+        while let Ok((at, end)) = find_magic(&file, 0, from, true) {
+            if end {
+                break;
+            }
+            blocks += 1;
+            from = at + 48;
+        }
+        for threads in [2, 8] {
+            let (alone, read, taken) = both(&file, threads, 60_000, find_magic);
+            assert!(alone == (data.clone(), None));
+            assert!(read == alone, "{threads} threads");
+            assert_eq!(taken, blocks, "{threads} threads");
+        }
     }
 
     #[test]
