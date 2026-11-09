@@ -59,11 +59,13 @@
 //! ```
 //!
 //! [`extract_tar`] extracts tar archives with the same rules, reading them
-//! twice: once to check, once to write; [`extract_cpio`] cpio archives
-//! (RPM packages' payloads among them), [`extract_xar`] XAR archives
-//! (macOS packages, their payloads expanded) and [`extract_iso`] ISO 9660
-//! images, the same way; [`extract_udf`] UDF volumes and [`extract_7z`] 7z
-//! archives, checked first, as ZIP archives are.
+//! once into a private folder in the destination, every entry checked before
+//! any moves into place; [`extract_cpio`] cpio archives (RPM packages'
+//! payloads among them) and [`extract_xar`] XAR archives (macOS packages,
+//! their payloads expanded) the same way; [`extract_iso`] ISO 9660 images
+//! reading them twice: once to check, once to write; [`extract_udf`] UDF
+//! volumes and [`extract_7z`] 7z archives, checked first, as ZIP archives
+//! are.
 //!
 //! With the feature `rar`, off by default as it takes UnRAR's license,
 //! `extract_rar` extracts RAR archives the same way, reading them twice.
@@ -83,6 +85,7 @@ mod destination;
 mod error;
 mod iso;
 mod name;
+mod once;
 mod origin;
 mod plan;
 mod progress;

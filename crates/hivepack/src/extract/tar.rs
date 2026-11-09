@@ -17,7 +17,6 @@
 use std::collections::HashMap;
 use std::io::{self, Read};
 use std::path::Path;
-use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::tar::{
@@ -25,16 +24,16 @@ use crate::tar::{
     TYPE_X_GLOBAL_HEADER, Time,
 };
 
-use crate::extract::destination::{Counted, Destination, Staging, Target, TargetFile, Walk};
+use crate::extract::destination::{Counted, Destination, Target, TargetFile};
 use crate::extract::error::{Error, ErrorKind};
 use crate::extract::name::{Name, NameError};
-use crate::extract::plan::Settled;
+use crate::extract::once::{self, ReadOnce, read_ahead};
 use crate::extract::plan::{Item, Kind, Links, OnDamaged, OnRefused, Options, Owner, check, fold};
-use crate::extract::plan::{LinkTo, link_to, named, picked, settle, settle_links, skips_links};
+use crate::extract::plan::{LinkTo, link_to, named, settle, settle_links, skips_links};
 use crate::extract::progress::Run;
 use crate::extract::sink::{Sink, SinkState};
 use crate::extract::writers::{Writers, with_writers, writer_threads};
-use crate::extract::zip::{Summary, open_destination, set_dir_times};
+use crate::extract::zip::{Summary, set_dir_times};
 
 /// GNU's volume label, which names the archive, not a file.
 const TYPE_GNU_VOLUME: u8 = b'V';
@@ -434,11 +433,15 @@ pub fn extract_tar<R: Read + Send, F: FnMut() -> io::Result<R>>(
 
 /// Removes the private folders that extractions into `destination` left
 /// behind, their process having ended without removing them: those whose
-/// `owner` file can be locked ([`extract_tar`] reads a tar archive into one,
-/// and keeps its `owner` locked while it does). One being used is left.
-/// Nothing is done if `destination` is not a folder. [`extract_tar`] calls it
-/// on its destination first; a program that keeps where it extracted can call
-/// it when it starts, so that a folder left elsewhere goes too.
+/// `owner` file can be locked ([`extract_tar`], [`extract_cpio`] and
+/// [`extract_xar`] read an archive into one, and keep its `owner` locked while
+/// they do). One being used is left. Nothing is done if `destination` is not a
+/// folder. Each calls it on its destination first; a program that keeps where
+/// it extracted can call it when it starts, so that a folder left elsewhere
+/// goes too.
+///
+/// [`extract_cpio`]: crate::extract::extract_cpio
+/// [`extract_xar`]: crate::extract::extract_xar
 pub fn remove_stale(destination: &Path) -> io::Result<()> {
     if !std::fs::symlink_metadata(destination).is_ok_and(|m| m.is_dir()) {
         return Ok(());
@@ -551,391 +554,29 @@ fn extract_once<R: Read + Send, F: FnMut() -> io::Result<R>>(
     path: &Path,
     options: &Options,
 ) -> Result<Summary, Error> {
-    let run = Run::new(options);
-    let made = std::fs::symlink_metadata(path).is_err();
-    let destination = open_destination(path, options)?;
-    // What a process that died left here.
-    destination.remove_stale();
-    let staging = destination.staging(path).map_err(Error::global)?;
-    let result = once(&mut open, &destination, &staging, &run, options);
-    destination.remove_staging(staging);
-    // Its handle closed first: Windows removes no folder that is open.
-    drop(destination);
-    if result.is_err() && made {
-        let _ = std::fs::remove_dir(path);
-    }
-    result
-}
-
-/// What a thread reading ahead reads at a time, and how many of those may
-/// wait to be read.
-const AHEAD: usize = 1 << 20;
-const AHEAD_PIECES: usize = 4;
-
-/// `r` read ahead by a thread of its own while `use_it` reads what it read,
-/// [`AHEAD`] bytes at a time, at most [`AHEAD_PIECES`] of them waiting: a
-/// compressed tar's decompression, on that thread, goes on while the caller's
-/// reads the archive and hands its files to the threads that write them, as
-/// `zstd -dc | tar x` runs in two processes. What is read, and the errors,
-/// are `r`'s, in order. Once `use_it` is done, the thread stops at its next
-/// piece. Where no thread can be made, the reader's first read says why.
-fn read_ahead<R: Read + Send, T>(r: R, use_it: impl FnOnce(Ahead) -> T) -> T {
-    std::thread::scope(|scope| {
-        let (full, read) = mpsc::sync_channel::<io::Result<Vec<u8>>>(AHEAD_PIECES);
-        let (back, empty) = mpsc::sync_channel::<Vec<u8>>(AHEAD_PIECES + 2);
-        let started = std::thread::Builder::new()
-            .name("tar-read-ahead".into())
-            .spawn_scoped(scope, move || {
-                let mut r = r;
-                loop {
-                    let mut piece = empty.try_recv().unwrap_or_default();
-                    piece.resize(AHEAD, 0);
-                    let mut got = 0;
-                    let read = loop {
-                        match r.read(&mut piece[got..]) {
-                            Ok(0) => break Ok(()),
-                            Ok(n) => {
-                                got += n;
-                                if got == piece.len() {
-                                    break Ok(());
-                                }
-                            }
-                            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                            Err(e) => break Err(e),
-                        }
-                    };
-                    piece.truncate(got);
-                    let end = got == 0;
-                    let sent = match read {
-                        Ok(()) if end => full.send(Ok(piece)).map(|()| true),
-                        Ok(()) => full.send(Ok(piece)).map(|()| false),
-                        Err(e) => {
-                            if got > 0 {
-                                let _ = full.send(Ok(piece));
-                            }
-                            full.send(Err(e)).map(|()| true)
-                        }
-                    };
-                    // Ended, or no one is reading any more.
-                    if sent.unwrap_or(true) {
-                        break;
-                    }
-                }
-            });
-        use_it(Ahead {
-            read,
-            back,
-            piece: Vec::new(),
-            at: 0,
-            ended: false,
-            unstarted: started.err(),
-        })
+    once::into_folder(path, options, |destination, spool, run| {
+        let r = open().map_err(|e| Error::global(ErrorKind::Io(e)))?;
+        // Counted as each entry moves into place, the totals known.
+        run.quiet(true);
+        let read = match writer_threads(options, u64::MAX) {
+            Some(writing) => read_ahead(r, |r| {
+                with_writers(spool, run, options, &writing, |writers| {
+                    read_once(r, spool, run, options, Some(writers))
+                })
+            }),
+            None => read_once(r, spool, run, options, None),
+        };
+        run.quiet(false);
+        // The checks, as after a first reading.
+        let checked = once::check_read(read?, None, options)?;
+        once::move_into_place(checked, destination, spool, run, options)
     })
 }
 
-/// What [`read_ahead`]'s thread read, as a reader.
-struct Ahead {
-    read: mpsc::Receiver<io::Result<Vec<u8>>>,
-    back: mpsc::SyncSender<Vec<u8>>,
-    piece: Vec<u8>,
-    at: usize,
-    ended: bool,
-    /// Why the thread could not be made, if it could not.
-    unstarted: Option<io::Error>,
-}
-
-impl Read for Ahead {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if let Some(e) = self.unstarted.take() {
-            self.ended = true;
-            return Err(e);
-        }
-        while self.at == self.piece.len() {
-            if self.ended || buf.is_empty() {
-                return Ok(0);
-            }
-            match self.read.recv() {
-                Ok(Ok(piece)) => {
-                    if piece.is_empty() {
-                        self.ended = true;
-                    }
-                    let done = std::mem::replace(&mut self.piece, piece);
-                    let _ = self.back.try_send(done);
-                    self.at = 0;
-                }
-                Ok(Err(e)) => {
-                    self.ended = true;
-                    return Err(e);
-                }
-                // The thread is gone without a word: not one that ended.
-                Err(_) => {
-                    self.ended = true;
-                    return Err(io::Error::other("the thread reading ahead is gone"));
-                }
-            }
-        }
-        let n = buf.len().min(self.piece.len() - self.at);
-        buf[..n].copy_from_slice(&self.piece[self.at..self.at + n]);
-        self.at += n;
-        Ok(n)
-    }
-}
-
-/// The directory of a private folder that files' data is written to.
-const SPOOL: &str = "data";
-
-/// What the one reading wrote of a file into the private folder: its data
-/// whole, or damaged, with how much of it was kept, to be asked about with
-/// [`Options::on_damaged`](crate::extract::Options::on_damaged) when its turn
-/// comes to be moved into place.
-enum Spooled {
-    Whole(u64),
-    Damaged(ErrorKind, u64),
-}
-
-/// What the one reading found: the entries and items, as the first reading
-/// finds them; how the stream was cut short, if it was and that is gone on
-/// from; and what was written of each file, by index.
-struct ReadOnce {
-    entries: Vec<Entry<()>>,
-    items: Vec<Item>,
-    cut: Option<ErrorKind>,
-    spooled: HashMap<u64, Spooled>,
-}
-
-/// `item`, as its data is written into the private folder: named by its
-/// index, in [`SPOOL`]; its name kept as text, for what an error says.
-fn spool_item(item: &Item) -> Item {
-    Item {
-        index: item.index,
-        raw_name: item.raw_name.clone(),
-        text: item.text.clone(),
-        name: Ok(Name {
-            components: vec![item.index.to_string()],
-            is_dir: false,
-        }),
-        kind: Kind::File,
-        size: item.size,
-        compressed: item.compressed,
-        data: None,
-        mode: item.mode,
-        mtime: item.mtime,
-        owner: item.owner.clone(),
-        xattrs: item.xattrs.clone(),
-    }
-}
-
-/// The archive read once, into `staging`, then checked and moved into
-/// `destination`.
-fn once<R: Read + Send, F: FnMut() -> io::Result<R>>(
-    open: &mut F,
-    destination: &Destination<'_>,
-    staging: &Staging<'_>,
-    run: &Run<'_>,
-    options: &Options,
-) -> Result<Summary, Error> {
-    let r = open().map_err(|e| Error::global(ErrorKind::Io(e)))?;
-    // The files' data, each named by its index, at the root of a destination
-    // of its own, the private folder's `data`: each is made without opening
-    // a directory for it.
-    let spool = &staging
-        .data
-        .within(&[SPOOL.to_owned()])
-        .map_err(Error::global)?;
-    // Counted as each entry moves into place, the totals known.
-    run.quiet(true);
-    let read = match writer_threads(options, u64::MAX) {
-        Some(writing) => read_ahead(r, |r| {
-            with_writers(spool, run, options, &writing, |writers| {
-                read_once(r, spool, run, options, Some(writers))
-            })
-        }),
-        None => read_once(r, spool, run, options, None),
-    };
-    run.quiet(false);
-    let read = read?;
-    let ReadOnce {
-        entries,
-        mut items,
-        cut,
-        mut spooled,
-    } = read;
-
-    // The checks, as after a first reading.
-    let settled: Settled = settle(&mut items, options)?;
-    let (kept, mut skipped) = check(&items, &settled, options)?;
-    let plans = plan_links(&entries, &items, &kept, options, &mut skipped)?;
-    let kept_indexes: std::collections::HashSet<u64> = kept
-        .iter()
-        .filter(|item| {
-            !matches!(item.kind, Kind::Link | Kind::HardLink) || plans.contains_key(&item.index)
-        })
-        .map(|item| item.index)
-        .collect();
-    let created_later = |item: &Item| matches!(plans.get(&item.index), Some(LinkPlan::Symlink(..)));
-    run.start(
-        kept_indexes.len() as u64,
-        bytes_to_write(&entries, &items, &kept_indexes, &plans, options),
-    );
-    let placed = |entry: &Entry<()>| {
-        entry
-            .item
-            .map(|at| &items[at])
-            .filter(|item| kept_indexes.contains(&item.index))
-    };
-
-    // What is in the destination already, before anything moves.
-    let mut walk = Walk::default();
-    for item in entries.iter().filter_map(placed) {
-        let Ok(name) = &item.name else {
-            continue;
-        };
-        let file = match (item.kind, plans.get(&item.index)) {
-            (Kind::File, _) | (_, Some(LinkPlan::SymlinkAsFile)) => true,
-            (Kind::HardLink, _) => destination.copies_hard_links(options),
-            _ => false,
-        };
-        destination
-            .in_the_way(
-                &name.components,
-                item.kind == Kind::Dir,
-                file && options.overwrite,
-                &mut walk,
-            )
-            .map_err(|kind| item.error(kind))?;
-    }
-    // Its handles closed before anything moves, as Windows wants.
-    drop(walk);
-
-    // Moving into place, in the archive's order.
-    let data = spool.open_dir(&[]).map_err(Error::global)?;
-    let mut walk = Walk::default();
-    let mut summary = Summary {
-        skipped,
-        renamed: settled.renamed,
-        ..Summary::default()
-    };
-    for entry in &entries {
-        let Some(item) = placed(entry) else {
-            continue;
-        };
-        if created_later(item) {
-            continue;
-        }
-        let Ok(name) = &item.name else {
-            continue;
-        };
-        let error = |kind| item.error(kind);
-        let components = &name.components;
-        run.check().map_err(error)?;
-        if item.kind == Kind::Dir {
-            Target::directory(destination, item, components).map_err(error)?;
-            summary.directories += 1;
-            run.entry_done();
-            continue;
-        }
-        let remaining = options.limits.max_total_size.saturating_sub(summary.bytes);
-        let written = match plans.get(&item.index) {
-            Some(LinkPlan::Hard(target)) if !destination.copies_hard_links(options) => {
-                destination
-                    .hard_link(item, components, target)
-                    .map_err(error)?;
-                summary.files += 1;
-                run.entry_done();
-                continue;
-            }
-            Some(LinkPlan::Hard(target)) => {
-                copy_of(destination, target, item, remaining, run, options)?
-            }
-            Some(LinkPlan::SymlinkAsFile) => write_from(
-                &mut &entry.target[..],
-                item,
-                entry.target.len() as u64,
-                destination,
-                remaining,
-                false,
-                run,
-                options,
-            )?,
-            _ => {
-                let spooled_name = item.index.to_string();
-                match spooled.remove(&item.index) {
-                    Some(Spooled::Whole(bytes)) => {
-                        destination
-                            .place(
-                                &data,
-                                &spooled_name,
-                                components,
-                                options.overwrite,
-                                &mut walk,
-                            )
-                            .map_err(error)?;
-                        summary.files += 1;
-                        summary.bytes += bytes;
-                        run.wrote(bytes);
-                    }
-                    Some(Spooled::Damaged(kind, kept)) => match run.decide(item, kind)? {
-                        (OnDamaged::Keep, damage) => {
-                            destination.damaged(&damage);
-                            destination
-                                .place(
-                                    &data,
-                                    &spooled_name,
-                                    components,
-                                    options.overwrite,
-                                    &mut walk,
-                                )
-                                .map_err(error)?;
-                            run.damaged(damage, Some(kept));
-                            summary.files += 1;
-                            summary.bytes += kept;
-                            run.wrote(kept);
-                        }
-                        (_, damage) => {
-                            destination.damaged(&damage);
-                            run.damaged(damage, None);
-                        }
-                    },
-                    // Not read: the checks keep no file they did not let be read.
-                    None => {
-                        return Err(error(ErrorKind::Io(io::Error::other(
-                            "a file kept that was not read",
-                        ))));
-                    }
-                }
-                run.entry_done();
-                continue;
-            }
-        };
-        if let Some(written) = written {
-            summary.files += 1;
-            summary.bytes += written;
-        }
-        run.entry_done();
-    }
-    if let Some(kind) = cut {
-        cut_short(&entries, kind, run)?;
-    }
-
-    for &item in kept.iter().filter(|item| created_later(item)) {
-        let error = |kind| item.error(kind);
-        let (Ok(name), Some(LinkPlan::Symlink(target, to_dir))) =
-            (&item.name, plans.get(&item.index))
-        else {
-            continue;
-        };
-        run.check().map_err(error)?;
-        destination
-            .symlink(item, &name.components, target, *to_dir)
-            .map_err(error)?;
-        summary.links += 1;
-        run.entry_done();
-    }
-
-    set_dir_times(destination, &kept, run)?;
-    summary.damaged = run.take_damaged();
-    summary.owners_left = destination.owners_left();
-    Ok(summary)
+/// A tar entry's data that failed to read: the tar reader's error, out of the
+/// `io::Error` that holds it.
+fn tar_error(e: io::Error) -> ErrorKind {
+    ErrorKind::Tar(crate::tar::Error::from(e))
 }
 
 /// The one reading, of `r`: every header kept, as the first reading keeps
@@ -953,15 +594,12 @@ fn read_once<'a, R: Read>(
 ) -> Result<ReadOnce, Error> {
     let limits = &options.limits;
     let mut tr = Reader::new(r);
-    let mut entries = Vec::new();
-    let mut items = Vec::new();
-    let mut spooled = HashMap::new();
+    let mut read = ReadOnce::default();
     // What the files written so far came to: the limit on them all counts
     // every file written into the private folder.
     let mut total: u64 = 0;
-    let mut cut = None;
     loop {
-        let index = entries.len() as u64;
+        let index = read.entries.len() as u64;
         run.check().map_err(Error::global)?;
         let h = match tr.next() {
             Ok(Some(h)) => h,
@@ -969,7 +607,7 @@ fn read_once<'a, R: Read>(
             Err(e) => {
                 let kind = ErrorKind::Tar(e);
                 if run.may_be_cut(&kind) {
-                    cut = Some(kind);
+                    read.cut = Some(kind);
                     break;
                 }
                 return Err(Error {
@@ -985,7 +623,7 @@ fn read_once<'a, R: Read>(
             return Err(Error::global(ErrorKind::TooManyEntries));
         }
         let Some(item) = item_of(&h, index, options) else {
-            entries.push(Entry {
+            read.entries.push(Entry {
                 seen: (),
                 item: None,
                 target: Vec::new(),
@@ -993,89 +631,37 @@ fn read_once<'a, R: Read>(
             continue;
         };
         let target = target_of(&h, item.kind);
-        // Its data, if the checks may keep it: a file picked, whose name is
-        // one or may be renamed to one, within the limit on one entry.
-        let may_keep = item.kind == Kind::File
-            && picked(&item, options)
-            && item
-                .name
-                .as_ref()
-                .map_or_else(|e| e.is_unnamable(), |_| true)
-            && item.size <= limits.max_entry_size;
-        if may_keep {
+        if once::may_keep(&item, item.size, options) {
             let remaining = limits.max_total_size.saturating_sub(total);
+            let name = index.to_string();
             let holes = tr.is_sparse();
-            let done = match writers.filter(|_| !holes) {
-                Some(writers) => {
-                    match writers.file(&mut tr, spool_item(&item), item.size, remaining, true)? {
-                        None => Spooled::Whole(item.size),
-                        Some(mut replay) => {
-                            spool_from(&mut replay, &item, spool, remaining, false, run, options)?
-                        }
-                    }
-                }
-                None => spool_from(&mut tr, &item, spool, remaining, holes, run, options)?,
-            };
-            total = total.saturating_add(match &done {
-                Spooled::Whole(bytes) | Spooled::Damaged(_, bytes) => *bytes,
-            });
-            spooled.insert(index, done);
+            let done = once::spool_data(
+                &mut tr,
+                &item,
+                item.size,
+                &name,
+                spool,
+                remaining,
+                (holes, true),
+                tar_error,
+                run,
+                options,
+                writers,
+            )?;
+            total = total.saturating_add(done.bytes());
+            read.spooled.insert(index, (name, done));
         }
-        items.push(item);
-        entries.push(Entry {
+        read.items.push(item);
+        read.entries.push(Entry {
             seen: (),
-            item: Some(items.len() - 1),
+            item: Some(read.items.len() - 1),
             target,
         });
     }
-    if cut.is_none() {
+    if read.cut.is_none() {
         read_rest(tr.into_inner(), run, options)?;
     }
-    Ok(ReadOnce {
-        entries,
-        items,
-        cut,
-        spooled,
-    })
-}
-
-/// Writes `item`'s data, read from `r`, into `spool` under its index, with its
-/// time, permissions and what else a file is given: whole, or damaged where
-/// [`Options::on_damaged`](crate::extract::Options::on_damaged) may go on from
-/// it, what was read of it kept, to be asked about later.
-fn spool_from(
-    r: &mut impl Read,
-    item: &Item,
-    spool: &Destination<'_>,
-    remaining: u64,
-    holes: bool,
-    run: &Run<'_>,
-    options: &Options,
-) -> Result<Spooled, Error> {
-    let spooled = spool_item(item);
-    let components = &[item.index.to_string()];
-    let error = |kind| item.error(kind);
-    let file = spool
-        .create_file(&spooled, components, Some(item.size), options)
-        .map_err(error)?;
-    let mut file = Counted { file, len: 0 };
-    let done = match write_into(r, item.size, &mut file, remaining, holes, run, options) {
-        Ok(written) => Spooled::Whole(written),
-        Err(kind) if kind.is_damage() && options.on_damaged.is_some() => {
-            Spooled::Damaged(kind, file.len)
-        }
-        Err(kind) => {
-            drop(file);
-            spool.remove_file(components);
-            return Err(error(kind));
-        }
-    };
-    if let Err(kind) = spool.finish_file(file.file, &spooled, options) {
-        spool.remove_file(components);
-        return Err(error(kind));
-    }
-    run.entry_done();
-    Ok(done)
+    Ok(read)
 }
 
 /// What the first reading found and the checks kept, for the second reading.
@@ -1341,16 +927,21 @@ pub(crate) fn write_from<T: Target>(
     options: &Options,
 ) -> Result<Option<u64>, Error> {
     write_with(item, Some(size), destination, run, options, |file| {
-        write_into(r, size, file, remaining, holes, run, options)
+        write_into(r, size, file, remaining, holes, tar_error, run, options)
     })
 }
 
-fn write_into(
+/// Writes the `size` bytes of `r` into `file`, at most `remaining` in all: the
+/// bytes written. With `holes`, what reads as zeros is gone past where `file`
+/// has holes. A read that fails is the archive's error, as `data_error` says.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_into(
     r: &mut impl Read,
     size: u64,
     file: &mut impl TargetFile,
     remaining: u64,
     holes: bool,
+    data_error: once::DataError,
     run: &Run<'_>,
     options: &Options,
 ) -> Result<u64, ErrorKind> {
@@ -1366,7 +957,7 @@ fn write_into(
             Ok(0) => break,
             Ok(n) => n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(ErrorKind::Tar(crate::tar::Error::from(e))),
+            Err(e) => return Err(data_error(e)),
         };
         written += n as u64;
         if written > limits.max_entry_size {
@@ -1437,62 +1028,4 @@ fn owner_of(h: &crate::tar::Header) -> Option<Owner> {
         user: h.uname.clone(),
         group: h.gname.clone(),
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// What is read ahead is what the reader gives, at lengths around a
-    /// piece's; an error comes after the bytes before it, in order.
-    #[test]
-    fn read_ahead_is_the_reader() {
-        for len in [
-            0,
-            1,
-            4095,
-            AHEAD - 1,
-            AHEAD,
-            AHEAD + 1,
-            3 * AHEAD + 7,
-            9 * AHEAD,
-        ] {
-            let data: Vec<u8> = (0..len).map(|i| (i * 7 + i / 977) as u8).collect();
-            let got = read_ahead(&data[..], |mut r| {
-                let mut out = Vec::new();
-                r.read_to_end(&mut out).map(|_| out)
-            });
-            assert!(got.is_ok_and(|got| got == data), "{len}");
-        }
-        /// Some bytes, then an error.
-        struct Failing(usize);
-        impl Read for Failing {
-            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-                if self.0 == 0 {
-                    return Err(io::Error::other("damaged"));
-                }
-                let n = buf.len().min(self.0).min(1000);
-                buf[..n].fill(7);
-                self.0 -= n;
-                Ok(n)
-            }
-        }
-        let (read, error) = read_ahead(Failing(AHEAD + 5000), |mut r| {
-            let mut out = Vec::new();
-            let error = r.read_to_end(&mut out).err().map(|e| e.to_string());
-            (out.len(), error)
-        });
-        assert_eq!((read, error.as_deref()), (AHEAD + 5000, Some("damaged")));
-    }
-
-    /// A reader that stops early lets the thread go: the call returns.
-    #[test]
-    fn read_ahead_stops_with_its_reader() {
-        let data = vec![1u8; 20 * AHEAD];
-        let first = read_ahead(&data[..], |mut r| {
-            let mut b = [0u8; 10];
-            r.read_exact(&mut b).map(|()| b[0])
-        });
-        assert!(first.is_ok_and(|b| b == 1));
-    }
 }
