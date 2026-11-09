@@ -39,6 +39,34 @@ pub(crate) struct Destination<'a> {
     prefix: Vec<String>,
     /// Shared with the destinations within, and the threads writing.
     owning: Arc<Owning>,
+    /// Each thread's [`Walk`], for the files it makes: the directories on the
+    /// way to its last file's, closed with the destination.
+    walks: Walks,
+}
+
+/// The [`Walk`] of each thread that makes files in a destination, by thread:
+/// taken out while it is used, so that the lock is held only to take it and
+/// put it back.
+#[derive(Default)]
+struct Walks(std::sync::Mutex<std::collections::HashMap<std::thread::ThreadId, Walk>>);
+
+impl Walks {
+    fn take(&self) -> Walk {
+        let id = std::thread::current().id();
+        self.lock().remove(&id).unwrap_or_default()
+    }
+
+    fn put(&self, walk: Walk) {
+        self.lock().insert(std::thread::current().id(), walk);
+    }
+
+    fn lock(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<std::thread::ThreadId, Walk>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 /// What the private folders of archives read once are named, before a number
@@ -84,6 +112,7 @@ impl<'a> Destination<'a> {
             written,
             prefix: Vec::new(),
             owning: Arc::default(),
+            walks: Walks::default(),
         })
     }
 
@@ -150,6 +179,7 @@ impl<'a> Destination<'a> {
                         written: None,
                         prefix: Vec::new(),
                         owning: Arc::clone(&self.owning),
+                        walks: Walks::default(),
                     },
                     name: name.clone(),
                     _owner: owner,
@@ -299,6 +329,7 @@ impl<'a> Destination<'a> {
             written: self.written,
             prefix: self.prefix.iter().chain(components).cloned().collect(),
             owning: Arc::clone(&self.owning),
+            walks: Walks::default(),
         })
     }
 
@@ -808,8 +839,14 @@ impl Target for Destination<'_> {
             // own to open.
             return Ok(Destination::create_file(&self.root, last, options.overwrite)?.into_std());
         }
-        let dir = Destination::directory(self, parents)?;
-        Ok(Destination::create_file(&dir, last, options.overwrite)?.into_std())
+        // Through this thread's walk: the files one thread makes one after
+        // another are mostly in the same directory.
+        let mut walk = self.walks.take();
+        let made = self
+            .walk_to(parents, &mut walk)
+            .and_then(|dir| Destination::create_file(dir, last, options.overwrite));
+        self.walks.put(walk);
+        Ok(made?.into_std())
     }
 
     fn finish_file(
