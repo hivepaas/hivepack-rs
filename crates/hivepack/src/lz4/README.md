@@ -54,21 +54,21 @@ Against liblz4 1.10.0, as the crate comes by default, each row the mean and the 
 
 | Port / reference | Linux x86-64 | Windows x86-64 | macOS arm64 |
 |---|---|---|---|
-| Decoding blocks | 0.77× (0.71–0.86×) | 0.75× (0.67–0.84×) | 0.74× (0.64–0.89×) |
-| Reading frames | 0.78× (0.74–0.86×) | 0.77× (0.58–0.94×) | 0.98× (0.90–1.19×) |
-| Compressing blocks, level 1 | 0.94× (0.90–0.97×) | 0.95× (0.90–1.05×) | 0.95× (0.90–1.02×) |
-| Compressing blocks, level 9 | 0.88× (0.78–0.94×) | 0.91× (0.77–0.96×) | 0.87× (0.75–0.97×) |
+| Decoding blocks | 0.77× (0.71–0.87×) | 0.75× (0.67–0.82×) | 0.74× (0.63–1.02×) |
+| Reading frames | 0.78× (0.74–0.85×) | 0.76× (0.59–0.92×) | 0.98× (0.88–1.16×) |
+| Compressing blocks, level 1 | 0.92× (0.85–0.94×) | 0.96× (0.91–1.04×) | 0.97× (0.86–1.05×) |
+| Compressing blocks, level 9 | 0.88× (0.78–0.94×) | 0.91× (0.77–0.98×) | 0.88× (0.73–1.04×) |
 
 With the `unsafe-fast` feature, off by default (see [docs/unsafe.md](../../../../docs/unsafe.md)):
 
 | Port / reference | Linux x86-64 | Windows x86-64 | macOS arm64 |
 |---|---|---|---|
-| Decoding blocks | 0.90× (0.87–0.96×) | 0.90× (0.78–0.95×) | 0.95× (0.87–1.01×) |
-| Reading frames | 0.85× (0.78–0.89×) | 0.85× (0.62–0.94×) | 1.13× (1.05–1.23×) |
-| Compressing blocks, level 1 | 0.93× (0.86–0.97×) | 0.95× (0.90–1.06×) | 0.97× (0.86–1.01×) |
-| Compressing blocks, level 9 | 0.89× (0.81–0.94×) | 0.95× (0.78–1.03×) | 0.86× (0.76–0.89×) |
+| Decoding blocks | 0.91× (0.86–0.95×) | 0.91× (0.81–0.96×) | 0.91× (0.70–1.06×) |
+| Reading frames | 0.88× (0.82–0.93×) | 0.82× (0.58–0.92×) | 1.12× (0.97–1.31×) |
+| Compressing blocks, level 1 | 0.92× (0.86–0.94×) | 0.96× (0.89–1.07×) | 0.97× (0.88–1.05×) |
+| Compressing blocks, level 9 | 0.88× (0.78–0.96×) | 0.88× (0.77–0.94×) | 0.88× (0.77–0.96×) |
 
-**Measured on** `.github/workflows/bench.yml`, on November 1, 2026, with rustc 1.99.1: Linux x86-64 on AMD EPYC 7763 (4 threads); Windows x86-64 on AMD64 Family 25 Model 1 Stepping 1 (4 threads); macOS arm64 on Apple M1 (Virtual) (3 threads). Each job gets what the runner has that day, so the two tables, and the formats, are not on the same processor, and they are shared machines: the ratios hold better than the speeds.
+**Measured on** `.github/workflows/bench.yml`, on November 10, 2026, with rustc 1.99.1. Without the feature: Linux x86-64 on AMD EPYC 7763 (4 threads); Windows x86-64 on AMD64 Family 25 Model 1 (4 threads); macOS arm64 on Apple M1 (Virtual) (3 threads). With it: Linux x86-64 on AMD EPYC 7763 (4 threads); Windows x86-64 on AMD64 Family 25 Model 17 (4 threads); macOS arm64 on Apple M1 (Virtual) (3 threads). Each job gets what the runner has that day, so the two tables, and the formats, are not on the same processor, and they are shared machines: the ratios hold better than the speeds.
 
 ## License
 

@@ -50,10 +50,10 @@ Against libbzip2 1.0.8, as the crate comes by default, each row the mean and the
 
 | Port / reference | Linux x86-64 | Windows x86-64 | macOS arm64 |
 |---|---|---|---|
-| Decompression, block size 9 | 0.96× (0.90–1.00×) | 0.94× (0.91–0.99×) | 0.93× (0.75–1.09×) |
-| Compression, block sizes 1 and 9 | 1.05× (0.99–1.17×) | 1.03× (0.98–1.08×) | 1.04× (0.88–1.22×) |
+| Decompression, block size 9 | 0.91× (0.88–0.95×) | 0.95× (0.92–0.98×) | 0.86× (0.83–0.90×) |
+| Compression, block sizes 1 and 9 | 1.08× (1.00–1.22×) | 1.03× (0.97–1.08×) | 0.99× (0.85–1.10×) |
 
-**Measured on** `.github/workflows/bench.yml`, on November 1, 2026, with rustc 1.99.1: Linux x86-64 on AMD EPYC 9V45 (4 threads); Windows x86-64 on AMD64 Family 25 Model 17 Stepping 1 (4 threads); macOS arm64 on Apple M1 (Virtual) (3 threads). Each job gets what the runner has that day, so the two tables, and the formats, are not on the same processor, and they are shared machines: the ratios hold better than the speeds.
+**Measured on** `.github/workflows/bench.yml`, on November 10, 2026, with rustc 1.99.1: Linux x86-64 on INTEL XEON PLATINUM 8573C (4 threads); Windows x86-64 on AMD64 Family 25 Model 1 (4 threads); macOS arm64 on Apple M1 (Virtual) (3 threads). Each job gets what the runner has that day, so the two tables, and the formats, are not on the same processor, and they are shared machines: the ratios hold better than the speeds.
 
 ## License
 
