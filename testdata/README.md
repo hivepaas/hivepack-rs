@@ -63,6 +63,8 @@ Each set has a `kind`:
 | `xz-5.8.4-source` | the XZ Utils 5.8.4 release, to build the next set from, with its test files (`tests/files`); its tarball is signed by XZ Utils' maintainer, Lasse Collin | 0BSD | fetched, `generated` |
 | `xz-oracle` | `tools/xz-oracle`, built with the liblzma sources of XZ Utils 5.8.4: liblzma's decoders and encoders, for comparing hivepack-xz with them | MIT and 0BSD | generated |
 | `nettle-3.10.2-source` | the nettle 3.10.2 release, to build the next set from; its tarball is signed by nettle's author, Niels Möller | LGPL-3.0-or-later or GPL-2.0-or-later | fetched, `generated` |
+| `libdeflate-1.26-source` | the libdeflate 1.26 release, to build the next set from | MIT | fetched, `generated` |
+| `libdeflate-oracle` | `tools/libdeflate-oracle`, built with the libdeflate 1.26 library sources: libdeflate's compressor, for comparing hivepack-deflate's port of it with it, and timing it for `tools/deflate-bench --libdeflate` | MIT | generated |
 | `lz4-1.10.0-source` | the lz4 1.10.0 release, to build the next set from; its SHA-256 is the one the release gives beside it | BSD-2-Clause (`lib/`), GPL-2.0-or-later (the rest, not built) | fetched, `generated` |
 | `lz4-oracle` | `tools/lz4-oracle`, built with the lz4 1.10.0 library sources: liblz4's block, stream, high-compression, frame and XXH32 functions, for comparing hivepack-lz4 with them | MIT and BSD-2-Clause | generated |
 | `7zip-26.05-source` | the 7-Zip 26.05 release, to build the next two sets from; pinned by its SHA-256 | public domain (the LZMA SDK's `C/` files), LGPL-2.1-or-later and BSD-3-Clause (7-Zip) | fetched, `generated` |

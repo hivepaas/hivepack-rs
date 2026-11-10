@@ -271,6 +271,11 @@ path = "tests/deflate_infcover.rs"
 required-features = ["deflate"]
 
 [[test]]
+name = "deflate_libdeflate"
+path = "tests/deflate_libdeflate.rs"
+required-features = ["deflate"]
+
+[[test]]
 name = "deflate_oracle"
 path = "tests/deflate_oracle.rs"
 required-features = ["deflate"]

@@ -8,7 +8,7 @@ The crate's own code is under the MIT license ([LICENSE](LICENSE)). Each port ke
 | `bzip2` | bzip2-1.0.6 | [src/bzip2/LICENSE](src/bzip2/LICENSE) |
 | `cpio` | BSD-2-Clause | [src/cpio/LICENSE](src/cpio/LICENSE) |
 | `crypto` | MIT | [src/crypto/LICENSE](src/crypto/LICENSE) |
-| `deflate` | Zlib | [src/deflate/LICENSE](src/deflate/LICENSE) |
+| `deflate` | Zlib AND MIT (libdeflate's compressor, `deflate::Compressor`) | [src/deflate/LICENSE](src/deflate/LICENSE), [src/deflate/libdeflate/LICENSE](src/deflate/libdeflate/LICENSE) |
 | `extract` | MIT AND Unicode-3.0 | [LICENSE](LICENSE), [src/extract/LICENSE-UNICODE](src/extract/LICENSE-UNICODE) |
 | `iso` | BSD-2-Clause | [src/iso/LICENSE](src/iso/LICENSE) |
 | `lz4` | BSD-2-Clause | [src/lz4/LICENSE](src/lz4/LICENSE) |

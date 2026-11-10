@@ -319,6 +319,20 @@
       "kind": "tool"
     },
     {
+      "name": "libdeflate-1.26-source",
+      "fetch": { "group": "generated", "files": [{ "url": "https://github.com/ebiggers/libdeflate/releases/download/v1.26/libdeflate-1.26.tar.gz", "sha256": "125856d4656e0feab660f94842f835923410c9281fedbcee64598c918da42b5a", "unpack": "tar.gz" }] },
+      "source": "https://github.com/ebiggers/libdeflate/releases/tag/v1.26 (commit 75390569905da2f4aa03c5bc03e03c9d18b9b2d0)",
+      "license": "MIT",
+      "kind": "source"
+    },
+    {
+      "name": "libdeflate-oracle",
+      "generate": { "group": "generated", "from": "libdeflate-1.26-source", "tool": "oracle", "sources": ["tools/libdeflate-oracle/oracle.c"] },
+      "source": "tools/libdeflate-oracle/oracle.c, built with the libdeflate 1.26 library sources",
+      "license": "MIT (the program and libdeflate)",
+      "kind": "tool"
+    },
+    {
       "name": "7zip-26.05-source",
       "fetch": { "group": "generated", "files": [{ "url": "https://github.com/ip7z/7zip/releases/download/26.05/7z2605-src.tar.xz", "sha256": "0b6080b8c3e7a579161d2d495224c0e51c467576cb4c7048b0ab485ef44cc22e", "unpack": "tar.xz" }] },
       "source": "https://github.com/ip7z/7zip/releases/tag/26.05, 7-Zip's source release (its releases are not signed)",

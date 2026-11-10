@@ -9,8 +9,11 @@
 //! `contrib/infback9` does, and [`Inflate9`] decodes it as `infback9` does
 //! but a piece at a time, as [`Inflate`] decodes deflate. [`DeflateMt`],
 //! which is not part of the port, compresses in threads as pigz does, into
-//! one stream of [`Deflate`]'s blocks. The rules the
-//! port follows, and how it is checked, are in the repository:
+//! one stream of [`Deflate`]'s blocks. [`Compressor`] is a second port,
+//! beside zlib's, of libdeflate 1.26's compressor: a whole buffer at once,
+//! at levels 0 to 12, with libdeflate's output, byte for byte; its levels
+//! 10 to 12 make smaller streams than zlib's level 9. The rules the ports
+//! follow, and how they are checked, are in the repository:
 //! `docs/deflate.md` and `docs/safety.md`.
 //!
 //! ```
@@ -57,6 +60,7 @@ mod inflate;
 mod inflate9;
 mod inftree9;
 mod inftrees;
+mod libdeflate;
 mod mt;
 mod trees;
 mod zutil;
@@ -79,6 +83,7 @@ pub use deflate::{
 pub use infback9::{Back9, BackIn, BackOut, InflateBack9};
 pub use inflate::{GzHeader, InBuffer, Inflate, OutBuffer};
 pub use inflate9::Inflate9;
+pub use libdeflate::{Compressor, LIBDEFLATE_VERSION};
 pub use mt::{BLOCK_SIZE, DeflateMt, MtOptions};
 pub use zutil::{Error, ErrorCode, Flush, MAX_WBITS, Result, Status};
 

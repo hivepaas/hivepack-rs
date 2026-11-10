@@ -359,6 +359,7 @@ jobs:
       - run: cargo fuzz run --target x86_64-unknown-linux-gnu divsufsort -- -max_total_time=${FUZZ_SECONDS:-60} -rss_limit_mb=4096
       - run: cargo fuzz run --target x86_64-unknown-linux-gnu inflate -- -max_total_time=${FUZZ_SECONDS:-120}
       - run: cargo fuzz run --target x86_64-unknown-linux-gnu deflate -- -max_total_time=${FUZZ_SECONDS:-120}
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu deflate_libdeflate -- -max_total_time=${FUZZ_SECONDS:-90}
       - run: cargo fuzz run --target x86_64-unknown-linux-gnu inflate9 -- -max_total_time=${FUZZ_SECONDS:-90}
       - name: Seed the ZIP corpus with the recorded archives
         run: |

@@ -130,6 +130,62 @@ On an AMD Ryzen 9 9950X (16 cores, 32 threads), November 2026, 546 MB of mixed f
 
 `DeflateMt`'s streams are 233,725,171, 215,781,426 and 214,892,302 bytes, whatever the threads, and pigz's the same but for its header's file name.
 
+## libdeflate's compressor, beside the port
+
+zlib's level 9 parses lazily, looking one position ahead. 7-Zip's Deflate and libdeflate's levels 10 to 12 look for the cheapest way through each block, and make streams a few per cent smaller, which a ZIP writer wants. `Compressor` (`deflate/libdeflate/`) is a port of [libdeflate](https://github.com/ebiggers/libdeflate)'s compressor, a second port beside zlib's, with the same rules. It shares no code with zlib's; its tests inflate what it writes with the zlib port's `Inflate`.
+
+### The version
+
+The port follows libdeflate **1.26** (tag `v1.26`, commit `75390569905da2f4aa03c5bc03e03c9d18b9b2d0`): `libdeflate-1.26.tar.gz` from the release's page, SHA-256 `125856d4656e0feab660f94842f835923410c9281fedbcee64598c918da42b5a`. `hivepack::deflate::LIBDEFLATE_VERSION` names it.
+
+### What is ported
+
+Each file of libdeflate's `lib/` that the compressor needs is a module of the same name in `deflate/libdeflate/`: `deflate_compress.c` (with `deflate_compress.h`) becomes `deflate_compress.rs`, `deflate_constants.h` `deflate_constants.rs`, and `matchfinder_common.h`, `hc_matchfinder.h`, `ht_matchfinder.h` and `bt_matchfinder.h` the modules of their names. What they take from `common_defs.h` and `lib_common.h`, `bsr32` and the unaligned loads, is in `common_defs.rs`. Functions keep their C names, which are already in snake case, and each one's doc comment names its C original. The tables are copied as they are, and so are the levels' parameters, the block splitting and the cost model; unit tests check the slot tables against their bases, and the static codes against the format's.
+
+The API is libdeflate's, in Rust's shape:
+
+- `Compressor::new(level)` is `libdeflate_alloc_compressor`: levels 0 to 12, and -1 for the default, 6, as libdeflate 1.26 takes it; `None` for any other, where libdeflate returns `NULL`.
+- `Compressor::deflate_compress(input, output)` is `libdeflate_deflate_compress`: the whole input at once into the output, raw deflate, and the size written, or 0 if it does not fit. Past the size returned, the output may have been written to, as libdeflate writes whole words.
+- `Compressor::deflate_compress_bound(len)` is `libdeflate_deflate_compress_bound`, and `Compressor::compression_level()` `libdeflate_get_compression_level`.
+
+A compressor keeps its tables from one call to the next, as libdeflate's does, and its output does not depend on what it compressed before. It takes what libdeflate's takes: about 0.2 MB at level 1, 0.7 MB at levels 2 to 9, and 9 MB at levels 10 to 12.
+
+### What is not
+
+- The decompressor, the zlib and gzip wrappers (`libdeflate_zlib_compress`, `libdeflate_gzip_compress` and their decompressors), and the checksums: the zlib port has all of them.
+- The memory allocator of `libdeflate_alloc_compressor_ex`'s options and `libdeflate_set_memory_allocator`, and `libdeflate_free_compressor`, which dropping does.
+- The processor-specific `matchfinder_init` and `matchfinder_rebase` (SSE2, AVX2, NEON and RISC-V vectors): plain loops, which the compiler vectorizes, give the same tables. And `prefetchw`, which only hints the processor: safe Rust cannot prefetch.
+- The build options, which keep libdeflate's defaults: `SUPPORT_NEAR_OPTIMAL_PARSING` 1 and the block, sequence and cache lengths. The port writes bits as libdeflate does on a 64-bit machine; on a 32-bit one libdeflate flushes its bit buffer more often, and writes the same bits.
+- `programs/`: `libdeflate-gzip` and the benchmark.
+
+Where the Rust code works differently, a comment says so, starting `Differs from libdeflate:`. The input and output are slices, and positions in them indices where libdeflate has pointers; the parsers' union of data is an enum; and the loads read little-endian on any machine, where libdeflate reads in the machine's order where it only compares the bytes, so the output is the same on both.
+
+### How it is shown
+
+The reference is libdeflate 1.26 itself: `tools/libdeflate-oracle`, a small C program built from the release by `scripts/testdata.py` with the flags of libdeflate's release build (`-O2 -DNDEBUG`), as `tools/zlib-oracle` is for zlib. It keeps a compressor for each level, as a program does, and answers each request with what each call returned and a hash of what it wrote.
+
+- **`tests/deflate_libdeflate.rs`** compresses generated inputs with the port and with libdeflate, at every level from -1 to 12, into output buffers of the bound, of exactly the stream's size, of one byte less and one more, of none, of a few bytes, and of sizes at random below the stream's: each call must return the same size, and write the same bytes. Each stream that fits must be the same whatever the buffer, and must inflate back to the input with `Inflate`. The inputs are text, random bytes, runs, a piece repeated and now and then changed, matches of 258 bytes and more, small alphabets, records of numbers, text with bytes changed, prefixes of one string a byte longer each time, words of three bytes, and pieces of several kinds joined, whose changes the block splitting has to find; from no bytes to 4 MB, every size up to 64 and sizes about where blocks end, and `testdata/zstd/golden-compression` and Silesia where it is fetched. Two inputs end blocks early: 700 KB of random words of three bytes, whose matches fill the greedy and lazy parsers' 50,000 sequences, and 1.2 MB of random bits, a byte each, at whose positions the binary trees find more than five matches and fill the near-optimal parser's match cache. By default the test compares 39,032 calls, 2,788 at each level, in under 30 seconds; three longer runs with other seeds (`HIVEPACK_LIBDEFLATE_SEED`, `HIVEPACK_LIBDEFLATE_INPUTS=100`) compared 564,312 more, 40,308 at each level. Every one agreed. libdeflate's own check that a block takes the bits its cost said (an `ASSERT` in `deflate_flush_block`) is a `debug_assert!` in the port, and holds in every test.
+- **`fuzz/fuzz_targets/deflate_libdeflate.rs`** compresses the fuzzer's input at a level its first byte picks: the stream inflates back, is the same from the same compressor again and from a new one, does not fit a byte shorter, and fits a buffer of a size its second byte picks as the same stream or not at all.
+
+### Speed and size
+
+On an AMD Ryzen 9 9950X (x86-64, Linux), November 2026, one thread, with `tools/deflate-bench --libdeflate`: libdeflate 1.26 built as above, and the port, each in one call with room for the whole stream, best of three rounds taken in turn; the zlib port at the same level, or 9 for 10 to 12, beside them. The inputs are a tar of `/usr/include` (54.4 MB) and a tar of 209 shared libraries from `/usr/lib/x86_64-linux-gnu` (100.2 MB):
+
+| Input | Level | libdeflate 1.26 | Port | Port / libdeflate | Size, both | zlib port (its level) | Its size |
+|---|---|---|---|---|---|---|---|
+| `/usr/include` | 1 | 513 MB/s | 478 MB/s | 0.93× | 10,623,096 | 280 MB/s (1) | 11,890,366 |
+| | 6 | 223 MB/s | 193 MB/s | 0.87× | 9,468,047 | 85.7 MB/s (6) | 9,442,478 |
+| | 9 | 78.5 MB/s | 70.4 MB/s | 0.90× | 9,317,096 | 32.9 MB/s (9) | 9,347,465 |
+| | 12 | 7.5 MB/s | 7.9 MB/s | 1.05× | 8,965,509 | 35.7 MB/s (9) | 9,347,465 |
+| Shared libraries | 1 | 298 MB/s | 266 MB/s | 0.89× | 39,209,839 | 144 MB/s (1) | 39,974,873 |
+| | 6 | 147 MB/s | 127 MB/s | 0.87× | 35,954,026 | 40.6 MB/s (6) | 36,411,044 |
+| | 9 | 52.8 MB/s | 46.7 MB/s | 0.88× | 35,743,790 | 11.8 MB/s (9) | 36,233,124 |
+| | 12 | 11.2 MB/s | 11.6 MB/s | 1.03× | 34,732,729 | 13.1 MB/s (9) | 36,233,124 |
+
+The streams are libdeflate's, byte for byte. At levels 1 to 9 the port is 0.87–0.93× as fast as libdeflate (levels 2 to 8, measured too on `/usr/include`, 0.86–0.89×); at 10 to 12, where most of the time goes into the binary trees and the minimum-cost path, it is a little faster. The hash chains' loop of levels 2 to 9 is where the difference is: in the port, the bytes compared are bounds-checked and libdeflate's prefetch of the next position's buckets is left out, but taking the checks out made no difference (1%), and neither did reading the next buckets as a prefetch would. The compiled loop keeps fewer of its values in registers than GCC's.
+
+The near-optimal levels are what they are for: level 12 makes streams 4.1% smaller than the zlib port's level 9 on both inputs, at 0.22× its speed on the headers and 0.89× on the libraries, where zlib's long hash chains are slow. libdeflate's level 6 is 2.6× and 3.6× as fast as zlib's, its streams 0.3% larger on the headers and 1.3% smaller on the libraries; its level 9 is smaller than zlib's 9 on both.
+
 ## Progress
 
 | zlib | Port | Status | Checked against zlib by |
@@ -146,6 +202,7 @@ On an AMD Ryzen 9 9950X (16 cores, 32 threads), November 2026, 546 MB of mixed f
 | Compressing in threads (pigz's way, zlib has none) | `mt.rs` | done | `tests/deflate_threads.rs`: the same stream whatever the threads, pigz 2.8's byte for byte |
 | `contrib/infback9`: `infback9.{h,c}`, `inftree9.{h,c}`, `inffix9.h`, `inflate9.h` (Deflate64) | `infback9.rs`, `inftree9.rs`, `inffix9.rs` | done | `tests/deflate64.rs`, through the oracle; `inffix9.h` rebuilt |
 | Deflate64 a piece at a time (hivepack's own, from `inflate.c` and `infback9.c`) | `inflate9.rs` | done | `tests/deflate64.rs`: the same ends, messages and output as `infback9.c` |
+| libdeflate 1.26's `deflate_compress.c`, `deflate_compress.h`, `deflate_constants.h`, `matchfinder_common.h`, `hc_matchfinder.h`, `ht_matchfinder.h`, `bt_matchfinder.h` (beside the port) | `libdeflate/*.rs` | done | `tests/deflate_libdeflate.rs`, byte for byte at every level, through `tools/libdeflate-oracle` |
 
 ## Not ported, for now
 
@@ -165,6 +222,10 @@ When zlib releases a new version:
 2. Update `UPSTREAM_VERSION` and the `libz-sys` version that bundles the new release.
 3. Run everything again.
 
+When libdeflate does, the same for `lib/deflate_compress.c` and the headers it includes: diff, port each change, update `LIBDEFLATE_VERSION` and the `libdeflate-*-source` set (and the oracle's), and run `tests/deflate_libdeflate.rs` again.
+
 ## Licenses
 
 The port is derived from zlib, which is under the zlib license. That is why `hivepack::deflate` is under the zlib license, and its [LICENSE](../crates/hivepack/src/deflate/LICENSE) keeps zlib's notice and says that this is an altered version, as the license asks. `tests/infcover.rs` is derived from zlib's `test/infcover.c`, under the same license.
+
+The port of libdeflate's compressor, `deflate/libdeflate/`, is derived from libdeflate, which is under the MIT license (Copyright 2016 Eric Biggers, 2024 Google LLC). Its [LICENSE](../crates/hivepack/src/deflate/libdeflate/LICENSE) keeps that notice, and says that this is an altered version. `hivepack::deflate` is so under `Zlib AND MIT`; both are in the crate's `license` field already. `tools/libdeflate-oracle` is under MIT, as the rest of hivepack's own code.
