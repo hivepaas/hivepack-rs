@@ -161,6 +161,10 @@ Two things change besides the reading:
 - cpio (`tests/extract_cpio.rs`): read once into a folder, twice into a sink, where an archive that changes stops; refused at its last entry, or cancelled, the destination as it was; an odc file of three names whose data, larger than half the limit on all, passes it, with threads and without; what is in the way before anything moves. XAR (`tests/extract_xar.rs`): read once, payloads and all, and told by their paths there; refused in a payload, or a payload's file in the way in its folder, the destination as it was; a payload that is no cpio archive written as it is, layers and all, with threads and without, and left out when not picked.
 - Timing on 3 GB, before and after, as above.
 
+## Later
+
+- **ISO 9660 read once** (left for when it is needed, 2026-11-10). `extract_iso` reads an image twice still. An image on disk is read where its directories say, so the second reading costs reading it again and nothing more; only an image under a compressor (`.iso.xz`, `.iso.zst`, `.iso.gz`) is decompressed twice, which few images are. The same private folder would do: each file's data written as the stream reaches its extent, the checks once the image is read, then the moves.
+
 ## Decisions
 
 The points left open in the first draft, decided in review:
