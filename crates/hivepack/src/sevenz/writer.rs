@@ -1091,15 +1091,18 @@ impl<W: Write + Seek> Writer<W> {
         // Whether each folder's files are all kept, and whether any is.
         let mut whole = vec![true; folders];
         let mut any = vec![false; folders];
+        // Of the files with data: an empty one between a folder's files, or
+        // a directory there, is in its folder by its index alone.
+        let folder_of = |entry: &Entry| entry.folder.filter(|_| entry.has_stream);
         for (entry, &kept) in entries.iter().zip(&kept) {
-            if let Some(fo) = entry.folder {
+            if let Some(fo) = folder_of(entry) {
                 whole[fo] &= kept;
                 any[fo] |= kept;
             }
         }
         let mut copied = vec![false; folders];
         for (entry, _) in entries.iter().zip(&kept).filter(|(_, kept)| **kept) {
-            match entry.folder {
+            match folder_of(entry) {
                 None => self.entries.push(Written {
                     info: new_entry(entry),
                     name16: Some(entry.name_utf16.clone()),
@@ -1132,7 +1135,7 @@ impl<W: Write + Seek> Writer<W> {
         for run in runs {
             let mut walk = Walk::new(run.start..run.end.min(len));
             while let Some(entry) = walk.next(&mut *archive)? {
-                if entry.folder.is_none() || !kept[entry.index] {
+                if folder_of(&entry).is_none() || !kept[entry.index] {
                     continue;
                 }
                 self.start_file(new_entry(&entry))?;
@@ -1176,7 +1179,7 @@ impl<W: Write + Seek> Writer<W> {
         let packed = ar.pack_positions[end] - ar.pack_positions[first];
         let files: Vec<FileSum> = (db.folder_to_file[fo] as usize
             ..db.folder_to_file[fo + 1] as usize)
-            .filter(|&i| db.file_to_folder[i] as usize == fo)
+            .filter(|&i| db.file_to_folder[i] as usize == fo && db.has_stream(i))
             .map(|i| (db.file_size(i), db.crcs.check(i).then(|| db.crcs.vals[i])))
             .collect();
         let size = archive.folder_size(fo);

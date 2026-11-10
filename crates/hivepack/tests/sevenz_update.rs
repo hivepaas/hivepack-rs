@@ -368,6 +368,56 @@ fn seven_zip_s_archives_change() {
 }
 
 /// Stopped while a folder is copied: `Error::Progress`, and the writer keeps it.
+/// Between a solid folder's files, a directory and an empty file have no data,
+/// and the folder by their index alone (`Entry::has_stream`): copied whole, the
+/// folder keeps them as they were, and taking them out leaves it whole.
+#[test]
+fn what_has_no_data_between_a_folder_s_files_is_not_in_it() {
+    let mut w = Writer::with_options(Cursor::new(Vec::new()), WriteOptions::default()).unwrap();
+    w.add_file(NewEntry::new("a"), &mut &b"first file"[..])
+        .unwrap();
+    let mut dir = NewEntry::new("d");
+    dir.attributes = Some(0x10);
+    w.add_directory(dir).unwrap();
+    w.add_file(NewEntry::new("empty"), &mut &b""[..]).unwrap();
+    w.add_file(NewEntry::new("b"), &mut &b"second file"[..])
+        .unwrap();
+    let data = w.finish().unwrap().into_inner();
+    let archive = open(&data, None);
+    assert_eq!(archive.folders(), 1);
+    let by_name = |name: &str| archive.entries().find(|e| e.name == name).unwrap();
+    assert!(by_name("a").has_stream && by_name("b").has_stream);
+    for name in ["d", "empty"] {
+        let entry = by_name(name);
+        assert!(!entry.has_stream, "{name}");
+        assert_eq!(entry.folder, Some(0), "{name}: the SDK's folder");
+    }
+    let before = held(&data, None);
+
+    let out = changed(&data, None, WriteOptions::default(), |_| true, &[]).unwrap();
+    assert_eq!(held(&out, None), before);
+    assert_eq!(packed(&out, None), packed(&data, None));
+    let back = open(&out, None);
+    let entry = back.entries().find(|e| e.name == "d").unwrap();
+    assert!(entry.is_dir && !entry.has_stream);
+    seven_zip_tests("no-data-kept", &out, None);
+
+    let out = changed(
+        &data,
+        None,
+        WriteOptions::default(),
+        |e| e.name != "d" && e.name != "empty",
+        &[],
+    )
+    .unwrap();
+    assert_eq!(packed(&out, None), packed(&data, None), "copied whole");
+    let mut expected = before;
+    expected.remove("d");
+    expected.remove("empty");
+    assert_eq!(held(&out, None), expected);
+    seven_zip_tests("no-data-taken-out", &out, None);
+}
+
 #[test]
 fn stopping_while_copying() {
     let (data, _) = sample();

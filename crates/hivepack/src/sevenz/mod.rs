@@ -202,9 +202,15 @@ pub struct Entry {
     pub mtime: Option<u64>,
     /// When it was created, in the same units.
     pub ctime: Option<u64>,
-    /// The folder its data is in; none for a file without data (empty, or
-    /// a directory).
+    /// The folder its data is in. A file without data of its own, a
+    /// directory or most empty files, has none, but for one between a
+    /// folder's files, which has that folder, as in the SDK: see
+    /// [`has_stream`](Entry::has_stream).
     pub folder: Option<usize>,
+    /// Whether it has data of its own in [`folder`](Entry::folder), a stream
+    /// of it, even of no bytes: not a directory, nor an empty file the
+    /// header marks without one.
+    pub has_stream: bool,
     /// Whether its data is encrypted.
     pub encrypted: bool,
 }
@@ -469,6 +475,7 @@ fn entry_of(db: &ArEx, encrypted: &[bool], index: usize) -> Entry {
         mtime: db.mtime.check(index).then(|| db.mtime.vals[index]),
         ctime: db.ctime.check(index).then(|| db.ctime.vals[index]),
         folder: (folder != u32::MAX).then_some(folder as usize),
+        has_stream: folder != u32::MAX && db.has_stream(index),
         encrypted: encrypted.get(folder as usize).copied().unwrap_or(false),
     }
 }

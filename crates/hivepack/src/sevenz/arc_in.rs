@@ -1020,8 +1020,12 @@ pub(crate) struct ArEx {
     pub(crate) ctime: BitUi64s,
     /// `NumFolders + 1`.
     pub(crate) folder_to_file: Vec<u32>,
-    /// `NumFiles`; `u32::MAX` for a file without data.
+    /// `NumFiles`; `u32::MAX` for a file without data before or after a
+    /// folder's files. One between them has that folder, as in the SDK.
     pub(crate) file_to_folder: Vec<u32>,
+    /// Not in the SDK: the header's `kEmptyStream` bits, the files without
+    /// data of their own; none where every file has some.
+    pub(crate) empty_streams: Option<Vec<u8>>,
     /// In UTF-16 units; none without names.
     pub(crate) file_name_offsets: Option<Vec<usize>>,
     /// UTF-16LE.
@@ -1032,6 +1036,12 @@ pub(crate) struct ArEx {
 }
 
 impl ArEx {
+    /// Not in the SDK: whether file `i` has data of its own, a stream of
+    /// its folder, even of no bytes.
+    pub(crate) fn has_stream(&self, i: usize) -> bool {
+        !self.empty_streams.as_ref().is_some_and(|e| bit_check(e, i))
+    }
+
     /// `SzArEx_IsDir`.
     pub(crate) fn is_dir(&self, i: usize) -> bool {
         bit_check(&self.is_dirs, i)
@@ -1243,6 +1253,14 @@ impl ArEx {
         self.file_to_folder = budget.alloc::<u32>(num_files)?;
         self.unpack_positions = budget.alloc::<u64>(num_files + 1)?;
         self.is_dirs = budget.alloc::<u8>(num_files.div_ceil(8))?;
+        self.empty_streams = match empty_streams {
+            Some(bits) => {
+                let mut kept = budget.alloc::<u8>(bits.len())?;
+                kept.copy_from_slice(bits);
+                Some(kept)
+            }
+            None => None,
+        };
         // SzBitUi32s_Alloc.
         if num_files != 0 {
             self.crcs.defs = Some(budget.alloc::<u8>(num_files.div_ceil(8))?);
