@@ -157,6 +157,8 @@ On an AMD Ryzen 9 9950X (16 cores, 32 threads), November 2026, 546 MB of mixed f
 
 ## Following new releases
 
+The release followed until now is kept in the [mirror of upstream sources](../testdata/README.md#the-upstream-sources-mirrored), to compare the new one with even once its URL is gone. The new release's source set goes into the manifest and the mirror: `python3 scripts/testdata.py mirror --set <name>`.
+
 When zlib releases a new version:
 
 1. Diff the two tags and port each change.

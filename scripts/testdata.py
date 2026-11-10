@@ -14,6 +14,13 @@ The cache is target/testdata, or $HIVEPACK_TESTDATA when set.
 
     python3 scripts/testdata.py fetch [--group core|generated|fuzz|bench|all ...] [--set NAME ...]
     python3 scripts/testdata.py list
+    python3 scripts/testdata.py mirror (--set NAME ... | --all)
+
+The upstream sources the ports follow (the sets of kind "source") are kept in
+a mirror, hivepaas/hivepack-upstream, a release for each set, so that the
+version a port follows can be compared with a new one even once its upstream
+URL is gone: `mirror` puts a set there, and `fetch` takes it from there when
+its URL fails, if the GitHub CLI (`gh`) is signed in.
 
 Only the standard library is used, so any Python 3.9 or newer runs it.
 """
@@ -33,6 +40,7 @@ import time
 import urllib.request
 import zipfile
 from pathlib import Path, PurePosixPath
+from typing import Optional
 
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "testdata" / "manifest.json"
@@ -51,29 +59,94 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def download(url: str, want: str, downloads: Path) -> Path:
-    """The file at url, kept in downloads, once its SHA-256 is want."""
+# Where the upstream sources are kept: a release for each source set, named
+# as the set, holding its files under their upstream names.
+MIRROR = "hivepaas/hivepack-upstream"
+
+
+def download(url: str, want: str, downloads: Path, mirrored: Optional[str] = None) -> Path:
+    """The file at url, kept in downloads, once its SHA-256 is want. If url
+    fails, or gives other bytes, and the file is in the release `mirrored` of
+    the mirror, it is taken from there."""
     target = downloads / f"{want[:16]}-{PurePosixPath(url).name}"
     if target.exists() and sha256(target) == want:
         return target
     downloads.mkdir(parents=True, exist_ok=True)
     partial = target.with_suffix(target.suffix + ".part")
+    failed = None
     for attempt in range(4):
         try:
             request = urllib.request.Request(url, headers={"User-Agent": "hivepack-testdata"})
             with urllib.request.urlopen(request, timeout=120) as response, partial.open("wb") as out:
                 shutil.copyfileobj(response, out)
+            failed = None
             break
         except OSError as error:
-            if attempt == 3:
-                raise SystemExit(f"download failed: {url}: {error}")
-            time.sleep(2 ** attempt)
-    got = sha256(partial)
-    if got != want:
-        partial.unlink()
-        raise SystemExit(f"checksum mismatch for {url}: want {want}, got {got}")
+            failed = f"download failed: {url}: {error}"
+            if attempt < 3:
+                time.sleep(2 ** attempt)
+    if failed is None:
+        got = sha256(partial)
+        if got != want:
+            partial.unlink()
+            failed = f"checksum mismatch for {url}: want {want}, got {got}"
+    if failed is not None:
+        if mirrored is None or not from_mirror(mirrored, PurePosixPath(url).name, partial):
+            raise SystemExit(failed)
+        print(f"  {failed}; taken from {MIRROR}, release {mirrored}")
+        got = sha256(partial)
+        if got != want:
+            partial.unlink()
+            raise SystemExit(f"checksum mismatch for {name_in(mirrored, url)}: want {want}, got {got}")
     partial.replace(target)
     return target
+
+
+def name_in(release: str, url: str) -> str:
+    return f"{MIRROR}@{release}/{PurePosixPath(url).name}"
+
+
+def from_mirror(release: str, name: str, into: Path) -> bool:
+    """The file `name` of the mirror's release `release`, written to into,
+    with the GitHub CLI: whether it was."""
+    if shutil.which("gh") is None:
+        return False
+    result = subprocess.run(
+        ["gh", "release", "download", release, "-R", MIRROR, "-p", name, "-O", str(into), "--clobber"],
+        capture_output=True, text=True)
+    return result.returncode == 0 and into.exists()
+
+
+def mirror_set(entry: dict, cache: Path) -> None:
+    """The source set `entry` kept in the mirror, a release of its name with
+    its files, checked against the manifest first; a set already there is
+    left as it is."""
+    name = entry["name"]
+    if entry.get("kind") != "source" or "fetch" not in entry:
+        sys.exit(f"{name}: only the upstream sources (kind \"source\") are mirrored")
+    if shutil.which("gh") is None:
+        sys.exit("mirror needs the GitHub CLI, gh, signed in")
+    there = subprocess.run(["gh", "release", "view", name, "-R", MIRROR], capture_output=True, text=True)
+    if there.returncode == 0:
+        print(f"  {name}: already in {MIRROR}")
+        return
+    staging = cache / f".{name}.mirror"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+    notes = [f"{entry.get('source', '')}", "", f"License: {entry.get('license', 'see the archive')}", ""]
+    files = []
+    for file in entry["fetch"]["files"]:
+        # Only from upstream: what is mirrored is what the manifest pins.
+        archive = download(file["url"], file["sha256"], cache / "downloads")
+        upstream = staging / PurePosixPath(file["url"]).name
+        shutil.copyfile(archive, upstream)
+        files.append(str(upstream))
+        notes.append(f"- `{upstream.name}`: {file['url']}, SHA-256 `{file['sha256']}`")
+    subprocess.run(["gh", "release", "create", name, "-R", MIRROR, "--title", name,
+                    "--notes", "\n".join(notes), *files], check=True, capture_output=True)
+    shutil.rmtree(staging)
+    print(f"  {name}: mirrored to {MIRROR}")
 
 
 def safe_member(name: str) -> PurePosixPath:
@@ -153,7 +226,8 @@ def fetch_set(entry: dict, cache: Path) -> None:
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
     for file in entry["fetch"]["files"]:
-        archive = download(file["url"], file["sha256"], cache / "downloads")
+        mirrored = entry["name"] if entry.get("kind") == "source" else None
+        archive = download(file["url"], file["sha256"], cache / "downloads", mirrored)
         unpack(archive, file.get("unpack", "none"), staging)
     mark_current(staging, stamp)
     staging.replace(folder)
@@ -706,6 +780,10 @@ def main() -> None:
                        help="a set by its name, as `list` shows them, in place of the groups; "
                             "repeat for several")
     sub.add_parser("list", help="show every set and where it lives")
+    mirror = sub.add_parser("mirror", help=f"keep upstream source sets in {MIRROR}")
+    mirror.add_argument("--set", action="append", default=[], metavar="NAME",
+                        help="a source set by its name; repeat for several")
+    mirror.add_argument("--all", action="store_true", help="every source set")
     args = parser.parse_args()
 
     sets = load_sets()
@@ -720,6 +798,13 @@ def main() -> None:
     unknown = [name for name in args.set if name not in sets]
     if unknown:
         sys.exit(f"no such set: {', '.join(unknown)}")
+    if args.command == "mirror":
+        names = [n for n, e in sets.items() if e.get("kind") == "source"] if args.all else args.set
+        if not names:
+            sys.exit("mirror: name the sets with --set, or --all")
+        for name in names:
+            mirror_set(sets[name], cache)
+        return
     groups = set(args.group or ([] if args.set else ["core"]))
     if "all" in groups:
         groups = set(GROUPS)

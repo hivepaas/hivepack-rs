@@ -12,6 +12,17 @@ python3 scripts/testdata.py fetch --group all      # everything: 129 MB to downl
 python3 scripts/testdata.py list                   # every set, and where it lives
 ```
 
+### The upstream sources, mirrored
+
+The releases the ports follow (the sets of kind `source`: `zstd-1.5.7-source`, `unrar-7.3.2-source` and the others) are also kept in [hivepaas/hivepack-upstream](https://github.com/hivepaas/hivepack-upstream), a private repository. Each set is one release there, named as the set, with its files unmodified under their upstream names. When a new upstream release comes out, the one the port follows is compared with it, and the old one has to be found even once its URL is gone.
+
+```sh
+python3 scripts/testdata.py mirror --set zstd-1.5.8-source   # a new set, once it is in the manifest
+python3 scripts/testdata.py mirror --all                     # every source set not there yet
+```
+
+`mirror` downloads from upstream only, checks the files against the manifest, and leaves a set already mirrored as it is. `fetch` takes a source set's file from the mirror when its URL fails or gives other bytes, if the GitHub CLI (`gh`) is installed and signed in with access to the mirror. The file is still checked against the manifest. Both need `gh`.
+
 Tests skip a set that has not been fetched and print a note. CI sets `HIVEPACK_TESTDATA_REQUIRED` (for example to `core,generated`), and then a missing set fails the test instead.
 
 ## What a set holds

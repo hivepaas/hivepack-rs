@@ -152,6 +152,8 @@ The filters themselves are as fast as liblzma's or faster. liblzma 5.8's single-
 
 ## Following new releases
 
+The release followed until now is kept in the [mirror of upstream sources](../testdata/README.md#the-upstream-sources-mirrored), to compare the new one with even once its URL is gone. The new release's source set goes into the manifest and the mirror: `python3 scripts/testdata.py mirror --set <name>`.
+
 When XZ Utils releases a new version:
 
 1. Diff the two tags' `src/liblzma` and port each change.
