@@ -188,6 +188,33 @@ fn extracts_files_directories_and_dot_slash_names() {
     }
 }
 
+/// A directory dated before 1970, its time in base-256 as GNU tar writes a
+/// negative one: it is given its time, as a file is, where cap-std alone
+/// panicked on it.
+#[test]
+fn a_directory_dated_before_1970_keeps_its_time() {
+    const BEFORE: i64 = -1_000_000_000;
+    let s = Scratch::new();
+    let mut h = header(b"old/", b'5', 0, 0o755, b"");
+    // Two's complement over the field's 12 bytes, its sign bit the marker.
+    h[136..140].fill(0xff);
+    h[140..148].copy_from_slice(&BEFORE.to_be_bytes());
+    h[148..156].fill(b' ');
+    let sum: u32 = h.iter().map(|&c| u32::from(c)).sum();
+    h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+    let mut data = h;
+    data.extend([0u8; 1024]);
+    extract(&data, &s.out(), &portable()).unwrap();
+    let mtime = std::fs::metadata(s.out().join("old"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert_eq!(
+        mtime,
+        std::time::UNIX_EPOCH - std::time::Duration::from_secs(BEFORE.unsigned_abs())
+    );
+}
+
 /// Files whose parents go deeper, back up and across from one entry to the
 /// next, with no directory entries, some parents there already, and one name
 /// a prefix of another's: each lands where it is named, as the directories
