@@ -29,9 +29,10 @@ use crate::deflate::{
     Deflate, ErrorCode as ZErrorCode, Flush, InBuffer as ZIn, OutBuffer as ZOut, Status as ZStatus,
 };
 use crate::xz::{
-    Action as XzAction, DELTA_DIST_MAX, DELTA_DIST_MIN, FILTER_ARM, FILTER_ARM64, FILTER_ARMTHUMB,
-    FILTER_IA64, FILTER_POWERPC, FILTER_RISCV, FILTER_SPARC, FILTER_X86, Filter as XzFilter,
-    InBuffer as XzIn, LzmaOptions, OutBuffer as XzOut, Status as XzStatus, Stream,
+    Action as XzAction, DELTA_DIST_MAX, DELTA_DIST_MIN, DICT_SIZE_MIN, FILTER_ARM, FILTER_ARM64,
+    FILTER_ARMTHUMB, FILTER_IA64, FILTER_POWERPC, FILTER_RISCV, FILTER_SPARC, FILTER_X86,
+    Filter as XzFilter, InBuffer as XzIn, LzmaOptions, OutBuffer as XzOut, Status as XzStatus,
+    Stream,
 };
 
 use crate::sevenz::aes7z::{AesEncoder, K_AES_ID, MAX_KEY_CYCLES};
@@ -189,6 +190,11 @@ pub struct WriteOptions {
     pub method: Method,
     /// What runs over the data before that. None by default.
     pub filter: Filter,
+    /// LZMA's and LZMA2's dictionary, in place of the preset's: from 4 KiB to
+    /// 1.5 GiB, as liblzma takes it. The preset's by default. The other
+    /// methods have none, and leave it be. An encoder takes about 10 times
+    /// it, which [`WriteOptions::memory_usage`] counts.
+    pub dictionary: Option<u32>,
     /// Files go together in a folder, a solid block, which compresses better
     /// and reads worse, until it has this many bytes; `None` gives each file a
     /// folder of its own. 4 GiB by default.
@@ -260,6 +266,9 @@ impl WriteProgress {
     }
 }
 
+/// The largest dictionary liblzma's encoder takes: 1.5 GiB.
+const DICT_SIZE_MAX: u32 = (1 << 30) + (1 << 29);
+
 /// How often a writer waiting for LZMA2's blocks looks at
 /// [`WriteOptions::stop`].
 const STOP_EVERY: Duration = Duration::from_millis(50);
@@ -269,6 +278,7 @@ impl Default for WriteOptions {
         WriteOptions {
             method: Method::Lzma2 { preset: 6 },
             filter: Filter::None,
+            dictionary: None,
             solid_block_size: Some(1 << 32),
             compress_headers: true,
             password: None,
@@ -288,6 +298,7 @@ impl core::fmt::Debug for WriteOptions {
         f.debug_struct("WriteOptions")
             .field("method", &self.method)
             .field("filter", &self.filter)
+            .field("dictionary", &self.dictionary)
             .field("solid_block_size", &self.solid_block_size)
             .field("compress_headers", &self.compress_headers)
             .field("password", &self.password.as_ref().map(|_| "(hidden)"))
@@ -328,6 +339,9 @@ impl WriteOptions {
     fn check(&self) -> Result<()> {
         let lzma = matches!(self.method, Method::Lzma { .. } | Method::Lzma2 { .. });
         if (self.filter != Filter::None && !lzma)
+            || self
+                .dictionary
+                .is_some_and(|d| !(DICT_SIZE_MIN..=DICT_SIZE_MAX).contains(&d))
             || (self.encrypt_headers && self.password.is_none())
             || self.key_cycles > MAX_KEY_CYCLES
         {
@@ -357,10 +371,11 @@ impl WriteOptions {
             u64::MAX => Err(Error::Param),
             bytes => Ok(bytes),
         };
-        let preset = |p| LzmaOptions::preset(p).ok_or(Error::Param);
         let coder = match self.method {
             Method::Copy => 0,
-            Method::Lzma { preset: p } => encoder(&xz_chain(self, XzFilter::lzma1(preset(p)?))?)?,
+            Method::Lzma { preset: p } => {
+                encoder(&xz_chain(self, XzFilter::lzma1(lzma_preset(self, p)?))?)?
+            }
             Method::Lzma2 { preset: p } => match lzma2_options(self, p)? {
                 (lzma, Some(size)) => {
                     self.filter.coder()?;
@@ -380,7 +395,7 @@ impl WriteOptions {
         };
         // The header's encoder comes once the coders are let go.
         let header = if self.compress_headers || self.encrypt_headers {
-            let mut lzma = preset(6)?;
+            let mut lzma = LzmaOptions::preset(6).ok_or(Error::Param)?;
             lzma.dict_size = HEADER_DICT_MIN;
             encoder(&[XzFilter::lzma2(lzma)])?
         } else {
@@ -750,10 +765,20 @@ fn give(
     Ok(())
 }
 
+/// The options of LZMA's or LZMA2's encoder of `preset`, with the
+/// dictionary the options give.
+fn lzma_preset(options: &WriteOptions, preset: u32) -> Result<LzmaOptions> {
+    let mut lzma = LzmaOptions::preset(preset).ok_or(Error::Param)?;
+    if let Some(dictionary) = options.dictionary {
+        lzma.dict_size = dictionary;
+    }
+    Ok(lzma)
+}
+
 /// The options of LZMA2's encoder, and the size of its blocks if it is cut
 /// in blocks: then the dictionary is no larger than a block.
 fn lzma2_options(options: &WriteOptions, preset: u32) -> Result<(LzmaOptions, Option<usize>)> {
-    let mut lzma = LzmaOptions::preset(preset).ok_or(Error::Param)?;
+    let mut lzma = lzma_preset(options, preset)?;
     let Some(size) = options.lzma2_blocks.size(lzma.dict_size)? else {
         return Ok((lzma, None));
     };
@@ -1000,6 +1025,46 @@ impl<W: Write + Seek> Writer<W> {
         Ok(())
     }
 
+    /// Compresses the files from the next with data on with `method`,
+    /// `filter` and `dictionary` ([`WriteOptions::dictionary`]), in a folder
+    /// of their own, as [`set_method`](Writer::set_method) does: so that a
+    /// changed archive's folders, written again a call of
+    /// [`copy_from`](Writer::copy_from) at a time, are each compressed as
+    /// [`Archive::folder_coding`] says it was. Options that cannot be, as in
+    /// [`Writer::with_options`], are [`Error::Param`], and the writer stays
+    /// as it was.
+    pub fn set_compression(
+        &mut self,
+        method: Method,
+        filter: Filter,
+        dictionary: Option<u32>,
+    ) -> Result<()> {
+        if let Some(e) = self.failed {
+            return Err(e);
+        }
+        let now = (
+            self.options.method,
+            self.options.filter,
+            self.options.dictionary,
+        );
+        if (method, filter, dictionary) == now {
+            return Ok(());
+        }
+        let options = WriteOptions {
+            method,
+            filter,
+            dictionary,
+            ..self.options.clone()
+        };
+        options.check()?;
+        check_method(&options)?;
+        self.options.method = method;
+        self.options.filter = filter;
+        self.options.dictionary = dictionary;
+        self.method_changed = true;
+        Ok(())
+    }
+
     /// A file with what `reader` gives, and the bytes it was.
     pub fn add_file<R: Read>(&mut self, entry: NewEntry, reader: &mut R) -> io::Result<u64> {
         self.start_file(entry).map_err(io::Error::other)?;
@@ -1044,7 +1109,31 @@ impl<W: Write + Seek> Writer<W> {
         if let Some(e) = self.failed {
             return Err(e);
         }
-        let copied = self.copy_inner(archive, keep);
+        let copied = self.copy_inner(archive, keep, |_| None);
+        if let Err(e) = copied {
+            self.failed = Some(e);
+        }
+        copied
+    }
+
+    /// [`copy_from`](Writer::copy_from), with the names `rename` gives the
+    /// entries kept, in UTF-16 units as [`Entry::name_utf16`] has them; none
+    /// keeps an entry's own. A name is in the header alone: what is renamed
+    /// is copied as anything kept is, its folder whole if all of it is kept,
+    /// with no password for its data. Renaming a directory renames none of
+    /// what is in it, whose names are whole paths: the caller renames each.
+    /// An empty name, or one with a NUL, is [`Error::Param`], as the
+    /// writer's error, and nothing of the archive is copied.
+    pub fn copy_from_renamed<R: Read + Seek>(
+        &mut self,
+        archive: &mut Archive<R>,
+        keep: impl FnMut(&Entry) -> bool,
+        rename: impl FnMut(&Entry) -> Option<Vec<u16>>,
+    ) -> Result<()> {
+        if let Some(e) = self.failed {
+            return Err(e);
+        }
+        let copied = self.copy_inner(archive, keep, rename);
         if let Err(e) = copied {
             self.failed = Some(e);
         }
@@ -1055,29 +1144,57 @@ impl<W: Write + Seek> Writer<W> {
         &mut self,
         archive: &mut Archive<R>,
         mut keep: impl FnMut(&Entry) -> bool,
+        mut rename: impl FnMut(&Entry) -> Option<Vec<u16>>,
     ) -> Result<()> {
+        // The names first, as a bad one copies nothing.
+        let entries: Vec<Entry> = archive.entries().collect();
+        let kept: Vec<bool> = entries.iter().map(&mut keep).collect();
+        let mut names: Vec<Option<Vec<u16>>> = Vec::with_capacity(entries.len());
+        for (entry, &kept) in entries.iter().zip(&kept) {
+            let name = if kept { rename(entry) } else { None };
+            if name
+                .as_ref()
+                .is_some_and(|n| n.is_empty() || n.contains(&0))
+            {
+                return Err(Error::Param);
+            }
+            names.push(name);
+        }
+        let name_of = |entry: &Entry| -> Vec<u16> {
+            names[entry.index]
+                .clone()
+                .unwrap_or_else(|| entry.name_utf16.clone())
+        };
+        let info_of = |entry: &Entry| -> NewEntry {
+            let mut info = new_entry(entry);
+            if let Some(name) = &names[entry.index] {
+                info.name = String::from_utf16_lossy(name);
+            }
+            info
+        };
         // The file before ends, and its folder: the folders copied come after.
         self.in_file = false;
         self.close_folder().map_err(|e| as_error(&e))?;
         let len = archive.len();
-        let entries: Vec<Entry> = archive.entries().collect();
-        let kept: Vec<bool> = entries.iter().map(&mut keep).collect();
         let folders = archive.folders();
         // Whether each folder's files are all kept, and whether any is.
         let mut whole = vec![true; folders];
         let mut any = vec![false; folders];
+        // Of the files with data: an empty one between a folder's files, or
+        // a directory there, is in its folder by its index alone.
+        let folder_of = |entry: &Entry| entry.folder.filter(|_| entry.has_stream);
         for (entry, &kept) in entries.iter().zip(&kept) {
-            if let Some(fo) = entry.folder {
+            if let Some(fo) = folder_of(entry) {
                 whole[fo] &= kept;
                 any[fo] |= kept;
             }
         }
         let mut copied = vec![false; folders];
         for (entry, _) in entries.iter().zip(&kept).filter(|(_, kept)| **kept) {
-            match entry.folder {
+            match folder_of(entry) {
                 None => self.entries.push(Written {
-                    info: new_entry(entry),
-                    name16: Some(entry.name_utf16.clone()),
+                    info: info_of(entry),
+                    name16: Some(name_of(entry)),
                     has_stream: false,
                     is_dir: entry.is_dir,
                 }),
@@ -1087,8 +1204,8 @@ impl<W: Write + Seek> Writer<W> {
                         copied[fo] = true;
                     }
                     self.entries.push(Written {
-                        info: new_entry(entry),
-                        name16: Some(entry.name_utf16.clone()),
+                        info: info_of(entry),
+                        name16: Some(name_of(entry)),
                         has_stream: true,
                         is_dir: false,
                     });
@@ -1107,12 +1224,12 @@ impl<W: Write + Seek> Writer<W> {
         for run in runs {
             let mut walk = Walk::new(run.start..run.end.min(len));
             while let Some(entry) = walk.next(&mut *archive)? {
-                if entry.folder.is_none() || !kept[entry.index] {
+                if folder_of(&entry).is_none() || !kept[entry.index] {
                     continue;
                 }
-                self.start_file(new_entry(&entry))?;
+                self.start_file(info_of(&entry))?;
                 if let Some(written) = self.entries.last_mut() {
-                    written.name16 = Some(entry.name_utf16.clone());
+                    written.name16 = Some(name_of(&entry));
                 }
                 loop {
                     let n = walk.read_current(&mut *archive, &mut buf)?;
@@ -1151,7 +1268,7 @@ impl<W: Write + Seek> Writer<W> {
         let packed = ar.pack_positions[end] - ar.pack_positions[first];
         let files: Vec<FileSum> = (db.folder_to_file[fo] as usize
             ..db.folder_to_file[fo + 1] as usize)
-            .filter(|&i| db.file_to_folder[i] as usize == fo)
+            .filter(|&i| db.file_to_folder[i] as usize == fo && db.has_stream(i))
             .map(|i| (db.file_size(i), db.crcs.check(i).then(|| db.crcs.vals[i])))
             .collect();
         let size = archive.folder_size(fo);
@@ -1646,7 +1763,7 @@ fn check_method(options: &WriteOptions) -> Result<Option<Compressor>> {
 /// The compressor of a new folder. `spare`: the encoder of the last one, whose
 /// memory it takes over, which saves much when each file is a folder.
 fn make_compressor(options: &WriteOptions, spare: &mut Option<Box<Stream>>) -> Result<Compressor> {
-    let preset = |p| LzmaOptions::preset(p).ok_or(Error::Param);
+    let preset = |p| lzma_preset(options, p);
     let spare = spare.take();
     let raw = move |filters: Vec<XzFilter>| {
         match spare {
@@ -1676,7 +1793,7 @@ fn make_compressor(options: &WriteOptions, spare: &mut Option<Box<Stream>>) -> R
 
 /// The method's coder as a folder says it.
 fn method_coder(options: &WriteOptions) -> Result<CoderInfo> {
-    let preset = |p| LzmaOptions::preset(p).ok_or(Error::Param);
+    let preset = |p| lzma_preset(options, p);
     Ok(match options.method {
         Method::Copy => (vec![0x00], Vec::new()),
         Method::Lzma { preset: p } => {

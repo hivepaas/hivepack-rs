@@ -91,6 +91,46 @@ pub(crate) fn crc(data: &[u8]) -> u32 {
     crate::deflate::crc32(0, data)
 }
 
+/// What a folder's data was compressed with, as [`Archive::folder_coding`]
+/// reads it from its coders.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Coding {
+    /// The coder that compresses: of BCJ2's, the main stream's.
+    pub method: Compression,
+    /// The filter run over the data before that, of those [`Filter`] has;
+    /// the first, if there are more.
+    pub filter: Filter,
+    /// Whether BCJ2 ran over it, x86's filter of four streams, which
+    /// [`Writer`] does not write: [`Filter::X86`] is the one it writes.
+    pub bcj2: bool,
+    /// LZMA's or LZMA2's dictionary, in bytes.
+    pub dictionary: Option<u32>,
+    /// Whether it is encrypted, with AES-256.
+    pub encrypted: bool,
+}
+
+/// The coder that compresses a folder's data, by its ID in 7-Zip's
+/// `DOC/Methods.txt`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Compression {
+    /// None: the data is stored as it is.
+    Copy,
+    Lzma,
+    Lzma2,
+    /// PPMd, variant H, which [`Writer`] does not write.
+    Ppmd,
+    BZip2,
+    Deflate,
+    /// Which [`Writer`] does not write.
+    Deflate64,
+    /// Zstandard, of 7-Zip's forks, which [`Writer`] does not write.
+    Zstd,
+    /// Another, by its ID.
+    Other(u32),
+}
+
 /// How an archive is opened.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Options {
@@ -162,9 +202,15 @@ pub struct Entry {
     pub mtime: Option<u64>,
     /// When it was created, in the same units.
     pub ctime: Option<u64>,
-    /// The folder its data is in; none for a file without data (empty, or
-    /// a directory).
+    /// The folder its data is in. A file without data of its own, a
+    /// directory or most empty files, has none, but for one between a
+    /// folder's files, which has that folder, as in the SDK: see
+    /// [`has_stream`](Entry::has_stream).
     pub folder: Option<usize>,
+    /// Whether it has data of its own in [`folder`](Entry::folder), a stream
+    /// of it, even of no bytes: not a directory, nor an empty file the
+    /// header marks without one.
+    pub has_stream: bool,
     /// Whether its data is encrypted.
     pub encrypted: bool,
 }
@@ -387,6 +433,16 @@ impl<R: Read + Seek> Archive<R> {
         Ok(file.to_vec())
     }
 
+    /// Not in the SDK: what folder `folder`'s data was compressed with, as
+    /// its header says, which is what a writer changing the archive can
+    /// compress again as it was; none for a folder that is not there, or
+    /// whose description is not one. The level is not in it, nor how hard
+    /// the encoder looked for matches: those are [`Method`]'s preset, and
+    /// the [`Coding::dictionary`] alone tells of them. See `docs/7z.md`.
+    pub fn folder_coding(&self, folder: usize) -> Option<Coding> {
+        dec::folder_coding(&self.db.db, folder)
+    }
+
     /// Whether the archive's header is encrypted, its names hidden without
     /// the password, as `7z a -mhe=on` writes it: what a writer changing it
     /// keeps with [`WriteOptions::encrypt_headers`].
@@ -419,6 +475,7 @@ fn entry_of(db: &ArEx, encrypted: &[bool], index: usize) -> Entry {
         mtime: db.mtime.check(index).then(|| db.mtime.vals[index]),
         ctime: db.ctime.check(index).then(|| db.ctime.vals[index]),
         folder: (folder != u32::MAX).then_some(folder as usize),
+        has_stream: folder != u32::MAX && db.has_stream(index),
         encrypted: encrypted.get(folder as usize).copied().unwrap_or(false),
     }
 }

@@ -47,6 +47,9 @@ fuzz_target!(|input: &[u8]| {
     let options = WriteOptions {
         method,
         filter,
+        // A dictionary of its own, from 4 KiB to 32 KiB, for LZMA and LZMA2;
+        // the other methods leave it be.
+        dictionary: (input[0] >= 128).then(|| 4096 << (input[0] % 4)),
         solid_block_size: match layout & 3 {
             0 => None,
             1 => Some(64),
