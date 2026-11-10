@@ -713,7 +713,7 @@ fn parse_options(repository: &Path) -> Result<Options_> {
         small: 5_000,
         many: 100_000,
         dir: None,
-        data: repository.join("target/testdata/silesia"),
+        data: testdata(repository).join("silesia"),
         threads: false,
     };
     let mut args = std::env::args().skip(1);
@@ -831,6 +831,14 @@ fn speed(amount: f64, seconds: f64, per_entry: bool) -> String {
     }
 }
 
+/// Where `scripts/testdata.py` keeps what it fetches and generates:
+/// `$HIVEPACK_TESTDATA` if set, as for the tests, or `target/testdata`.
+fn testdata(repository: &Path) -> PathBuf {
+    std::env::var_os("HIVEPACK_TESTDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repository.join("target/testdata"))
+}
+
 fn real_main() -> Result<()> {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let options = parse_options(&repository)?;
@@ -843,10 +851,7 @@ fn real_main() -> Result<()> {
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let dir = dir.canonicalize().map_err(|e| e.to_string())?;
     if options.threads {
-        let tool = repository.join(format!(
-            "target/testdata/7zz/7zz{}",
-            std::env::consts::EXE_SUFFIX
-        ));
+        let tool = testdata(&repository).join(format!("7zz/7zz{}", std::env::consts::EXE_SUFFIX));
         let tool = tool.exists().then_some(tool);
         threads::bench(
             &options.data,
@@ -867,16 +872,13 @@ fn real_main() -> Result<()> {
         options.small,
         options.many,
     )?;
-    let tool = repository
-        .join(format!(
-            "target/testdata/7zz/7zz{}",
-            std::env::consts::EXE_SUFFIX
-        ))
+    let tool = testdata(&repository)
+        .join(format!("7zz/7zz{}", std::env::consts::EXE_SUFFIX))
         .canonicalize()
         .map_err(|e| {
             format!("7zz: {e}: run `python3 scripts/testdata.py fetch --group generated`")
         })?;
-    let mut sdk = Sdk::spawn(&repository.join("target/testdata/7z-bench-sdk/oracle"))?;
+    let mut sdk = Sdk::spawn(&testdata(&repository).join("7z-bench-sdk/oracle"))?;
 
     println!("| Workload | hivepack-7z | The reference | Port / reference |\n|---|---|---|---|");
     let mut category = "";

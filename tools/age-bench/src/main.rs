@@ -352,7 +352,7 @@ fn parse_options(repository: &Path) -> Result<Options> {
         seconds: 0.5,
         limit_mb: 64,
         dir: None,
-        data: repository.join("target/testdata/silesia"),
+        data: testdata(repository).join("silesia"),
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -400,6 +400,14 @@ fn best(values: &[f64]) -> f64 {
     values.iter().copied().fold(f64::INFINITY, f64::min)
 }
 
+/// Where `scripts/testdata.py` keeps what it fetches and generates:
+/// `$HIVEPACK_TESTDATA` if set, as for the tests, or `target/testdata`.
+fn testdata(repository: &Path) -> PathBuf {
+    std::env::var_os("HIVEPACK_TESTDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repository.join("target/testdata"))
+}
+
 fn real_main() -> Result<()> {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let options = parse_options(&repository)?;
@@ -411,7 +419,7 @@ fn real_main() -> Result<()> {
     };
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let dir = dir.canonicalize().map_err(|e| e.to_string())?;
-    let mut go = Go::spawn(&repository.join("target/testdata/age-bench-go/oracle"))?;
+    let mut go = Go::spawn(&testdata(&repository).join("age-bench-go/oracle"))?;
     go.ask(&format!("keys {}", text(&dir)?))?;
 
     let random: RandomSource =

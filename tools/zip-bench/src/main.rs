@@ -814,7 +814,7 @@ fn parse_options() -> Result<Options> {
         small: 20_000,
         many: 200_000,
         dir: None,
-        data: repository.join("target/testdata/silesia"),
+        data: testdata(&repository).join("silesia"),
         threads: false,
     };
     let mut args = std::env::args().skip(1);
@@ -893,6 +893,14 @@ fn speed(amount: f64, seconds: f64, per_entry: bool) -> String {
     } else {
         format!("{:.1} MB/s", speed / 1e6)
     }
+}
+
+/// Where `scripts/testdata.py` keeps what it fetches and generates:
+/// `$HIVEPACK_TESTDATA` if set, as for the tests, or `target/testdata`.
+fn testdata(repository: &Path) -> PathBuf {
+    std::env::var_os("HIVEPACK_TESTDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repository.join("target/testdata"))
 }
 
 fn real_main() -> Result<()> {
@@ -975,7 +983,7 @@ fn real_main() -> Result<()> {
     );
 
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let program = repository.join("target/testdata/zip-bench-libzip/oracle");
+    let program = testdata(&repository).join("zip-bench-libzip/oracle");
     let mut bench = Bench {
         files,
         lists,

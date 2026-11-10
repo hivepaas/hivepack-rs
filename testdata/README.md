@@ -3,7 +3,7 @@
 [manifest.json](manifest.json) lists every set of test files: where it came from, its license, and what it holds.
 
 - **Committed sets** are in this folder. Each source keeps its license file next to its data.
-- **Fetched sets** are downloaded by `scripts/testdata.py`, checked against the SHA-256 in the manifest, and unpacked into `target/testdata/<set>`. Setting `HIVEPACK_TESTDATA` puts them somewhere else.
+- **Fetched sets** are downloaded by `scripts/testdata.py`, checked against the SHA-256 in the manifest, and unpacked into `target/testdata/<set>`. Setting `HIVEPACK_TESTDATA` puts them somewhere else, where the tests and the benchmarks in `tools/*-bench` look for them too: one cache can serve several worktrees.
 - **Generated sets** are made in the same place by zstd's own `decodecorpus` tool, or are the oracle programs in `tools/`. The script builds them from the zstd 1.5.7, zlib 1.3.2, bzip2 1.0.8, lz4 1.10.0, XZ Utils 5.8.4, libzip 1.12.1, nettle 3.10.2, 7-Zip 26.05, libarchive 3.8.10 and libxml2 2.15.4 releases with the system C compiler (and zstd's Makefile for `decodecorpus`, and 7-Zip's for `7zz`), and `tools/age-oracle` and `tools/tar-oracle` with Go, which downloads the modules their `go.sum` pins.
 
 ```sh
