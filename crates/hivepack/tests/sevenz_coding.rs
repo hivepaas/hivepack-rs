@@ -292,7 +292,7 @@ fn each_folder_takes_the_compression_set_before_it() {
     for (i, (method, filter, dictionary)) in settings.into_iter().enumerate() {
         writer.set_compression(method, filter, dictionary).unwrap();
         writer
-            .add_file(NewEntry::new(&format!("{i}")), &mut &data[..])
+            .add_file(NewEntry::new(format!("{i}")), &mut &data[..])
             .unwrap();
     }
     // A filter with a method that has none is refused, and nothing changes.
