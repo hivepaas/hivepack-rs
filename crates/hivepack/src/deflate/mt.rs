@@ -260,6 +260,41 @@ struct Kept {
     libdeflate: Option<Compressor>,
 }
 
+thread_local! {
+    /// The libdeflate compressor the last [`DeflateMt`] on this thread
+    /// kept, for the next to take at the same level. Making one takes up to
+    /// 9 MB, which with an entry of a few KB a [`DeflateMt`], as a ZIP
+    /// archive of small files has, took most of the time: 52 MB of headers
+    /// in 4,657 entries took 1.13 s at level 10 in 32 threads, and 0.16 s
+    /// with the compressor kept. A thread so holds one compressor once its
+    /// last [`DeflateMt`] is gone, till it ends.
+    static SPARE: std::cell::RefCell<Option<Compressor>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The thread's spare compressor, if it is at `level`.
+fn spare(level: i32) -> Option<Compressor> {
+    SPARE
+        .try_with(|spare| {
+            let mut spare = spare.borrow_mut();
+            match &*spare {
+                Some(compressor) if compressor.compression_level() as i32 == level => spare.take(),
+                _ => None,
+            }
+        })
+        .ok()
+        .flatten()
+}
+
+/// libdeflate's compressor is kept by the thread, for the next.
+impl Drop for Kept {
+    fn drop(&mut self) {
+        if let Some(compressor) = self.libdeflate.take() {
+            let _ = SPARE.try_with(|spare| *spare.borrow_mut() = Some(compressor));
+        }
+    }
+}
+
 /// `job`'s block, compressed with the compressor the thread keeps.
 fn compress_block(kept: &mut Kept, job: Job) -> Result<Block> {
     if job.library == Library::Libdeflate {
@@ -316,7 +351,13 @@ fn compress_block(kept: &mut Kept, job: Job) -> Result<Block> {
 fn compress_libdeflate(kept: &mut Kept, job: Job) -> Result<Block> {
     let compressor = match &mut kept.libdeflate {
         Some(compressor) if compressor.compression_level() as i32 == job.level => compressor,
-        slot => slot.insert(Compressor::new(job.level).ok_or_else(Error::stream)?),
+        slot => {
+            let made = match spare(job.level) {
+                Some(compressor) => compressor,
+                None => Compressor::new(job.level).ok_or_else(Error::stream)?,
+            };
+            slot.insert(made)
+        }
     };
     let input = &job.data[job.dict..];
     let mut bytes = vec![0; Compressor::part_bound(input.len())];
