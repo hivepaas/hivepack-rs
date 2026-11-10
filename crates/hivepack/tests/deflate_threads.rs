@@ -1,7 +1,9 @@
 //! Deflate in threads, as pigz does it (`deflate::DeflateMt`): the same
 //! output whatever the threads and the buffers, pigz's byte for byte where
 //! pigz is installed, read back by the port's inflate and by `gzip`, with
-//! flushes that leave what was given readable.
+//! flushes that leave what was given readable. With libdeflate's
+//! compressor (`Library::Libdeflate`), the same, and the stream is its
+//! blocks compressed one by one, joined.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -13,8 +15,9 @@ use std::process::{Command, Stdio};
 
 use hivepack::Threads;
 use hivepack::deflate::{
-    BLOCK_SIZE, DeflateMt, ErrorCode, Flush, InBuffer, Inflate, MtOptions, OutBuffer, Status,
-    Z_DEFAULT_COMPRESSION, Z_DEFAULT_STRATEGY, Z_FILTERED, Z_FIXED, Z_HUFFMAN_ONLY, Z_RLE, crc32,
+    BLOCK_SIZE, Compressor, DeflateMt, ErrorCode, Flush, InBuffer, Inflate, LIBDEFLATE_BLOCK_SIZE,
+    Library, MtOptions, OutBuffer, Status, Z_DEFAULT_COMPRESSION, Z_DEFAULT_STRATEGY, Z_FILTERED,
+    Z_FIXED, Z_HUFFMAN_ONLY, Z_RLE, crc32,
 };
 
 /// A small generator, for inputs and the sizes of calls.
@@ -483,5 +486,176 @@ fn it_is_pigz_s_byte_for_byte() {
             assert_eq!(gz[..9], pigz[..9], "{size} bytes, level {level}");
             assert_eq!(gz[10..], pigz[10..], "{size} bytes, level {level}");
         }
+    }
+}
+
+/// libdeflate's options at `level`, in `threads`, with blocks of
+/// `block_size` (0 for the default).
+fn libdeflate(level: i32, threads: Threads, block_size: usize) -> MtOptions {
+    MtOptions {
+        level,
+        threads,
+        block_size,
+        library: Library::Libdeflate,
+        ..MtOptions::default()
+    }
+}
+
+/// The raw stream libdeflate's blocks make of `data`, compressed one by
+/// one: every block but the last a part, then the last.
+fn libdeflate_joined(data: &[u8], level: i32, block_size: usize) -> Vec<u8> {
+    let mut compressor = Compressor::new(level).unwrap();
+    let mut stream = Vec::new();
+    let mut blocks: Vec<&[u8]> = data.chunks(block_size).collect();
+    let last = blocks.pop().unwrap_or(&[]);
+    for block in blocks {
+        let mut out = vec![0; compressor.deflate_compress_part_bound(block.len())];
+        let n = compressor.deflate_compress_part(block, &mut out);
+        stream.extend_from_slice(&out[..n]);
+    }
+    let mut out = vec![0; compressor.deflate_compress_bound(last.len())];
+    let n = compressor.deflate_compress(last, &mut out);
+    stream.extend_from_slice(&out[..n]);
+    stream
+}
+
+#[test]
+fn libdeflate_is_the_same_whatever_the_threads_and_the_buffers() {
+    const MIB: usize = LIBDEFLATE_BLOCK_SIZE;
+    let sizes = [0, 1, 1000, MIB - 1, MIB, MIB + 1, 3 * MIB + 12_345];
+    for (i, &size) in sizes.iter().enumerate() {
+        let data = input(size, i as u64 + 31);
+        let mut cases = vec![(Z_DEFAULT_COMPRESSION, 0), (1, 0), (12, 0), (9, 50_000)];
+        if size <= MIB + 1 {
+            cases.extend([(0, 0), (6, 0), (10, 0), (11, 0), (6, 1000)]);
+        }
+        for (level, block_size) in cases {
+            let mut want = None;
+            for threads in threads() {
+                let mut options = libdeflate(level, threads, block_size);
+                options.raw = true;
+                let what = format!("{size} bytes, {options:?}");
+                let whole = compress(&data, &options);
+                let bits = compress_in_bits(&data, &options, size as u64 + 7);
+                assert!(whole == bits, "{what}: in bits");
+                assert!(inflate(&whole, true) == data, "{what}: read back");
+                match &want {
+                    None => {
+                        let block = if block_size == 0 { MIB } else { block_size };
+                        let joined = libdeflate_joined(&data, level, block);
+                        assert!(whole == joined, "{what}: not its blocks joined");
+                        want = Some(whole);
+                    }
+                    Some(want) => assert!(&whole == want, "{what}"),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn libdeflate_s_member_is_gzip_s() {
+    let data = input(2 * LIBDEFLATE_BLOCK_SIZE + 99, 35);
+    for (level, xfl) in [(0, 4), (1, 4), (2, 0), (7, 0), (8, 2), (12, 2)] {
+        let gz = compress(&data, &libdeflate(level, Threads::of(4), 0));
+        assert_eq!(&gz[..8], [0x1f, 0x8b, 8, 0, 0, 0, 0, 0], "level {level}");
+        assert_eq!(gz[8], xfl, "level {level}");
+        let n = gz.len();
+        assert_eq!(gz[n - 8..n - 4], crc32(0, &data).to_le_bytes());
+        assert_eq!(gz[n - 4..], (data.len() as u32).to_le_bytes());
+        let mut options = libdeflate(level, Threads::of(4), 0);
+        options.raw = true;
+        let raw = compress(&data, &options);
+        assert!(raw == gz[10..n - 8], "level {level}");
+        assert!(inflate(&gz, false) == data);
+        // Reading it is no business of the compressor's: gzip reads it.
+        if level == 12
+            && let Some(out) = run("gzip", &["-dc"], &gz)
+        {
+            assert!(out == data);
+        }
+    }
+    // An empty input is libdeflate's empty stream: a stored block, final.
+    let mut options = libdeflate(12, Threads::One, 0);
+    options.raw = true;
+    assert_eq!(compress(&[], &options), [1, 0, 0, 0xFF, 0xFF]);
+}
+
+#[test]
+fn libdeflate_flushes_leave_what_was_given_readable() {
+    let data = input(3 * LIBDEFLATE_BLOCK_SIZE, 37);
+    let cuts = [
+        10,
+        5000,
+        5000,
+        LIBDEFLATE_BLOCK_SIZE + 7,
+        2 * LIBDEFLATE_BLOCK_SIZE,
+    ];
+    for flush in [Flush::SyncFlush, Flush::FullFlush] {
+        let mut want = None;
+        for threads in threads() {
+            let options = libdeflate(9, threads, 0);
+            let (gz, ends) = compress_flushed(&data, &cuts, flush, &options);
+            assert!(inflate(&gz, false) == data, "{flush:?}");
+            for (&cut, &end) in cuts.iter().zip(&ends) {
+                assert!(
+                    inflate_part(&gz[..end], false) == data[..cut],
+                    "{flush:?} at {cut}"
+                );
+                // Each block alone: what follows any flush needs nothing
+                // before it.
+                let rest = inflate(&gz[end..gz.len() - 8], true);
+                assert!(rest == data[cut..], "after {cut}");
+            }
+            match &want {
+                None => want = Some(gz),
+                Some(want) => assert!(&gz == want, "{flush:?}, {threads:?}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn libdeflate_options_are_checked() {
+    for level in [-1, 0, 1, 9, 10, 12] {
+        let options = libdeflate(level, Threads::One, 0);
+        assert!(DeflateMt::new(&options).is_ok(), "{level}");
+    }
+    for options in [
+        libdeflate(13, Threads::One, 0),
+        libdeflate(-2, Threads::One, 0),
+        MtOptions {
+            strategy: Z_FILTERED,
+            ..libdeflate(6, Threads::One, 0)
+        },
+        libdeflate(6, Threads::One, (1 << 30) + 1),
+    ] {
+        let e = DeflateMt::new(&options).unwrap_err();
+        assert_eq!(e.code(), ErrorCode::Stream, "{options:?}");
+        assert!(options.memory_usage(1).is_err());
+    }
+}
+
+#[test]
+fn libdeflate_memory_is_counted_by_level() {
+    let usage = |level| {
+        libdeflate(level, Threads::of(8), 0)
+            .memory_usage(1)
+            .unwrap()
+    };
+    // A block of 1 MiB, its room twice, and libdeflate's compressor: 0.2,
+    // 0.7 and 9 MB.
+    assert!(usage(1) < usage(6) && usage(6) < usage(12));
+    assert!(usage(12) - usage(6) > 7 << 20, "{} {}", usage(12), usage(6));
+    let options = libdeflate(12, Threads::of(8), 0);
+    let one = options.memory_usage(1).unwrap();
+    let three = options.memory_usage(3).unwrap();
+    for (limit, threads) in [(0, 1), (one, 1), (three, 3), (three - 1, 2), (u64::MAX, 8)] {
+        let limited = MtOptions {
+            memory_limit: limit,
+            ..options
+        };
+        assert_eq!(limited.threads_used().unwrap(), threads, "{limit}");
+        assert_eq!(DeflateMt::new(&limited).unwrap().threads(), threads);
     }
 }

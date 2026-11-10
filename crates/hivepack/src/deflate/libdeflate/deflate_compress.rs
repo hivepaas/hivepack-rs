@@ -3342,6 +3342,33 @@ impl Compressor {
         let max_blocks = in_nbytes.div_ceil(MIN_BLOCK_LENGTH).max(1);
         (5 * max_blocks) + in_nbytes + 5
     }
+
+    /// The bytes a compressor at `compression_level` takes, as
+    /// [`Compressor::new`] would make it: its state, and its parser's match
+    /// finder and buffers. `None` for a level [`Compressor::new`] refuses.
+    /// Not in libdeflate.
+    pub(crate) fn memory_usage(compression_level: i32) -> Option<u64> {
+        let level = match compression_level {
+            -1 => 6,
+            0..=12 => compression_level,
+            _ => return None,
+        };
+        let sequences = |n: usize| n * size_of::<DeflateSequence>();
+        let parser = match level {
+            0 => 0,
+            1 => size_of::<HtMatchfinder>() + sequences(FAST_SEQ_STORE_LENGTH + 1),
+            2..=9 => size_of::<HcMatchfinder>() + sequences(SEQ_STORE_LENGTH + 1),
+            _ => {
+                size_of::<NearOptimal>()
+                    + size_of::<BtMatchfinder>()
+                    + MATCH_CACHE_ROOM * size_of::<LzMatch>()
+                    + (MAX_BLOCK_LENGTH + 1) * size_of::<DeflateOptimumNode>()
+                    + DEFLATE_MAX_MATCH_OFFSET as usize
+                    + 1
+            }
+        };
+        Some((size_of::<Compressor>() + size_of::<State>() + parser) as u64)
+    }
 }
 
 /// `deflate_compress_none`, and a sync marker after it if not `last` but
