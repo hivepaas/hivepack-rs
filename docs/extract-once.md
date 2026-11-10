@@ -104,7 +104,10 @@ Measured on 2 GB of programs (a tar of `/usr/lib/x86_64-linux-gnu`, 5,012 files)
 | `.tar.zst` | 3.0 s | 1.7 s |
 | `.tar` | 0.52 s | 0.40 s |
 
-No more space: the data is written once, on the destination's file system. Moving into place is a hard link and a removal for each file, which takes nothing to speak of next to writing it.
+No more space: the data is written once, on the destination's file system. Moving into place is a hard link and a removal for each file. Next to writing a few large files that is nothing to speak of, but it is all on the caller's thread, after the last entry is read. 26,749 files of 2.3 GB (programs and libraries, `.tar.zst` of one frame) extract into tmpfs in 1.70 s on 32 threads, in November 2026. The caller's thread spends its last 0.15 s moving them into place, while every other thread is done: the links and removals, and, most of it, the work on each path (`Path::components` from the end, the names joined, hashed and folded, the spooled file looked up).
+
+**Not done yet: moving into place sooner.** Nothing is moved before the whole archive is checked (step 3), and that stays. Once it is, the moves are independent of one another, apart from the directories they need, which are made first. They could be shared among the threads that wrote the files, as their writes are. The path of each entry's place could also be worked out while it is read rather than at the end. Either would take most of that 0.15 s off.
+
 
 ## Tests
 
