@@ -126,6 +126,8 @@ liblz4 compresses frames more slowly than blocks (its linked blocks go through `
 
 ## Following new releases
 
+The release followed until now is kept in the [mirror of upstream sources](../testdata/README.md#the-upstream-sources-mirrored), to compare the new one with even once its URL is gone. The new release's source set goes into the manifest and the mirror: `python3 scripts/testdata.py mirror --set <name>`.
+
 When lz4 releases a new version:
 
 1. Diff the two tags' `lib/` and port each change.
