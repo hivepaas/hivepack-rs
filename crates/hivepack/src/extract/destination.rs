@@ -481,6 +481,19 @@ impl<'a> Destination<'a> {
 
     /// Sets the time of `name` in `dir`, without following a link.
     pub(crate) fn set_time(dir: &Dir, name: &str, mtime: SystemTime) -> Result<(), ErrorKind> {
+        // cap-std's times on Unix are from 1970 on, and it panics on one
+        // before: a directory of then is opened to read, without following a
+        // link, and given its time as a file is, which the standard library
+        // takes back to `time_t`'s start.
+        #[cfg(unix)]
+        if mtime < SystemTime::UNIX_EPOCH {
+            use cap_fs_ext::OpenOptionsMaybeDirExt;
+            let mut options = OpenOptions::new();
+            options.read(true).maybe_dir(true);
+            options.follow(FollowSymlinks::No);
+            let opened = dir.open_with(name, &options).map_err(ErrorKind::Io)?;
+            return set_modified(&opened.into_std(), mtime);
+        }
         let mtime = SystemTimeSpec::Absolute(cap_std::time::SystemTime::from_std(mtime));
         // A time the system cannot hold is left, as for files
         // (`zip::set_modified`).

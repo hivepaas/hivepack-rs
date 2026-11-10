@@ -451,6 +451,11 @@ path = "tests/rar_threads.rs"
 required-features = ["deflate", "rar"]
 
 [[test]]
+name = "sevenz_coding"
+path = "tests/sevenz_coding.rs"
+required-features = ["deflate", "sevenz"]
+
+[[test]]
 name = "sevenz_methods"
 path = "tests/sevenz_methods.rs"
 required-features = ["crypto", "deflate", "sevenz", "zstd"]
