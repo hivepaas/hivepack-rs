@@ -6,9 +6,9 @@ testdata/manifest.json lists every set:
 - Sets with "fetch" are downloaded, checked against their SHA-256 and unpacked
   into <cache>/<name>.
 - Sets with "generate" are made in <cache>/<name> by zstd's own tools, or
-  by the oracles in tools/, built from the pinned zstd, zlib, bzip2, lz4,
-  XZ Utils, libzip, nettle, libarchive and libxml2 releases, or with Go from the
-  modules their go.sum pins.
+  by the oracles in tools/, built from the pinned zstd, zlib, libdeflate,
+  bzip2, lz4, XZ Utils, libzip, nettle, libarchive and libxml2 releases, or
+  with Go from the modules their go.sum pins.
 
 The cache is target/testdata, or $HIVEPACK_TESTDATA when set.
 
@@ -306,6 +306,13 @@ LZ4_SOURCES = ["lz4.c", "lz4frame.c", "lz4hc.c", "xxhash.c"]
 LZ4_FLAGS = ["-DXXH_NAMESPACE=LZ4_"]
 
 
+# libdeflate: its compressor and what it needs, with the flags of its CMake
+# build for releases (-O2 -DNDEBUG); the processor features are looked up
+# at run time, as there, though the compressor's output does not depend on
+# them.
+LIBDEFLATE_SOURCES = ["deflate_compress.c", "utils.c", "x86/cpu_features.c", "arm/cpu_features.c"]
+
+
 # liblzma: the folders of its C files, without the multithreaded coders, the
 # hardware queries (which need tuklib), the small CRCs of HAVE_SMALL, and
 # the programs that write tables. delta/ and simple/ are left out with
@@ -560,7 +567,8 @@ def build_oracle(source: Path, sources: list, included: list, folder: Path, extr
     tools/zlib-oracle is built with zlib's, without the gzip file functions
     (gz*.c), which it does not use, and with contrib/infback9 for
     Deflate64. tools/bzip2-oracle is built with libbzip2's BZIP2_SOURCES,
-    tools/lz4-oracle with liblz4's LZ4_SOURCES, and tools/xz-oracle with
+    tools/lz4-oracle with liblz4's LZ4_SOURCES, tools/libdeflate-oracle
+    with libdeflate's LIBDEFLATE_SOURCES, and tools/xz-oracle with
     liblzma's, from LIBLZMA_DIRS, and its own config.h.
     tools/nettle-oracle is built with nettle's NETTLE_SOURCES.
     tools/iso-oracle is built with libarchive's LIBARCHIVE_SOURCES, its
@@ -680,6 +688,12 @@ def build_oracle(source: Path, sources: list, included: list, folder: Path, extr
         files += [str(lz4 / name) for name in LZ4_SOURCES]
         subprocess.run([compiler, "-O2", *LZ4_FLAGS, f"-I{lz4}", *files, "-o", str(folder / "oracle")],
                        check=True)
+        return
+    libdeflate = next(source.glob("libdeflate-*"), None)
+    if libdeflate is not None:
+        files += [str(libdeflate / "lib" / name) for name in LIBDEFLATE_SOURCES]
+        subprocess.run([compiler, "-O2", "-DNDEBUG", f"-I{libdeflate}", *files,
+                        "-o", str(folder / "oracle")], check=True)
         return
     nettle = next(source.glob("nettle-*"), None)
     if nettle is not None:
