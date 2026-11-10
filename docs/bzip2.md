@@ -105,6 +105,8 @@ So 16–21× for compression and 16–20× for decompression on 16 cores, where 
 
 ## Following new releases
 
+The release followed until now is kept in the [mirror of upstream sources](../testdata/README.md#the-upstream-sources-mirrored), to compare the new one with even once its URL is gone. The new release's source set goes into the manifest and the mirror: `python3 scripts/testdata.py mirror --set <name>`.
+
 When bzip2 releases a new version:
 
 1. Diff the two tags and port each change.

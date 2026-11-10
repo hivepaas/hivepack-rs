@@ -53,6 +53,8 @@ As in libarchive: a name and a symbolic link's target are each at most 1 MiB (lo
 
 ## Following new releases
 
+The release followed until now is kept in the [mirror of upstream sources](../testdata/README.md#the-upstream-sources-mirrored), to compare the new one with even once its URL is gone. The new release's source set goes into the manifest and the mirror: `python3 scripts/testdata.py mirror --set <name>`.
+
 A new libarchive release's changes to `archive_read_support_format_cpio.c` and `archive_read_support_filter_rpm.c`, and to what they call in `archive_read.c` and `archive_entry.c`, are ported; the manifest's `libarchive-*-source` set and `UPSTREAM_VERSION` name the release, and the `libarchive-cpio` set takes its new test archives.
 
 ## Licenses

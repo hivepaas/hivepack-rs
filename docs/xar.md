@@ -62,6 +62,8 @@ As in libarchive: the TOC is read whole before the first entry, every record kep
 
 ## Following new releases
 
+The release followed until now is kept in the [mirror of upstream sources](../testdata/README.md#the-upstream-sources-mirrored), to compare the new one with even once its URL is gone. The new release's source set goes into the manifest and the mirror: `python3 scripts/testdata.py mirror --set <name>`.
+
 A new libarchive release's changes to `archive_read_support_format_xar.c`, and to what it calls in `archive_read.c`, `archive_entry.c` and `archive_string.c`, are ported; a new libxml2 release's changes to its reader and push parser too, when libarchive's builds take it. The manifest's `libarchive-*-source` and `libxml2-*-source` sets and `UPSTREAM_VERSION` name the releases.
 
 ## Licenses
