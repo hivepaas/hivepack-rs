@@ -1,6 +1,6 @@
-//! What the comparison tests with zlib share: the oracle program, built by
-//! `scripts/testdata.py`, a seeded generator, and the text forms of their
-//! requests and answers.
+//! What the comparison tests with zlib and libdeflate share: the oracle
+//! programs, built by `scripts/testdata.py`, a seeded generator, and the
+//! text forms of their requests and answers.
 
 // Test helpers: a broken oracle should stop the test.
 #![allow(dead_code, clippy::expect_used, clippy::panic)]
@@ -27,10 +27,16 @@ impl Oracle {
     /// `HIVEPACK_TESTDATA_REQUIRED` where it builds the oracle, and then a
     /// missing oracle fails the test.
     pub fn spawn() -> Option<Oracle> {
+        Oracle::spawn_named("zlib-oracle")
+    }
+
+    /// The oracle of the set `name`, as [`Oracle::spawn`] the zlib one:
+    /// `libdeflate-oracle` for libdeflate's compressor.
+    pub fn spawn_named(name: &str) -> Option<Oracle> {
         let cache = std::env::var_os("HIVEPACK_TESTDATA")
             .map(PathBuf::from)
             .unwrap_or_else(|| repository().join("target/testdata"));
-        let folder = cache.join("zlib-oracle");
+        let folder = cache.join(name);
         if !folder.join(".complete").exists() {
             let required = std::env::var("HIVEPACK_TESTDATA_REQUIRED").unwrap_or_default();
             assert!(

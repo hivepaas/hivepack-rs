@@ -92,6 +92,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "deflate_libdeflate"
+path = "fuzz_targets/deflate_libdeflate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "inflate9"
 path = "fuzz_targets/inflate9.rs"
 test = false

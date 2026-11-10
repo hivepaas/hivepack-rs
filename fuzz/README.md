@@ -24,6 +24,7 @@ nightly, where `rust-toolchain.toml` pins a stable: the nightly CI uses
 | `zip_split` | Cutting the input into volumes its first bytes pick and opening them as a split archive (`Volumes`), leniently and with `ZIP_CHECKCONS`, reading every entry, decompressed and raw: no panic, and written again as an archive of one disk, the same entries (libzip reads no split archives: `crates/hivepack/tests/zip_split.rs` compares them with 7-Zip) |
 | `extract` | Extracting the input as a ZIP archive with hivepack::extract, with options its first byte picks, cancelled after some progress if it says so: nothing written beside the destination, every link created staying inside it, the summary counting what is there, and no file left cut off |
 | `zip_edit` | Opening the input as a ZIP archive, making the edits its first bytes pick (encrypting among them) and writing it: the archive written opens with the entries as edited, their names, comments, attributes, times, sizes and data, read with the passwords the edits set (`crates/hivepack/tests/zip_oracle.rs` compares the edits and the bytes written with libzip) |
+| `deflate_libdeflate` | Compressing the input with the port of libdeflate's compressor, at a level from -1 to 12 its first byte picks: a stream that inflates back, the same from the same compressor again and from a new one, that does not fit one byte shorter, and in a room its second byte picks fits as the same stream or not at all (libdeflate is not linked here: `crates/hivepack/tests/deflate_libdeflate.rs` compares the streams with it) |
 | `inflate9` | Decoding the input as Deflate64 all at once and in pieces its first eight bytes pick: the same result, message, input used and output calls both ways, and with `Inflate9` in pieces of input and output the same end, message and output (zlib's Deflate64 decoder is not in libz-sys; `crates/hivepack/tests/deflate_deflate64.rs` compares with it) |
 | `sevenz` | Opening the input as a 7z archive, listing it, reading its files in pieces of all sizes, decoding its folders and extracting its files, with small limits on memory and output: no panic (`crates/hivepack/tests/sevenz_oracle.rs` compares the results with the LZMA SDK's) |
 | `sevenz_write` | Writing an archive that the input describes, its first bytes picking the method, filter, solid blocks and encryption and the rest cut into entries and writes of different sizes, and reading it back: the same names, kinds and data, and no panic (`crates/hivepack/tests/sevenz_writer.rs` has `7zz` and the SDK read what it writes) |
@@ -74,7 +75,7 @@ match finder gathers its candidates and prefetches them, as libzstd does,
 so fuzz them both ways (CI runs `compress` with it, `compress_stream`
 without).
 
-The `inflate`, `deflate`, `inflate9` and `divsufsort` targets start from
+The `inflate`, `deflate`, `deflate_libdeflate`, `inflate9` and `divsufsort` targets start from
 an empty corpus, CI seeds `bzip2` with the streams and inputs of
 `testdata/oracle/bzip2.txt`, `xz` with the inputs of
 `testdata/oracle/xz.txt` and `testdata/oracle/xz-mt.txt`, behind the byte for their decoder, and `xz_encode`
