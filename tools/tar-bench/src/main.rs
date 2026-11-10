@@ -578,7 +578,7 @@ fn parse_options(repository: &Path) -> Result<Options> {
         small: 20_000,
         many: 200_000,
         dir: None,
-        data: repository.join("target/testdata/silesia"),
+        data: testdata(repository).join("silesia"),
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -727,6 +727,14 @@ fn print_row(w: &Workload, amount: f64, port_time: f64, go_time: f64) -> Result<
     std::io::stdout().flush().map_err(|e| e.to_string())
 }
 
+/// Where `scripts/testdata.py` keeps what it fetches and generates:
+/// `$HIVEPACK_TESTDATA` if set, as for the tests, or `target/testdata`.
+fn testdata(repository: &Path) -> PathBuf {
+    std::env::var_os("HIVEPACK_TESTDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repository.join("target/testdata"))
+}
+
 fn real_main() -> Result<()> {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let options = parse_options(&repository)?;
@@ -738,7 +746,7 @@ fn real_main() -> Result<()> {
     };
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let dir = dir.canonicalize().map_err(|e| e.to_string())?;
-    let mut go = Go::spawn(&repository.join("target/testdata/tar-bench-go/oracle"))?;
+    let mut go = Go::spawn(&testdata(&repository).join("tar-bench-go/oracle"))?;
     let (big_list, small_list, big_bytes) =
         make_lists(&options.data, &dir, options.limit_mb << 20, options.small)?;
 

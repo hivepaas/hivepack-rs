@@ -18,7 +18,7 @@
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
@@ -156,10 +156,18 @@ fn round(seconds: f64, mut one: impl FnMut() -> Result<(Duration, u64)>) -> Resu
     Ok(total as f64 / spent.as_secs_f64())
 }
 
+/// Where `scripts/testdata.py` keeps what it fetches and generates:
+/// `$HIVEPACK_TESTDATA` if set, as for the tests, or `target/testdata`.
+fn testdata(repository: &Path) -> PathBuf {
+    std::env::var_os("HIVEPACK_TESTDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repository.join("target/testdata"))
+}
+
 fn real_main() -> Result<()> {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let options = parse_options()?;
-    let testdata = repository.join("target/testdata");
+    let testdata = testdata(&repository);
     let mut unrar = UnRar::spawn(&testdata.join("rar-bench-unrar/oracle"))?;
 
     let mut usable = Vec::new();
