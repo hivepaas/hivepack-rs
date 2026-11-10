@@ -4,7 +4,7 @@
 //! must be the same, byte for byte.
 //!
 //! ```text
-//! cargo run --release -p deflate-bench -- [--levels 1,6,9] [--rounds 3] [--seconds 0.5] [--stream | --compress] PATH...
+//! cargo run --release -p deflate-bench -- [--levels 1,6,9] [--rounds 3] [--seconds 0.5] [--stream | --compress | --libdeflate] PATH...
 //! ```
 //!
 //! Compression is one call, with all the input and room for all the
@@ -18,15 +18,21 @@
 //! take turns between the implementations, so a noisy machine slows them
 //! alike. Speeds are the range over rounds in MB/s of uncompressed data
 //! (10^6 bytes per second), and the output is a Markdown table.
+//!
+//! With `--libdeflate`, it times the port of libdeflate's compressor
+//! against libdeflate 1.26 instead, at levels 0 to 12 (see
+//! `libdeflate.rs`), and the zlib port beside them.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+mod libdeflate;
+
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress};
 use hivepack::deflate::{Deflate, Flush, InBuffer, Inflate, OutBuffer, Status};
 
-type Result<T> = std::result::Result<T, String>;
+pub(crate) type Result<T> = std::result::Result<T, String>;
 
 /// The piece size with `--stream`: `CHUNK` in zlib's `zpipe.c`.
 const CHUNK: usize = 16384;
@@ -206,13 +212,14 @@ fn compress(level: u32, data: &[u8]) -> Result<Vec<u8>> {
     }
 }
 
-struct Options {
-    levels: Vec<u32>,
-    rounds: usize,
+pub(crate) struct Options {
+    pub(crate) levels: Vec<u32>,
+    pub(crate) rounds: usize,
     budget: Duration,
     stream: bool,
     compress: bool,
-    paths: Vec<PathBuf>,
+    libdeflate: bool,
+    pub(crate) paths: Vec<PathBuf>,
 }
 
 fn options(args: impl Iterator<Item = String>) -> Result<Options> {
@@ -222,6 +229,7 @@ fn options(args: impl Iterator<Item = String>) -> Result<Options> {
         budget: Duration::from_millis(500),
         stream: false,
         compress: false,
+        libdeflate: false,
         paths: Vec::new(),
     };
     let mut args = args.peekable();
@@ -236,6 +244,7 @@ fn options(args: impl Iterator<Item = String>) -> Result<Options> {
             }
             "--stream" => options.stream = true,
             "--compress" => options.compress = true,
+            "--libdeflate" => options.libdeflate = true,
             "--rounds" => options.rounds = value()?.parse().map_err(|_| "bad --rounds")?,
             "--seconds" => {
                 let seconds: f64 = value()?.parse().map_err(|_| "bad --seconds")?;
@@ -244,7 +253,7 @@ fn options(args: impl Iterator<Item = String>) -> Result<Options> {
             }
             "-h" | "--help" => {
                 return Err(
-                    "usage: deflate-bench [--levels 1,6,9] [--rounds N] [--seconds S] [--stream | --compress] PATH..."
+                    "usage: deflate-bench [--levels 1,6,9] [--rounds N] [--seconds S] [--stream | --compress | --libdeflate] PATH..."
                         .into(),
                 );
             }
@@ -259,7 +268,7 @@ fn options(args: impl Iterator<Item = String>) -> Result<Options> {
 }
 
 /// Every input file under `paths`, sorted within each folder.
-fn inputs(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
+pub(crate) fn inputs(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut found = Vec::new();
     for path in paths {
         if path.is_dir() {
@@ -382,6 +391,9 @@ fn bench(options: &Options, codecs: &mut [Box<dyn Codec>], input: &Path) -> Resu
 
 fn run() -> Result<()> {
     let options = options(std::env::args().skip(1))?;
+    if options.libdeflate {
+        return libdeflate::run(&options);
+    }
     let mut codecs: Vec<Box<dyn Codec>> = vec![
         Box::new(Zlib {
             stream: Decompress::new(false),

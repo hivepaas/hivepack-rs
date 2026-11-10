@@ -20,6 +20,18 @@ assert_eq!(&out[..written], b"hello");
 
 It also has zlib's checksums, `crc32` and `adler32`, with their `_combine` functions.
 
+Beside the port of zlib, `Compressor` is a port of [libdeflate](https://github.com/ebiggers/libdeflate) 1.26's compressor: a whole buffer compressed at once, raw deflate, at levels 0 to 12, with libdeflate's output, byte for byte. Its levels 10 to 12 find the cheapest way through each block, and make smaller streams than zlib's level 9.
+
+```rust
+use hivepack::deflate::Compressor;
+
+let data = b"compressed in one call ".repeat(1000);
+let mut compressor = Compressor::new(12).expect("a level from 0 to 12");
+let mut out = vec![0; compressor.deflate_compress_bound(data.len())];
+let size = compressor.deflate_compress(&data, &mut out);
+assert!(size > 0 && size < 200);
+```
+
 The goals:
 
 - **No unsafe code.** The crate forbids it; see [docs/safety.md](../../../../docs/safety.md).
@@ -63,3 +75,5 @@ With the `unsafe-fast` feature, off by default (see [docs/unsafe.md](../../../..
 ## License
 
 The zlib license, the license of the code it is ported from. See [LICENSE](LICENSE). Copyright (C) 1995-2026 Jean-loup Gailly and Mark Adler, and (c) 2026 HivePaaS.
+
+The port of libdeflate's compressor, in `libdeflate/`, is under the MIT license, libdeflate's. See [libdeflate/LICENSE](libdeflate/LICENSE). Copyright 2016 Eric Biggers, 2024 Google LLC, and (c) 2026 HivePaaS.
