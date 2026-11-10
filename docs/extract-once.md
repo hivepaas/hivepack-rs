@@ -1,6 +1,6 @@
-# Reading a tar archive once (design)
+# Reading an archive once (design)
 
-> **Status:** built for `extract_tar` into a folder (hivepack-rs#184). Measured below.
+> **Status:** built for `extract_tar` into a folder (hivepack-rs#184), and for `extract_cpio` and `extract_xar`, a package's payloads among them ([below](#cpio-and-xar)). Measured below.
 
 `extract_tar` reads a tar stream twice into a folder: first the headers, for every check, then the entries are written (see [extract.md](extract.md#tar)). A compressed tar is therefore decompressed twice. On 3 GB of programs, 32 threads:
 
@@ -84,7 +84,7 @@ A private folder is never mistaken for one in use: its `owner` is locked for as 
 ### 6. What stays as it is
 
 - **`extract_tar_to`** (into another archive, for packwing's conversions) has no folder to write into first. It reads twice, as today.
-- **cpio, XAR and ISO 9660**, which also read twice, are left for later. cpio writes a file's data under its first name with its last header (`groups`), which needs its whole archive. The same private folder works for them once tar's is in.
+- **cpio and XAR** read once too, in the same private folder: see [cpio and XAR](#cpio-and-xar). **ISO 9660** reads twice still: an image is read where its directories say, so a second reading of an image on disk reads it again without decompressing anything, but for an image under a compressor.
 - What is written, the summary, the errors and the order of the questions are the same as today. Two things change:
   - partial files and directories are never seen in the destination, where today an error after writing began left them;
   - a file `overwrite` replaces is renamed over, not truncated in place.
@@ -108,6 +108,46 @@ No more space: the data is written once, on the destination's file system. Movin
 
 **Not done yet: moving into place sooner.** Nothing is moved before the whole archive is checked (step 3), and that stays. Once it is, the moves are independent of one another, apart from the directories they need, which are made first. They could be shared among the threads that wrote the files, as their writes are. The path of each entry's place could also be worked out while it is read rather than at the end. Either would take most of that 0.15 s off.
 
+## cpio and XAR
+
+`extract_cpio` and `extract_xar` read twice as tar did, for the same reasons, so a compressed cpio archive (an RPM package's payload, an initramfs image) and a package's payloads were decompressed twice. XAR did more: its first reading read every file's data to its end for its checksums, and opened and read every payload through its layers (pbzx, gzip) to plan it, and its second reading did it all again. Both now read once, into the private folder of [the design](#the-design), with what tar shares with them in `extract/once.rs`: the private folder made and removed, a file's data written into it (by the writing threads, or on the caller's), the checks after the one reading, what is in the way looked at, and the moving into place. Into a sink, both read twice as before.
+
+### cpio
+
+A file with several names is an entry for each name, and its data comes with any of them: with the last in newc, as GNU cpio and RPM write it, the others empty; with each in odc. The first reading found the last of them with data (`groups`), and the second wrote the file under its first name when that data came. Read once:
+
+- The data that comes with a file's first name, or with a later name of it (a hard link to an earlier entry's path, with data), is written into the private folder, named by the index of the entry it came with, if the file may be kept (picked, a name that is one or may be renamed to one, within the limit on one entry, by the size of this data).
+- When a later name's data comes, what came before for the same file is removed from the private folder first, once a thread writing it is done, and no longer counts against `max_total_size`: an odc archive's file of three names is written three times, but takes room once, and passes the limit as it did, once.
+- Once the stream has ended, the first name's size is the last data's, as before, for the checks. Moving into place, the first name takes the last data written, and the other names are linked to it in the archive's order, which always has the first name first: nothing waits for a later entry any more.
+- A file whose names have no data at all is the empty file its first name wrote.
+
+The stream `open` gives is read ahead by a thread of its own, as tar's is, with writing threads, so the reader is `Send`: `extract_cpio`'s signature changes as `extract_tar`'s did.
+
+### XAR
+
+A XAR archive's files are read in the order of their data in its heap. Each file's data is written into the private folder as it comes, and read to its end, where its checksums are: a file damaged anywhere stops the extraction before anything moves, as the first reading stopped it before anything was written. A file not kept is read to its end as before.
+
+A payload, with `Packages::Expand`, is opened through its layers once, and its cpio archive read once into the same private folder as `extract_cpio` reads one, its files named by the payload's index and theirs (`3-17`), its data decoded in threads as before and read ahead by a thread of its own, its files written by the writing threads. What the payload's layers read of its entry's data before its container is known is copied as it goes into the file it would be, if it may be kept: a payload that is no cpio archive is a file, written as it is, layers and all, what its layers read of it first and then the rest; one that is, a folder, and the copy is removed before its archive is read. The copy holds what the layers read to tell: a few chunks at most.
+
+Once the stream has ended, each payload is checked first, in the archive's order, as the first reading checked each as it came to it, then the archive's own entries; the limits count them all together, as before. What is in the destination is looked at for every entry to move, a payload's in its folder, before any does. Then the entries move into place in the archive's order, and each payload's into its folder when the folder is made, its links created and its directories' times set there, as before.
+
+Two things change besides the reading:
+
+- directories are told to `Options::on_written`, a payload's folder among them, as tar's are, where XAR told files alone;
+- an error that came late in the stream, after a payload's checks would have stopped the first reading, now comes first: the payloads are checked once the whole archive is read.
+
+### Measured
+
+1,404 MB of programs and libraries (4,000 files of `/usr/lib/x86_64-linux-gnu`) into ext4 on NVMe, 32 threads, `open::Opener::threads` as many, the best of three:
+
+| | Read twice | Read once |
+|---|---|---|
+| `.cpio` | 0.33 s | 0.26 s |
+| `.cpio.gz` | 4.15 s | 1.91 s |
+| `.cpio.xz` (`xz -T0`) | 1.34 s | 0.76 s |
+| `.cpio.zst` | 2.23 s | 1.10 s |
+| `.pkg`, its `Payload` pbzx over odc (16 MiB chunks, xz -1) | 1.19 s | 0.68 s |
+| `.pkg`, its `Payload` gzip over odc | 4.16 s | 1.97 s |
 
 ## Tests
 
@@ -117,7 +157,8 @@ No more space: the data is written once, on the destination's file system. Movin
 - `on_unnamable` with Rename, Skip and Stop gives the same names as today.
 - Conflicts: a file in the way stops before anything moves; `overwrite` replaces; a directory there is merged.
 - A private folder left by a process killed mid-extraction is removed by `remove_stale` and by the next extraction there. One whose owner still runs is never removed: a test holds the lock from another process.
-- The fuzz target `extract_tar` runs on the new path. Afterwards, nothing may be left in the destination but the archive's entries, and no `.hivepack-extracting-*` may remain.
+- The fuzz targets `extract_tar`, `extract_cpio` and `extract_xar` run on the new path. Afterwards, nothing may be left in the destination but the archive's entries, and no `.hivepack-extracting-*` may remain.
+- cpio (`tests/extract_cpio.rs`): read once into a folder, twice into a sink, where an archive that changes stops; refused at its last entry, or cancelled, the destination as it was; an odc file of three names whose data, larger than half the limit on all, passes it, with threads and without; what is in the way before anything moves. XAR (`tests/extract_xar.rs`): read once, payloads and all, and told by their paths there; refused in a payload, or a payload's file in the way in its folder, the destination as it was; a payload that is no cpio archive written as it is, layers and all, with threads and without, and left out when not picked.
 - Timing on 3 GB, before and after, as above.
 
 ## Decisions

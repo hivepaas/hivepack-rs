@@ -1,10 +1,10 @@
 //! Extracting cpio archives made to attack extractors, as `tests/tar.rs`
 //! does for tar: names that climb out, the same path twice, symbolic and
 //! hard links, devices, the limits, archives cut short or without their
-//! trailer, garbage passed over, and an archive that changes between its
-//! two readings. Each must stop with its reason and leave nothing outside
-//! the destination, and nothing at all when the checks before writing stop
-//! it. Hard links come as GNU cpio and RPM write them in newc, the data on
+//! trailer, garbage passed over; read once into a folder, through a private
+//! folder, and twice into a sink, where an archive that changes between its
+//! two readings stops. Each must stop with its reason and leave nothing
+//! outside the destination, and nothing at all when the checks stop it. Hard links come as GNU cpio and RPM write them in newc, the data on
 //! the last, and as odc has them, the data on each. Then libarchive's test
 //! archives, each extracted or stopped with its reason.
 
@@ -18,7 +18,8 @@ use std::io::Cursor;
 use std::path::Path;
 
 use hivepack::extract::{
-    ErrorKind, Limits, Links, NameError, OnRefused, Options, Summary, extract_cpio,
+    Entry, ErrorKind, Limits, Links, NameError, OnRefused, Options, Sink, Summary, extract_cpio,
+    extract_cpio_to,
 };
 use support::{Scratch, listing, options};
 
@@ -510,13 +511,37 @@ fn entries_after_garbage_are_refused() {
     assert_eq!(summary.skipped.len(), 1);
 }
 
+/// Into a folder the archive is read once, through a private folder that is
+/// gone once the entries are in place; into a sink it is read twice, and an
+/// archive that changes between the readings stops.
 #[test]
-fn an_archive_that_changes_between_readings_stops() {
-    let first = newc(&[entry("a", What::File(b"one"))]);
-    let second = newc(&[entry("b", What::File(b"one"))]);
+fn into_a_folder_the_archive_is_read_once() {
+    let first = newc(&[
+        entry("a", What::File(b"one")),
+        entry("b", What::File(b"two")),
+    ]);
     let readings = Cell::new(0);
     let scratch = Scratch::new();
-    let e = extract_cpio(
+    let summary = extract_cpio(
+        || {
+            readings.set(readings.get() + 1);
+            Ok(Cursor::new(first.clone()))
+        },
+        &scratch.out(),
+        &portable(),
+    )
+    .unwrap();
+    assert_eq!(readings.get(), 1);
+    assert_eq!(summary.files, 2);
+    assert_eq!(listing(&scratch.out()), ["a", "b"]);
+
+    let second = newc(&[
+        entry("a", What::File(b"one")),
+        entry("c", What::File(b"two")),
+    ]);
+    let readings = Cell::new(0);
+    let mut names = Names::default();
+    let e = extract_cpio_to(
         || {
             readings.set(readings.get() + 1);
             Ok(Cursor::new(if readings.get() == 1 {
@@ -525,12 +550,139 @@ fn an_archive_that_changes_between_readings_stops() {
                 second.clone()
             }))
         },
-        &scratch.out(),
+        &mut names,
         &portable(),
     )
     .unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Changed), "{e}");
     assert_eq!(readings.get(), 2);
+    for name in &names.0 {
+        assert!(["a", "b"].contains(&name.as_str()), "{name}");
+    }
+}
+
+/// An archive refused at its last entry leaves the destination as it was:
+/// what was there stays, nothing of the archive appears, and no private
+/// folder is left; one made for it is gone too.
+#[test]
+fn refused_at_its_end_the_destination_is_as_it_was() {
+    let archive = newc(&[
+        entry("d", What::Dir),
+        entry("d/a", What::File(b"one")),
+        link("b", b"", 7, 2),
+        link("c", b"two", 7, 2),
+        // The same path again, refused once the archive is read.
+        entry("B", What::File(b"three")),
+    ]);
+    let scratch = Scratch::new();
+    std::fs::create_dir(scratch.out()).unwrap();
+    std::fs::write(scratch.out().join("kept"), "mine").unwrap();
+    let e = extract(&archive, &scratch.out(), &portable()).unwrap_err();
+    assert!(matches!(e.kind, ErrorKind::Duplicate { .. }), "{e}");
+    assert_eq!(listing(&scratch.out()), ["kept"]);
+    assert_eq!(read(&scratch.out().join("kept")), b"mine");
+    let scratch = Scratch::new();
+    extract(&archive, &scratch.out(), &portable()).unwrap_err();
+    assert!(!scratch.out().exists());
+    // Cancelled while it is read: nothing either.
+    let cancel = hivepack::extract::Cancel::new();
+    cancel.cancel();
+    let e = extract(
+        &archive,
+        &scratch.out(),
+        &options(|o| o.cancel = Some(cancel.clone())),
+    )
+    .unwrap_err();
+    assert!(matches!(e.kind, ErrorKind::Cancelled), "{e}");
+    assert!(!scratch.out().exists());
+}
+
+/// In odc each name of a file comes with its data: what came with the earlier
+/// names goes as the next comes, and counts no more against the limit on all
+/// that is written, which the file passes once, not three times.
+#[test]
+fn a_file_s_data_that_comes_again_counts_once() {
+    let data = vec![5u8; 40_000];
+    let archive = odc(&[
+        link("a", &data, 7, 3),
+        link("b", &data, 7, 3),
+        link("c", &data, 7, 3),
+    ]);
+    for threads in [1, 3] {
+        let scratch = Scratch::new();
+        let summary = extract(
+            &archive,
+            &scratch.out(),
+            &options(|o| {
+                o.limits.max_total_size = 50_000;
+                o.threads = hivepack::Threads::of(threads);
+            }),
+        )
+        .unwrap();
+        assert_eq!((summary.files, summary.bytes), (3, 40_000), "{threads}");
+        assert_eq!(listing(&scratch.out()), ["a", "b", "c"], "{threads}");
+        assert!(read(&scratch.out().join("c")) == data, "{threads}");
+        assert!(same_file(
+            &scratch.out().join("a"),
+            &scratch.out().join("c")
+        ));
+    }
+}
+
+/// What is in the destination is found in the way before anything moves: a
+/// file there stops the extraction, and nothing of the archive appears; with
+/// `overwrite`, it is replaced, whole; a directory there is merged into.
+#[test]
+fn what_is_there_is_found_before_anything_moves() {
+    let archive = newc(&[
+        entry("d", What::Dir),
+        entry("d/new", What::File(b"new")),
+        entry("a", What::File(b"from the archive")),
+    ]);
+    let scratch = Scratch::new();
+    std::fs::create_dir_all(scratch.out().join("d")).unwrap();
+    std::fs::write(scratch.out().join("d/old"), "old").unwrap();
+    std::fs::write(scratch.out().join("a"), "mine").unwrap();
+    let e = extract(&archive, &scratch.out(), &portable()).unwrap_err();
+    assert!(matches!(e.kind, ErrorKind::Exists), "{e}");
+    assert_eq!(listing(&scratch.out()), ["a", "d/", "d/old"]);
+    assert_eq!(read(&scratch.out().join("a")), b"mine");
+    extract(&archive, &scratch.out(), &options(|o| o.overwrite = true)).unwrap();
+    assert_eq!(listing(&scratch.out()), ["a", "d/", "d/new", "d/old"]);
+    assert_eq!(read(&scratch.out().join("a")), b"from the archive");
+}
+
+/// A sink that keeps the names of the files it is given, and writes nothing.
+#[derive(Default)]
+struct Names(Vec<String>);
+
+impl Sink for Names {
+    fn directory(&mut self, _: &Entry<'_>) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn start_file(&mut self, entry: &Entry<'_>) -> std::io::Result<()> {
+        self.0.push(entry.path.join("/"));
+        Ok(())
+    }
+
+    fn write(&mut self, _: &[u8]) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn finish_file(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn discard_file(&mut self) {}
+
+    fn symlink(&mut self, _: &Entry<'_>, _: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn hard_link(&mut self, _: &Entry<'_>, _: &[String]) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// libarchive's cpio test archives, when the core sets are there

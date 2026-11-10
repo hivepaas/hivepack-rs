@@ -1,18 +1,22 @@
 //! Extracting a cpio archive that `hivepack::cpio` reads.
 //!
 //! A cpio archive is a run of entries, each header before its data, as in
-//! tar: it is read twice, once for the headers, the data skipped, and once
-//! to write, each header compared with the first reading's. The caller
-//! gives a function that opens it again, which for a compressed archive or
-//! an RPM package's payload decompresses it again.
+//! tar. Into a folder, it is read once, as tar's is: each file's data written
+//! into a private folder in the destination as it comes, the entries checked
+//! once the stream has ended, then moved into place (see the repository's
+//! `docs/extract-once.md`). Into a sink, it is read twice, once for the
+//! headers, the data skipped, and once to write, each header compared with
+//! the first reading's; the caller gives a function that opens it again,
+//! which for a compressed archive or an RPM package's payload decompresses it
+//! again.
 //!
 //! A file with several names is an entry for each name, and its data comes
 //! with any of them: with the last in newc, as GNU cpio and RPM write it,
 //! the others empty; with each in odc. libarchive's extraction writes the
 //! data of each into the file the names share, which ends with the last
-//! data written. Here the file is written once, when the last of its
-//! entries with data comes, under its first name; its other names are
-//! linked to it then, or as they come after.
+//! data written. Here the file is written under its first name with the
+//! data of the last of its entries with data, and its other names are
+//! linked to it.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Read};
@@ -23,9 +27,10 @@ use crate::cpio::{
     AE_IFBLK, AE_IFCHR, AE_IFDIR, AE_IFIFO, AE_IFLNK, AE_IFMT, AE_IFSOCK, Header, Reader,
 };
 
-use crate::extract::destination::Target;
+use crate::extract::destination::{Destination, Target};
 use crate::extract::error::{Error, ErrorKind};
 use crate::extract::name::NameError;
+use crate::extract::once::{self, ReadOnce, read_ahead};
 use crate::extract::plan::{Item, Kind, OnRefused, Options, check};
 use crate::extract::plan::{Renamed, settle};
 use crate::extract::progress::Run;
@@ -35,7 +40,7 @@ use crate::extract::tar::{
     Entry, LinkPlan, bytes_to_write, copy_of, cut_short, plan_links, read_rest, write_with,
 };
 use crate::extract::writers::{Writers, with_writers, writer_threads};
-use crate::extract::zip::{Summary, open_destination, set_dir_times};
+use crate::extract::zip::{Summary, set_dir_times};
 
 /// An entry's error, by its index and its path.
 fn entry_error(index: u64, h: &Header, kind: ErrorKind) -> Error {
@@ -133,16 +138,7 @@ fn read_headers<R: Read>(r: R, run: &Run<'_>, options: &Options) -> Result<First
             first.entries.push(entry);
             continue;
         };
-        let kind = if h.hardlink.is_some() {
-            Kind::HardLink
-        } else {
-            match h.mode & AE_IFMT {
-                AE_IFDIR => Kind::Dir,
-                AE_IFLNK => Kind::Link,
-                AE_IFCHR | AE_IFBLK | AE_IFIFO | AE_IFSOCK => Kind::Special,
-                _ => Kind::File,
-            }
-        };
+        let kind = kind_of(&h);
         if let Some(target) = target {
             first.first_of.insert(index, target);
             let target_size = first.entries[target as usize].seen.size;
@@ -159,24 +155,7 @@ fn read_headers<R: Read>(r: R, run: &Run<'_>, options: &Options) -> Result<First
             Kind::HardLink => h.hardlink.clone().unwrap_or_default(),
             _ => Vec::new(),
         };
-        let size = match kind {
-            Kind::File => h.size,
-            _ => 0,
-        };
-        first.items.push(Item {
-            index,
-            raw_name: h.path.clone(),
-            text,
-            name,
-            kind,
-            size,
-            compressed: size,
-            data: None,
-            mode: Some(h.mode & 0o7777),
-            mtime: system_time(h.mod_time),
-            owner: None,
-            xattrs: Vec::new(),
-        });
+        first.items.push(item_of(&h, index, text, name, kind));
         entry.item = Some(first.items.len() - 1);
         first.entries.push(entry);
     }
@@ -202,11 +181,13 @@ fn read_headers<R: Read>(r: R, run: &Run<'_>, options: &Options) -> Result<First
 /// RPM packages' payloads (`hivepack::open::Opener` takes the package and
 /// its compression off), and what `cpio` writes.
 ///
-/// `open` is called twice, and must give the same archive each time, as
-/// for [`extract_tar`](crate::extract::extract_tar): the first reading checks every
-/// entry before anything is written, the second writes them, each header
-/// compared with the first reading's ([`ErrorKind::Changed`] if one
-/// differs). Each reading goes on to the end of the stream.
+/// `open` is called once, and the archive read once, as
+/// [`extract_tar`](crate::extract::extract_tar) reads one: into a private
+/// folder made in the destination, each file's data written there as it
+/// comes; once the stream has ended, every entry is checked, what is in the
+/// destination already is looked at, and only then do the entries move into
+/// place. If anything fails before, nothing of the archive appears. The
+/// stream is read to its end.
 ///
 /// Besides tar's rules: the root directory, `.`, is not an entry. An entry
 /// found after bytes that are not a header were passed over comes with a
@@ -214,17 +195,20 @@ fn read_headers<R: Read>(r: R, run: &Run<'_>, options: &Options) -> Result<First
 /// ([`ErrorKind::CpioEntry`]), or left out with [`OnRefused::Skip`]: what
 /// was passed over is lost. A hard link names the first entry of its file,
 /// which holds the data of the last of their entries with data, as
-/// libarchive's extraction leaves it; the file is written when that data
-/// comes, and its names linked to it. An archive cut short, or without
-/// `TRAILER!!!`, fails the first reading.
+/// libarchive's extraction leaves it; the file is moved into place under its
+/// first name, and its other names linked to it. The data that comes with an
+/// earlier name, replaced by a later one's, is removed from the private
+/// folder, and no longer counts against
+/// [`Limits::max_total_size`](crate::extract::Limits::max_total_size). An
+/// archive cut short, or without `TRAILER!!!`, stops the extraction.
 ///
 /// With [`Options::threads`], the files are written by threads while the
 /// archive is read on the caller's thread, as
-/// [`extract_tar`](crate::extract::extract_tar) does: what is written is the
-/// same, and so is the summary; after an error, files after it in the
-/// archive may have been written.
-pub fn extract_cpio<R: Read, F: FnMut() -> io::Result<R>>(
-    open: F,
+/// [`extract_tar`](crate::extract::extract_tar) does, and the stream `open`
+/// gives is read ahead by a thread of its own: so the reader is `Send`. What
+/// is written is the same, and so is the summary.
+pub fn extract_cpio<R: Read + Send, F: FnMut() -> io::Result<R>>(
+    mut open: F,
     destination: &Path,
     options: &Options,
 ) -> Result<Summary, Error> {
@@ -234,11 +218,231 @@ pub fn extract_cpio<R: Read, F: FnMut() -> io::Result<R>>(
             .map_err(|e| Error::global(ErrorKind::Origin(e)))?;
     }
     let options = &options.for_folder(destination);
-    extract_into(open, || open_destination(destination, options), options)
+    once::into_folder(destination, options, |destination, spool, run| {
+        let r = open().map_err(|e| Error::global(ErrorKind::Io(e)))?;
+        // Counted as each entry moves into place, the totals known.
+        run.quiet(true);
+        let mut total = 0;
+        let read = match writer_threads(options, u64::MAX) {
+            Some(writing) => read_ahead(r, |r| {
+                with_writers(spool, run, options, &writing, |writers| {
+                    read_once(r, spool, "", &mut total, run, options, Some(writers))
+                })
+            }),
+            None => read_once(r, spool, "", &mut total, run, options, None),
+        };
+        run.quiet(false);
+        let (read, refused) = read?;
+        let checked = once::check_read(read, Some(refused), options)?;
+        once::move_into_place(checked, destination, spool, run, options)
+    })
+}
+
+/// A cpio entry's data that failed to read: the cpio reader's error, out of
+/// the `io::Error` that holds it.
+fn cpio_error(e: io::Error) -> ErrorKind {
+    ErrorKind::Cpio(crate::cpio::Error::from(e))
+}
+
+/// The one reading of the cpio archive `r`, into `spool`: every header kept,
+/// as the first reading keeps them, and the data of each file the checks may
+/// keep written into `spool` as it comes, named `prefix` and the index of the
+/// entry it came with, by `writers` where there are, or here; and the errors
+/// of the entries refused as they came, after garbage. `total` is what was
+/// written into `spool` before, and after. A file with several names holds the
+/// data of the last of their entries with data: data that came with an
+/// earlier name is removed before a later one's is written. The stream is read
+/// to its end.
+pub(crate) fn read_once<'a, R: Read>(
+    r: R,
+    spool: &Destination<'_>,
+    prefix: &str,
+    total: &mut u64,
+    run: &Run<'_>,
+    options: &Options,
+    writers: Option<&Writers<'a>>,
+) -> Result<(ReadOnce, Vec<Error>), Error> {
+    let limits = &options.limits;
+    let mut cpio = Reader::new(r);
+    let mut read = ReadOnce::default();
+    let mut refused = Vec::new();
+    // The entry each path was given by, for the hard links that name it.
+    let mut by_path: HashMap<Vec<u8>, u64> = HashMap::new();
+    // Each entry's size, as its header says.
+    let mut sizes: Vec<u64> = Vec::new();
+    // The files with several names, by their first entry: the entry whose
+    // data each holds, the last with data, if any.
+    let mut groups: HashMap<u64, Option<u64>> = HashMap::new();
+    loop {
+        let index = read.entries.len() as u64;
+        run.check().map_err(Error::global)?;
+        let h = match cpio.next() {
+            Ok(Some(h)) => h,
+            Ok(None) => break,
+            Err(e) => {
+                let kind = ErrorKind::Cpio(e);
+                if run.may_be_cut(&kind) {
+                    read.cut = Some(kind);
+                    break;
+                }
+                return Err(Error {
+                    index: Some(index),
+                    name: None,
+                    kind,
+                });
+            }
+        };
+        // Every entry counts, as in tar.
+        if index >= limits.max_entries {
+            return Err(Error::global(ErrorKind::TooManyEntries));
+        }
+        sizes.push(h.size);
+        let mut entry = Entry {
+            seen: (),
+            item: None,
+            target: Vec::new(),
+        };
+        if let Some(warning) = &h.warning {
+            let error = entry_error(index, &h, ErrorKind::CpioEntry(warning.clone()));
+            match options.on_refused {
+                OnRefused::Stop => return Err(error),
+                OnRefused::Skip => refused.push(error),
+            }
+            read.entries.push(entry);
+            continue;
+        }
+        // The file a hard link is a name of, by an earlier entry's path:
+        // its own, if it has the path of the file's first name, is not one.
+        let target = h.hardlink.as_ref().and_then(|t| by_path.get(t)).copied();
+        by_path.insert(h.path.clone(), index);
+        // The root directory, ".", is not an entry.
+        let Some((text, name)) = named_of(&h.path, options) else {
+            read.entries.push(entry);
+            continue;
+        };
+        let kind = kind_of(&h);
+        if let Some(target) = target {
+            let group = groups
+                .entry(target)
+                .or_insert_with(|| (sizes[target as usize] > 0).then_some(target));
+            if h.size > 0 {
+                *group = Some(index);
+            }
+        }
+        entry.target = match kind {
+            Kind::Link => h.symlink.clone().unwrap_or_default(),
+            Kind::HardLink => h.hardlink.clone().unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        read.items.push(item_of(&h, index, text, name, kind));
+        let at = read.items.len() - 1;
+        entry.item = Some(at);
+        read.entries.push(entry);
+        // The file this entry's data is of: its own, or with a later name,
+        // the file its first name is.
+        let of = match target {
+            Some(target) if h.size > 0 => read.entries[target as usize].item,
+            None if kind == Kind::File => Some(at),
+            _ => None,
+        };
+        let Some(file) = of.map(|at| &read.items[at]) else {
+            continue;
+        };
+        if !once::may_keep(file, h.size, options) {
+            continue;
+        }
+        if let Some((before, was)) = read.spooled.remove(&file.index) {
+            // The file's data comes again, with a later name: what came
+            // before goes first, once a thread writing it is done, and no
+            // longer counts.
+            if let Some(writers) = writers {
+                writers.wait(file)?;
+            }
+            spool.remove_file(&[before]);
+            *total = total.saturating_sub(was.bytes());
+        }
+        let name = format!("{prefix}{index}");
+        let remaining = limits.max_total_size.saturating_sub(*total);
+        let done = once::spool_data(
+            &mut cpio,
+            file,
+            h.size,
+            &name,
+            spool,
+            remaining,
+            (false, false),
+            cpio_error,
+            run,
+            options,
+            writers,
+        )?;
+        *total = total.saturating_add(done.bytes());
+        read.spooled.insert(file.index, (name, done));
+    }
+    if read.cut.is_none() {
+        read_rest(cpio.into_inner(), run, options)?;
+    }
+    // A file with several names holds the data of its last entry with
+    // data, which its first name is moved into place with.
+    for (&target, &data) in &groups {
+        let (Some(data), Some(at)) = (data, read.entries[target as usize].item) else {
+            continue;
+        };
+        let item = &mut read.items[at];
+        if item.kind == Kind::File {
+            item.size = sizes[data as usize];
+            item.compressed = item.size;
+        }
+    }
+    Ok((read, refused))
+}
+
+/// What the entry of header `h` is.
+fn kind_of(h: &Header) -> Kind {
+    if h.hardlink.is_some() {
+        return Kind::HardLink;
+    }
+    match h.mode & AE_IFMT {
+        AE_IFDIR => Kind::Dir,
+        AE_IFLNK => Kind::Link,
+        AE_IFCHR | AE_IFBLK | AE_IFIFO | AE_IFSOCK => Kind::Special,
+        _ => Kind::File,
+    }
+}
+
+/// The item of header `h`, the `index`th entry, of `kind`, named `name`.
+fn item_of(
+    h: &Header,
+    index: u64,
+    text: String,
+    name: Result<crate::extract::name::Name, NameError>,
+    kind: Kind,
+) -> Item {
+    let size = match kind {
+        Kind::File => h.size,
+        _ => 0,
+    };
+    Item {
+        index,
+        raw_name: h.path.clone(),
+        text,
+        name,
+        kind,
+        size,
+        compressed: size,
+        data: None,
+        mode: Some(h.mode & 0o7777),
+        mtime: system_time(h.mod_time),
+        owner: None,
+        xattrs: Vec::new(),
+    }
 }
 
 /// Extracts the cpio archive that `open` gives into `sink`, with the checks and
-/// in the order of [`extract_cpio`], reading it twice as it does: see [`Sink`].
+/// in the order of [`extract_cpio`], but reading it twice, as a sink has no
+/// folder to write into first: the first reading checks every entry before any
+/// is given, and the second gives them, each header compared with the first
+/// reading's ([`ErrorKind::Changed`] if one differs): see [`Sink`].
 /// The sink is given one entry at a time, on the caller's thread, whatever
 /// [`Options::threads`] says.
 pub fn extract_cpio_to<R: Read, F: FnMut() -> io::Result<R>>(
@@ -251,7 +455,7 @@ pub fn extract_cpio_to<R: Read, F: FnMut() -> io::Result<R>>(
     extract_into(open, || Ok(state.target(options)), options)
 }
 
-/// [`extract_cpio`] into the target `make` makes, once the archive is checked.
+/// [`extract_cpio_to`] into the target `make` makes, once the archive is checked.
 fn extract_into<R: Read, F: FnMut() -> io::Result<R>, T: Target>(
     mut open: F,
     make: impl FnOnce() -> Result<T, Error>,

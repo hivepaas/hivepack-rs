@@ -16,9 +16,12 @@ mod support;
 use std::cell::Cell;
 use std::io::Cursor;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use hivepack::deflate::{Deflate, Flush, InBuffer, OutBuffer, Status};
-use hivepack::extract::{ErrorKind, NameError, Options, Packages, Summary, extract_xar};
+use hivepack::extract::{
+    Entry, ErrorKind, NameError, Options, Packages, Sink, Summary, extract_xar, extract_xar_to,
+};
 use support::{Scratch, listing, options};
 
 fn extract(
@@ -385,14 +388,42 @@ fn a_checksum_that_does_not_match_stops_before_writing() {
     assert!(!scratch.out().exists());
 }
 
+/// Into a folder the archive is read once, payloads and all, through a
+/// private folder that is gone once the entries are in place; into a sink it
+/// is read twice, and an archive that changes between the readings stops.
 #[test]
-fn an_archive_that_changes_between_readings_stops() {
+fn into_a_folder_the_archive_is_read_once() {
     let payload = odc(&[("a", b"one")]);
-    let first = xar(&[("Payload", &payload)]);
-    let second = xar(&[("Payload", &odc(&[("b", b"one")]))]);
+    let first = xar(&[("Payload", &pbzx(&payload)), ("Bom", b"bom")]);
     let readings = Cell::new(0);
     let scratch = Scratch::new();
-    let e = extract_xar(
+    let told = Arc::new(Mutex::new(Vec::new()));
+    let into = Arc::clone(&told);
+    let mut options = portable();
+    options.on_written = Some(Arc::new(move |w: &hivepack::extract::Written<'_>| {
+        into.lock().unwrap().push(w.path.join("/"));
+    }));
+    let summary = extract_xar(
+        || {
+            readings.set(readings.get() + 1);
+            Ok(Cursor::new(first.clone()))
+        },
+        &scratch.out(),
+        &options,
+    )
+    .unwrap();
+    assert_eq!(readings.get(), 1);
+    assert_eq!((summary.files, summary.directories), (2, 1));
+    assert_eq!(listing(&scratch.out()), ["Bom", "Payload/", "Payload/a"]);
+    // Told by their paths in the destination, never in the private folder.
+    let mut told = told.lock().unwrap().clone();
+    told.sort();
+    assert_eq!(told, ["Bom", "Payload", "Payload/a"]);
+
+    let second = xar(&[("Payload", &odc(&[("b", b"one")]))]);
+    let readings = Cell::new(0);
+    let mut names = Names::default();
+    let e = extract_xar_to(
         || {
             readings.set(readings.get() + 1);
             Ok(Cursor::new(if readings.get() == 1 {
@@ -401,11 +432,109 @@ fn an_archive_that_changes_between_readings_stops() {
                 second.clone()
             }))
         },
-        &scratch.out(),
+        &mut names,
         &portable(),
     )
     .unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Changed), "{e}");
+    assert_eq!(readings.get(), 2);
+}
+
+/// An archive whose payload is refused at its end leaves the destination as
+/// it was: what was there stays, nothing of the archive appears, and no
+/// private folder is left; one made for it is gone too.
+#[test]
+fn refused_in_a_payload_the_destination_is_as_it_was() {
+    let payload = odc(&[("d/", b""), ("d/x", b"one"), ("d/X", b"two")]);
+    let archive = xar(&[("Bom", b"bom"), ("Payload", &pbzx(&payload))]);
+    let scratch = Scratch::new();
+    std::fs::create_dir(scratch.out()).unwrap();
+    std::fs::write(scratch.out().join("kept"), "mine").unwrap();
+    let e = extract(&archive, &scratch.out(), &portable()).unwrap_err();
+    assert!(matches!(e.kind, ErrorKind::Duplicate { .. }), "{e}");
+    assert_eq!(e.name.as_deref(), Some(&b"Payload/./d/X"[..]));
+    assert_eq!(listing(&scratch.out()), ["kept"]);
+    let scratch = Scratch::new();
+    extract(&archive, &scratch.out(), &portable()).unwrap_err();
+    assert!(!scratch.out().exists());
+    // A file of the payload in the way, in its folder, stops it too.
+    let archive = xar(&[("Bom", b"bom"), ("Payload", &pbzx(&odc(&[("x", b"new")])))]);
+    let scratch = Scratch::new();
+    std::fs::create_dir_all(scratch.out().join("Payload")).unwrap();
+    std::fs::write(scratch.out().join("Payload/x"), "mine").unwrap();
+    let e = extract(&archive, &scratch.out(), &portable()).unwrap_err();
+    assert!(matches!(e.kind, ErrorKind::Exists), "{e}");
+    assert_eq!(e.name.as_deref(), Some(&b"Payload/./x"[..]));
+    assert_eq!(listing(&scratch.out()), ["Payload/", "Payload/x"]);
+    extract(&archive, &scratch.out(), &options(|o| o.overwrite = true)).unwrap();
+    assert_eq!(read(&scratch.out().join("Payload/x")), b"new");
+}
+
+/// A payload whose layers open to something other than a cpio archive is
+/// written as it is, its layers and all, whatever its layers read of it
+/// first to tell; with threads too, which decode its chunks ahead.
+#[test]
+fn a_payload_that_is_no_cpio_archive_is_written_as_it_is() {
+    let text: Vec<u8> = (0..1_000_000u32)
+        .map(|i| b"not a cpio archive, "[(i as usize * 7 + i as usize / 11) % 20])
+        .collect();
+    let layered = pbzx(&text);
+    let archive = xar(&[("Payload", &layered), ("Scripts", b"#!/bin/sh\n")]);
+    for threads in [1, 4, 16] {
+        let scratch = Scratch::new();
+        let summary = extract(
+            &archive,
+            &scratch.out(),
+            &options(|o| o.threads = hivepack::Threads::of(threads)),
+        )
+        .unwrap();
+        assert_eq!(listing(&scratch.out()), ["Payload", "Scripts"], "{threads}");
+        assert!(read(&scratch.out().join("Payload")) == layered, "{threads}");
+        assert_eq!(read(&scratch.out().join("Scripts")), b"#!/bin/sh\n");
+        assert_eq!(summary.bytes, layered.len() as u64 + 10, "{threads}");
+    }
+    // Not picked: neither written nor left in the private folder.
+    let scratch = Scratch::new();
+    extract(
+        &archive,
+        &scratch.out(),
+        &options(|o| o.select = Some(Arc::new(|path: &[String]| path == ["Scripts"]))),
+    )
+    .unwrap();
+    assert_eq!(listing(&scratch.out()), ["Scripts"]);
+}
+
+/// A sink that keeps the names of the files it is given, and writes nothing.
+#[derive(Default)]
+struct Names(Vec<String>);
+
+impl Sink for Names {
+    fn directory(&mut self, _: &Entry<'_>) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn start_file(&mut self, entry: &Entry<'_>) -> std::io::Result<()> {
+        self.0.push(entry.path.join("/"));
+        Ok(())
+    }
+
+    fn write(&mut self, _: &[u8]) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn finish_file(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn discard_file(&mut self) {}
+
+    fn symlink(&mut self, _: &Entry<'_>, _: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn hard_link(&mut self, _: &Entry<'_>, _: &[String]) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// The options of these tests: names checked by every system's rules, as Windows
