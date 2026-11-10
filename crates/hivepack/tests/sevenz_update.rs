@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use hivepack::sevenz::{Archive, Error, Method, NewEntry, Options, WriteOptions, Writer};
-use support::{Rng, scratch, seven_zip};
+use support::{Rng, random_source, scratch, seven_zip};
 
 /// What an archive holds, by name: a directory or a file's data, with its
 /// attributes and times.
@@ -53,6 +53,13 @@ fn held(data: &[u8], password: Option<&str>) -> Held {
     out
 }
 
+/// `options` with the tests' salts and IVs, if they have none: Windows has no
+/// system source the writer can read.
+fn salted(mut options: WriteOptions) -> WriteOptions {
+    options.random_source.get_or_insert_with(random_source);
+    options
+}
+
 /// `data`, changed: what `keep` keeps, then `added`.
 fn changed(
     data: &[u8],
@@ -62,7 +69,7 @@ fn changed(
     added: &[(&str, &[u8])],
 ) -> Result<Vec<u8>, Error> {
     let mut archive = open(data, password);
-    let mut w = Writer::with_options(Cursor::new(Vec::new()), options)?;
+    let mut w = Writer::with_options(Cursor::new(Vec::new()), salted(options))?;
     w.copy_from(&mut archive, keep)?;
     for (name, body) in added {
         w.add_file(NewEntry::new(*name), &mut &body[..])
@@ -99,7 +106,7 @@ fn seven_zip_tests(name: &str, data: &[u8], password: Option<&str>) {
 
 /// An archive of `files`, in folders of `solid` bytes.
 fn made(files: &[(&str, Vec<u8>)], dirs: &[&str], options: WriteOptions) -> Vec<u8> {
-    let mut w = Writer::with_options(Cursor::new(Vec::new()), options).unwrap();
+    let mut w = Writer::with_options(Cursor::new(Vec::new()), salted(options)).unwrap();
     for dir in dirs {
         let mut entry = NewEntry::new(*dir);
         entry.attributes = Some(0x10);

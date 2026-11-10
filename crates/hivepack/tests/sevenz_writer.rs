@@ -16,7 +16,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 use hivepack::sevenz::{Archive, Error, Filter, Method, NewEntry, Options, WriteOptions, Writer};
-use support::{Oracle, Rng, scratch, seven_zip};
+use support::{Oracle, Rng, random_source, scratch, seven_zip};
 
 /// What goes in an archive: a directory, or a file with its data.
 struct Item {
@@ -80,17 +80,6 @@ fn items(rng: &mut Rng, count: usize, max_size: u64) -> Vec<Item> {
             Item { entry, data }
         })
         .collect()
-}
-
-/// Salts and IVs for the tests, where the system's are not at hand: Windows has
-/// no `/dev/urandom`, and a program there gives its own.
-fn random_source() -> hivepack::sevenz::RandomSource {
-    let rng = std::sync::Mutex::new(Rng(0x7a37_7a37));
-    Arc::new(move |bytes: &mut [u8]| {
-        let mut rng = rng.lock().unwrap();
-        bytes.iter_mut().for_each(|b| *b = rng.next() as u8);
-        Ok(())
-    })
 }
 
 fn write_archive(options: &WriteOptions, items: &[Item], rng: &mut Rng) -> Vec<u8> {
