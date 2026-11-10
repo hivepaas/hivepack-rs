@@ -164,8 +164,8 @@ impl MtOptions {
     /// of 128 KiB: 0.84 MiB a thread. With [`Library::Libdeflate`], the
     /// compressor is libdeflate's, 0.2 MB at level 1, 0.7 MB at 2 to 9 and
     /// 9 MB at 10 to 12, and a block holds no input before it: blocks of
-    /// 1 MiB, 4.2 MiB a thread at level 1, 4.8 MiB at 2 to 9 and 12.6 MiB
-    /// at 10 to 12. See `docs/memory.md`.
+    /// 1 MiB, 4.2 MiB a thread at level 1, 4.7 MiB at 2 to 9 and 12.6 MiB
+    /// at 10 to 12; of 4 MiB, 16.2, 16.7 and 24.6 MiB. See `docs/memory.md`.
     pub fn memory_usage(&self, threads: u32) -> Result<u64> {
         self.check()?;
         let threads = u64::from(threads.max(1));

@@ -20,7 +20,7 @@ assert_eq!(&out[..written], b"hello");
 
 It also has zlib's checksums, `crc32` and `adler32`, with their `_combine` functions.
 
-Beside the port of zlib, `Compressor` is a port of [libdeflate](https://github.com/ebiggers/libdeflate) 1.26's compressor: a whole buffer compressed at once, raw deflate, at levels 0 to 12, with libdeflate's output, byte for byte. Its levels 10 to 12 find the cheapest way through each block, and make smaller streams than zlib's level 9.
+Beside the port of zlib, `Compressor` is a port of [libdeflate](https://github.com/ebiggers/libdeflate) 1.26's compressor: a whole buffer compressed at once, raw deflate, at levels 0 to 12, with libdeflate's output, byte for byte. Its levels 10 to 12 find the cheapest way through each block, and make smaller streams than zlib's level 9. Not in libdeflate, `Compressor::deflate_compress_part` compresses a part of a stream that is not its last, and `DeflateMt` with `Library::Libdeflate` compresses blocks of 1 to 4 MiB with it in threads, joined into one stream.
 
 ```rust
 use hivepack::deflate::Compressor;
