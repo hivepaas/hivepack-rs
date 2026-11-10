@@ -6,7 +6,10 @@
 //! 12, with libdeflate's output, byte for byte; levels 10 to 12 parse the
 //! input near-optimally, and make smaller streams than zlib's level 9.
 //! Only the compressor is ported, and only raw DEFLATE: zlib's and gzip's
-//! wrappers, and decompression, are the zlib port's.
+//! wrappers, and decompression, are the zlib port's. Not in libdeflate,
+//! [`Compressor::deflate_compress_part`] compresses a part of a stream that
+//! is not its last, which [`DeflateMt`](crate::deflate::DeflateMt) joins
+//! to others.
 //!
 //! Each file of libdeflate's `lib/` that the compressor needs is a module
 //! of the same name: `deflate_compress.c` becomes `deflate_compress.rs`,

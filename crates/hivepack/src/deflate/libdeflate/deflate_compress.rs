@@ -29,6 +29,13 @@
 //! data in `struct libdeflate_compressor` is an enum, [`Parser`], and the
 //! union of the precode and the full length codewords two fields
 //! ([`Precode`], [`LengthCodes`]), never used at once.
+//!
+//! Not in libdeflate: [`Compressor::deflate_compress_part`] compresses a
+//! buffer as a part of a stream that is not its last, its last block not
+//! final and a sync marker after it, so that parts compressed apart, in
+//! threads, are one stream (`deflate/mt.rs`). Only BFINAL changes, and only
+//! in [`deflate_flush_block`] and [`deflate_compress_none`], where every
+//! block is written; `deflate_compress` writes what it wrote before.
 
 use crate::deflate::libdeflate::bt_matchfinder::{
     BT_MATCHFINDER_REQUIRED_NBYTES, BtMatchfinder, LzMatch,
@@ -102,6 +109,11 @@ const MATCH_CACHE_LENGTH: usize = SOFT_MAX_BLOCK_LENGTH * 5;
 /// `MAX_MATCHES_PER_POS`: the most matches the binary trees find at a
 /// position, one of each length.
 const MAX_MATCHES_PER_POS: usize = (DEFLATE_MAX_MATCH_LEN - DEFLATE_MIN_MATCH_LEN + 1) as usize;
+
+/// The entries of the match cache, `p.n.match_cache`: room past
+/// `MATCH_CACHE_LENGTH` for the worst overflow before the block is ended.
+const MATCH_CACHE_ROOM: usize =
+    MATCH_CACHE_LENGTH + MAX_MATCHES_PER_POS + DEFLATE_MAX_MATCH_LEN as usize - 1;
 
 /// `MAX_BLOCK_LENGTH`: the longest block: the final block, of up to
 /// `SOFT_MAX_BLOCK_LENGTH + MIN_BLOCK_LENGTH - 1` bytes, or one that lazy2
@@ -357,6 +369,9 @@ struct State {
     precode: Precode,
     /// `o.length`.
     length: LengthCodes,
+    /// Not in libdeflate: whether the input's last block is the stream's
+    /// last, with BFINAL set. False for [`Compressor::deflate_compress_part`].
+    last: bool,
 }
 
 /// Data for greedy or lazy parsing: `p.g`.
@@ -1034,6 +1049,12 @@ enum BlockItems<'a> {
 /// `c.codes` must already be those of the block's literals, matches and
 /// end-of-block symbol. If the block does not fit in the output, sets
 /// `os.overflow` and writes nothing.
+///
+/// Differs from libdeflate: the input's last block (`is_final_block`) has
+/// BFINAL set only if `c.last` says it ends the stream, so that
+/// [`Compressor::deflate_compress_part`] can leave it for a part after. The
+/// parsers, which all end their blocks here, then need no change, and
+/// neither does the block's cost: BFINAL is one bit either way.
 #[allow(clippy::too_many_arguments)]
 fn deflate_flush_block(
     c: &mut State,
@@ -1141,7 +1162,7 @@ fn deflate_flush_block(
                 let mut len = u16::MAX as usize;
 
                 if in_end - in_next <= u16::MAX as usize {
-                    bfinal = u8::from(is_final_block);
+                    bfinal = u8::from(is_final_block && c.last);
                     len = in_end - in_next;
                 }
                 // Output BFINAL (1 bit) and BTYPE (2 bits), then align to a
@@ -1175,7 +1196,7 @@ fn deflate_flush_block(
         if best_cost == static_cost {
             // Static Huffman block.
             codes = &c.static_codes;
-            add_bits!(bitbuf, bitcount, u64::from(is_final_block), 1);
+            add_bits!(bitbuf, bitcount, u64::from(is_final_block && c.last), 1);
             add_bits!(bitbuf, bitcount, DEFLATE_BLOCKTYPE_STATIC_HUFFMAN, 2);
             flush_bits!(out, out_next, out_fast_end, bitbuf, bitcount);
         } else {
@@ -1186,7 +1207,7 @@ fn deflate_flush_block(
             // Dynamic Huffman block.
             codes = &c.codes;
             const _: () = assert!(can_buffer(1 + 2 + 5 + 5 + 4 + 3));
-            add_bits!(bitbuf, bitcount, u64::from(is_final_block), 1);
+            add_bits!(bitbuf, bitcount, u64::from(is_final_block && c.last), 1);
             add_bits!(bitbuf, bitcount, DEFLATE_BLOCKTYPE_DYNAMIC_HUFFMAN, 2);
             add_bits!(bitbuf, bitcount, pre.num_litlen_syms - 257, 5);
             add_bits!(bitbuf, bitcount, pre.num_offset_syms - 1, 5);
@@ -1665,7 +1686,11 @@ fn choose_max_block_end(in_block_begin: usize, in_end: usize, soft_max_len: usiz
 
 /// `deflate_compress_none`: the level 0 "compressor", which always outputs
 /// uncompressed blocks.
-fn deflate_compress_none(input: &[u8], out: &mut [u8]) -> usize {
+///
+/// Differs from libdeflate: the last block has BFINAL set only if `last`
+/// says it ends the stream, as [`deflate_flush_block`] does. Empty, and not
+/// the last, the block it writes is a sync marker.
+fn deflate_compress_none(input: &[u8], out: &mut [u8], last: bool) -> usize {
     let in_end = input.len();
     let out_end = out.len();
     let mut in_next = 0;
@@ -1678,7 +1703,7 @@ fn deflate_compress_none(input: &[u8], out: &mut [u8]) -> usize {
             return 0;
         }
         // BFINAL and BTYPE, then LEN and NLEN.
-        out[0] = 1 | (DEFLATE_BLOCKTYPE_UNCOMPRESSED << 1);
+        out[0] = u8::from(last) | (DEFLATE_BLOCKTYPE_UNCOMPRESSED << 1);
         out[1..5].copy_from_slice(&0xFFFF_0000u32.to_le_bytes());
         return 5;
     }
@@ -1688,7 +1713,7 @@ fn deflate_compress_none(input: &[u8], out: &mut [u8]) -> usize {
         let mut len = u16::MAX as usize;
 
         if in_end - in_next <= u16::MAX as usize {
-            bfinal = 1;
+            bfinal = u8::from(last);
             len = in_end - in_next;
         }
         if out_end - out_next < 5 + len {
@@ -3070,13 +3095,7 @@ impl NearOptimal {
         };
         let mut n = Box::new(NearOptimal {
             bt_mf: BtMatchfinder::new(),
-            match_cache: vec![
-                LzMatch::default();
-                MATCH_CACHE_LENGTH
-                    + MAX_MATCHES_PER_POS
-                    + DEFLATE_MAX_MATCH_LEN as usize
-                    - 1
-            ],
+            match_cache: vec![LzMatch::default(); MATCH_CACHE_ROOM],
             optimum_nodes: vec![DeflateOptimumNode::default(); MAX_BLOCK_LENGTH + 1],
             costs,
             costs_saved: costs,
@@ -3153,6 +3172,7 @@ impl Compressor {
                 codewords: [0; DEFLATE_MAX_MATCH_LEN as usize + 1],
                 lens: [0; DEFLATE_MAX_MATCH_LEN as usize + 1],
             },
+            last: true,
         });
 
         let (max_search_depth, nice_match_length, p) = match compression_level {
@@ -3213,12 +3233,40 @@ impl Compressor {
     /// leaves them. Past the size returned, they may have been written to
     /// as well.
     pub fn deflate_compress(&mut self, input: &[u8], output: &mut [u8]) -> usize {
+        self.compress(input, output, true)
+    }
+
+    /// Compresses `input` into `output` as a part of a raw DEFLATE stream
+    /// that is not its last, and returns the compressed size, or 0 if it
+    /// does not fit in `output`. Not in libdeflate.
+    ///
+    /// The part is what [`Compressor::deflate_compress`] writes, but for
+    /// its last block, whose BFINAL is not set, and a sync marker after it,
+    /// as zlib's `Z_SYNC_FLUSH` writes one: an empty uncompressed block, its
+    /// 3 bits of header with zeros to the next byte, then `00 00 FF FF`. So
+    /// the part ends on a byte, and parts one after the other, then what
+    /// [`Compressor::deflate_compress`] writes, are one stream, as pigz
+    /// joins its blocks. Each part is compressed alone: none refers to the
+    /// input of the one before. An empty input's part is the sync marker
+    /// alone.
+    ///
+    /// [`Compressor::deflate_compress_part_bound`] gives room that is
+    /// always enough. With less, the output is left as
+    /// [`Compressor::deflate_compress`] leaves it.
+    pub fn deflate_compress_part(&mut self, input: &[u8], output: &mut [u8]) -> usize {
+        self.compress(input, output, false)
+    }
+
+    /// `libdeflate_deflate_compress`, the input's last block ending the
+    /// stream if `last`, else followed by a sync marker.
+    fn compress(&mut self, input: &[u8], output: &mut [u8], last: bool) -> usize {
         let c = &mut *self.c;
+        c.last = last;
 
         // For extremely short inputs, or for compression level 0, just
         // output uncompressed blocks.
         if input.len() <= c.max_passthrough_size {
-            return deflate_compress_none(input, output);
+            return compress_none(input, output, last);
         }
 
         // Initialize the output bitstream structure.
@@ -3231,7 +3279,7 @@ impl Compressor {
 
         // Call the actual compression function.
         match &mut self.p {
-            Parser::None => return deflate_compress_none(input, output),
+            Parser::None => return compress_none(input, output, last),
             Parser::Fastest(f) => deflate_compress_fastest(c, f, input, &mut os, output),
             Parser::Greedy(g) => deflate_compress_greedy(c, g, input, &mut os, output),
             Parser::Lazy(g) => {
@@ -3246,6 +3294,9 @@ impl Compressor {
         // Return 0 if the output buffer is too small.
         if os.overflow {
             return 0;
+        }
+        if !last {
+            return sync_marker(os, output);
         }
 
         // Write the final byte if needed. This can't overflow the output
@@ -3274,6 +3325,57 @@ impl Compressor {
         let max_blocks = in_nbytes.div_ceil(MIN_BLOCK_LENGTH).max(1);
         (5 * max_blocks) + in_nbytes
     }
+
+    /// The most bytes [`Compressor::deflate_compress_part`] can write for
+    /// `in_nbytes` bytes of input. Not in libdeflate.
+    ///
+    /// [`Compressor::deflate_compress_bound`], and 5 bytes for the sync
+    /// marker: the blocks take at most that bound, in bits too, so with
+    /// the marker's 3 bits they take one byte more at most, then its 4.
+    pub fn deflate_compress_part_bound(&self, in_nbytes: usize) -> usize {
+        Compressor::part_bound(in_nbytes)
+    }
+
+    /// [`Compressor::deflate_compress_part_bound`], which is the same at
+    /// every level, without a compressor.
+    pub(crate) fn part_bound(in_nbytes: usize) -> usize {
+        let max_blocks = in_nbytes.div_ceil(MIN_BLOCK_LENGTH).max(1);
+        (5 * max_blocks) + in_nbytes + 5
+    }
+}
+
+/// `deflate_compress_none`, and a sync marker after it if not `last` but
+/// for an empty input, whose block is one already. Not in libdeflate.
+fn compress_none(input: &[u8], output: &mut [u8], last: bool) -> usize {
+    let size = deflate_compress_none(input, output, last);
+    if last || size == 0 || input.is_empty() {
+        return size;
+    }
+    let os = OutputBitstream {
+        bitbuf: 0,
+        bitcount: 0,
+        next: size,
+        overflow: false,
+    };
+    sync_marker(os, output)
+}
+
+/// Ends a part with a sync marker after its last block, which is not
+/// final: an empty uncompressed block, its header's 3 bits (BFINAL 0,
+/// BTYPE 0) with zeros to the next byte, then LEN and NLEN, `00 00 FF FF`.
+/// The size of the part, or 0 if the marker does not fit. Not in
+/// libdeflate.
+fn sync_marker(os: OutputBitstream, out: &mut [u8]) -> usize {
+    debug_assert!(os.bitcount <= 7 && !os.overflow);
+    // The bits left, the 3 bits of the header, and zeros to the byte.
+    let bytes = (os.bitcount as usize + 3).div_ceil(8);
+    let end = os.next + bytes + 4;
+    if end > out.len() {
+        return 0;
+    }
+    out[os.next..os.next + bytes].copy_from_slice(&os.bitbuf.to_le_bytes()[..bytes]);
+    out[end - 4..end].copy_from_slice(&[0, 0, 0xFF, 0xFF]);
+    end
 }
 
 #[cfg(test)]
