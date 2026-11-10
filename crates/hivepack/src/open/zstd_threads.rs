@@ -21,6 +21,7 @@
 //! What the frames in flight hold, their bytes, what they decode to and a
 //! decoder each, is bounded by `Limits::zstd_memlimit`.
 
+use std::cell::Cell;
 use std::io::Read;
 use std::sync::Arc;
 
@@ -42,13 +43,32 @@ const BLOCK_HEADER: usize = 3;
 /// A skippable frame's header: its magic and the size of what follows.
 const SKIPPABLE_HEADER: usize = 8;
 
+/// How far [`frame`] went through a frame's blocks before it needed more:
+/// where the next block's header is, and what the blocks before it decode
+/// to at most.
+#[derive(Clone, Copy)]
+struct Scanned {
+    at: usize,
+    most: usize,
+}
+
+/// What [`frame`] tells of the frame at the start of what is read.
+enum Framed {
+    /// Its size, and what a thread decodes it into.
+    Whole(usize, usize),
+    /// At least this many bytes are needed to tell, and where its blocks
+    /// were gone through to, if they were.
+    Need(usize, Option<Scanned>),
+}
+
 /// The frame at the start of `read`: its size and what a thread decodes it
 /// into, as much as it may decode to and no more than [`MAX_FRAME`], or what
 /// more is needed to tell; `None` where one thread would refuse it, or it
-/// is too large.
-fn frame(read: &[u8], window_log_max: u32) -> Option<Result<(usize, usize), usize>> {
+/// is too large. `from` is where an earlier call on the start of `read`
+/// stopped: the blocks before it are not gone through again.
+fn frame(read: &[u8], window_log_max: u32, from: Option<Scanned>) -> Option<Framed> {
     let header = match crate::zstd::get_frame_header(read).ok()? {
-        FrameHeaderState::NeedsInput(n) => return Some(Err(n.max(read.len() + 1))),
+        FrameHeaderState::NeedsInput(n) => return Some(Framed::Need(n.max(read.len() + 1), None)),
         FrameHeaderState::Complete(header) => header,
     };
     if header.frame_type != FrameType::Frame
@@ -58,14 +78,16 @@ fn frame(read: &[u8], window_log_max: u32) -> Option<Result<(usize, usize), usiz
         return None;
     }
     let block_max = header.block_size_max as usize;
-    let mut at = header.header_size as usize;
-    let mut most = 0usize;
+    let Scanned { mut at, mut most } = from.unwrap_or(Scanned {
+        at: header.header_size as usize,
+        most: 0,
+    });
     loop {
         if at > MAX_FRAME {
             return None;
         }
         let Some(bytes) = read.get(at..at + BLOCK_HEADER) else {
-            return Some(Err(at + BLOCK_HEADER));
+            return Some(Framed::Need(at + BLOCK_HEADER, Some(Scanned { at, most })));
         };
         let block = u32::from(bytes[0]) | u32::from(bytes[1]) << 8 | u32::from(bytes[2]) << 16;
         let (last, kind, size) = (block & 1 != 0, (block >> 1) & 3, (block >> 3) as usize);
@@ -97,7 +119,7 @@ fn frame(read: &[u8], window_log_max: u32) -> Option<Result<(usize, usize), usiz
         size if size <= most as u64 => size as usize,
         _ => return None,
     };
-    (at <= MAX_FRAME && most <= MAX_FRAME).then_some(Ok((at, most)))
+    (at <= MAX_FRAME && most <= MAX_FRAME).then_some(Framed::Whole(at, most))
 }
 
 /// What a thread does with a frame: what it decodes to, at most `most`
@@ -117,6 +139,12 @@ pub(super) struct ZstdFrames {
     window_log_max: u32,
     /// A frame was taken: what follows is another, or the end.
     after_frame: bool,
+    /// Where [`frame`] went through the next frame's blocks to, the last
+    /// time it needed more of them: [`Pieces::plan`] is asked again, with
+    /// more read from the same start, until the frame is whole, and would
+    /// otherwise go through its blocks from its start each time, 256 times
+    /// for a frame of more than 64 MiB read 256 KiB at a time.
+    scanned: Cell<Option<Scanned>>,
 }
 
 impl Pieces for ZstdFrames {
@@ -132,23 +160,27 @@ impl Pieces for ZstdFrames {
                 cost: len as u64,
             };
         }
-        match frame(read, self.window_log_max) {
-            Some(Ok((len, most))) => Plan::Piece {
+        match frame(read, self.window_log_max, self.scanned.take()) {
+            Some(Framed::Whole(len, most)) => Plan::Piece {
                 len,
                 cost: (len + most) as u64 + DECODER,
             },
-            Some(Err(need)) => Plan::Need(need),
+            Some(Framed::Need(need, scanned)) => {
+                self.scanned.set(scanned);
+                Plan::Need(need)
+            }
             None => Plan::Stop,
         }
     }
 
     fn take(&mut self, bytes: &Arc<Vec<u8>>) -> Work {
         self.after_frame = true;
+        self.scanned.set(None);
         if crate::zstd::is_skippable_frame(bytes) {
             return Work::Nothing;
         }
-        let most = match frame(bytes, self.window_log_max) {
-            Some(Ok((_, most))) => most,
+        let most = match frame(bytes, self.window_log_max, None) {
+            Some(Framed::Whole(_, most)) => most,
             _ => 0,
         };
         let bytes = Arc::clone(bytes);
@@ -197,6 +229,7 @@ pub(super) fn zstd_threads<'a, R: Read + Send + 'a>(
     let format = ZstdFrames {
         window_log_max,
         after_frame: false,
+        scanned: Cell::new(None),
     };
     Threaded::new(inner, format, threads, memory, "hivepack-zstd")
 }

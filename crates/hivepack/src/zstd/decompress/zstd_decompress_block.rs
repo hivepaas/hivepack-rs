@@ -1048,36 +1048,33 @@ fn decode_sequence(seq_state: &mut SeqState<'_>, tables: SeqTables<'_>, is_last_
     let d = &mut seq_state.d_stream;
     let prev = &mut seq_state.prev_offset;
 
-    // The offset.
+    // The offset. The repeat offsets are taken apart, so that they stay in
+    // registers: indexed, as libzstd indexes them, they are kept in memory.
     {
+        let [p0, p1, p2] = *prev;
         let offset;
         if of_bits > 1 {
             // At most ZSTD_WINDOWLOG_MAX - 1 bits.
             offset = of_base + d.read_bits_fast(of_bits) as usize;
-            prev[2] = prev[1];
-            prev[1] = prev[0];
-            prev[0] = offset;
+            *prev = [offset, p0, p1];
         } else {
-            let ll0 = usize::from(ll_d_info.base_value() == 0);
+            let ll0 = ll_d_info.base_value() == 0;
             if of_bits == 0 {
-                offset = prev[ll0];
-                prev[1] = prev[1 - ll0];
-                prev[0] = offset;
+                // prevOffset[ll0], and prevOffset[1] = prevOffset[!ll0].
+                offset = if ll0 { p1 } else { p0 };
+                *prev = [offset, if ll0 { p0 } else { p1 }, p2];
             } else {
-                let code = of_base + ll0 + d.read_bits_fast(1) as usize;
-                let mut temp = if code == 3 {
-                    prev[0].wrapping_sub(1)
-                } else {
-                    prev[code]
+                // From 1 to 3: the offset code of one bit has a base of 1.
+                let code = of_base + usize::from(ll0) + d.read_bits_fast(1) as usize;
+                let mut temp = match code {
+                    1 => p1,
+                    2 => p2,
+                    _ => p0.wrapping_sub(1),
                 };
                 // 0 is not valid: the input is corrupted. Make it -1, which
                 // the copy rejects.
                 temp = temp.wrapping_sub(usize::from(temp == 0));
-                if code != 1 {
-                    prev[2] = prev[1];
-                }
-                prev[1] = prev[0];
-                prev[0] = temp;
+                *prev = [temp, p0, if code == 1 { p2 } else { p1 }];
                 offset = temp;
             }
         }

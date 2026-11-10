@@ -62,6 +62,31 @@ With the `unsafe-fast` feature, off by default (see [docs/unsafe.md](../../../..
 
 **Measured on** `.github/workflows/bench.yml`, on November 1, 2026, with rustc 1.99.1: Linux x86-64 on AMD EPYC 7763 (4 threads); Windows x86-64 on AMD64 Family 25 Model 1 Stepping 1 (4 threads); macOS arm64 on Apple M1 (Virtual) (3 threads). Each job gets what the runner has that day, so the two tables, and the formats, are not on the same processor, and they are shared machines: the ratios hold better than the speeds.
 
+### Where decompression stands on a desktop x86-64
+
+On an AMD Ryzen 9 9950X (Zen 5), November 2026, a `.tar.zst` of 2.35 GB (programs and libraries, one frame of `zstd -9 -T0`) decoded streaming, 128 KiB in and out, best of three, with `unsafe-fast`:
+
+| | Time |
+|---|---|
+| hivepack (after hivepack-rs#201) | 1.40 s, 0.84× |
+| libzstd 1.5.7 | 1.17 s |
+| libzstd built without its assembly and BMI2 code (`no_asm`, `DYNAMIC_BMI2=0`) | 1.24 s |
+
+The sequence loop (`decompress_sequences_body_with`) is about 83% of the gap. It runs about 148 instructions a sequence, where libzstd's C runs 130 and its BMI2 build 115. There are 140 million sequences, of 16.8 bytes on average. Branch misses are the same, and so are the slots lost to the front end and the back end: the difference is the µops retired. They come from registers. The loop holds a base and an index for each buffer where C holds one pointer, so the three FSE states and the bit container are kept on the stack from one sequence to the next. Huffman decoding is within 12% of libzstd's assembly loop, and the FSE tables' building within 35%; together they are the rest.
+
+Tried, and kept or not, in hivepack-rs#201:
+
+| Change | Result | Kept |
+|---|---|---|
+| The repeat offsets taken apart, out of an indexed array | −1.5% | yes |
+| The bitstream register read without its bounds check | −0.8% | no |
+| `SeqSymbol` as separate fields, read by reference as libzstd does | slower | no |
+| The rare path (`exec_sequence_end`) given the sequence as scalars | fewer instructions, same time or slower | no |
+| A BMI2 build | 8% fewer instructions, 1.3% fewer cycles | no |
+| `x86-64-v3` | slower | no |
+
+**Not done yet: the sequence loop on raw pointers.** With `unsafe-fast`, the loop's fast path already copies without bounds checks once per block (`unchecked_loop_fits`). The loop could also go on raw pointers for the output, the literals and the bitstream, as libzstd's does, which frees the registers the bases take. It is the only change seen that could close most of the 11% between the port and libzstd's own C. It would take `unsafe` from the copies into the whole loop: the decoding of each sequence, the bitstream's reloads and the state updates. So it is a decision on what `unsafe-fast` covers, left until it is made. Its tests would be the ones of the copies today: the checked and unchecked loops compared byte for byte, Miri, and the fuzzer against libzstd under AddressSanitizer.
+
 ## License
 
 BSD-3-Clause, the license of the code it is ported from. See [LICENSE](LICENSE). Copyright (c) Meta Platforms, Inc. and affiliates, and (c) 2026 HivePaaS. The suffix sort of the dictionary builder, `src/dict_builder/divsufsort.rs`, is ported from libdivsufsort-lite, which libzstd ships, and is under the MIT license, with its notice there and in [LICENSE](LICENSE): Copyright (c) 2003-2008 Yuta Mori.
