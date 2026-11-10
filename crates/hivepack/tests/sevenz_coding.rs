@@ -279,6 +279,51 @@ fn of_seven_zip_s_methods_and_levels() {
 }
 
 #[test]
+fn each_folder_takes_the_compression_set_before_it() {
+    let data = support::input(&mut Rng(10), 50_000);
+    let mut writer =
+        Writer::with_options(Cursor::new(Vec::new()), WriteOptions::default()).unwrap();
+    let settings = [
+        (Method::Lzma2 { preset: 6 }, Filter::X86, Some(1 << 20)),
+        (Method::Lzma { preset: 1 }, Filter::None, Some(64 << 10)),
+        (Method::BZip2 { level: 9 }, Filter::None, None),
+        (Method::Lzma2 { preset: 6 }, Filter::Delta(2), None),
+    ];
+    for (i, (method, filter, dictionary)) in settings.into_iter().enumerate() {
+        writer.set_compression(method, filter, dictionary).unwrap();
+        writer
+            .add_file(NewEntry::new(&format!("{i}")), &mut &data[..])
+            .unwrap();
+    }
+    // A filter with a method that has none is refused, and nothing changes.
+    assert!(matches!(
+        writer.set_compression(Method::Copy, Filter::X86, None),
+        Err(Error::Param)
+    ));
+    assert!(matches!(
+        writer.set_compression(Method::Lzma2 { preset: 6 }, Filter::None, Some(100)),
+        Err(Error::Param)
+    ));
+    writer.add_file(NewEntry::new("4"), &mut &data[..]).unwrap();
+    let archive = open(writer.finish().unwrap().into_inner(), None);
+    assert_eq!(archive.folders(), 4, "the last joins the folder before");
+    let expected = [
+        (Compression::Lzma2, Filter::X86, Some(1 << 20)),
+        (Compression::Lzma, Filter::None, Some(64 << 10)),
+        (Compression::BZip2, Filter::None, None),
+        (Compression::Lzma2, Filter::Delta(2), Some(8 << 20)),
+    ];
+    for (folder, (method, filter, dictionary)) in expected.into_iter().enumerate() {
+        let coding = archive.folder_coding(folder).unwrap();
+        assert_eq!(
+            (coding.method, coding.filter, coding.dictionary),
+            (method, filter, dictionary),
+            "{folder}"
+        );
+    }
+}
+
+#[test]
 fn a_folder_that_is_not_there_has_none() {
     let archive = open(written(WriteOptions::default(), b"data"), None);
     assert!(archive.folder_coding(0).is_some());

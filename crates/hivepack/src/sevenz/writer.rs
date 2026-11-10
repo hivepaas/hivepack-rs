@@ -1025,6 +1025,46 @@ impl<W: Write + Seek> Writer<W> {
         Ok(())
     }
 
+    /// Compresses the files from the next with data on with `method`,
+    /// `filter` and `dictionary` ([`WriteOptions::dictionary`]), in a folder
+    /// of their own, as [`set_method`](Writer::set_method) does: so that a
+    /// changed archive's folders, written again a call of
+    /// [`copy_from`](Writer::copy_from) at a time, are each compressed as
+    /// [`Archive::folder_coding`] says it was. Options that cannot be, as in
+    /// [`Writer::with_options`], are [`Error::Param`], and the writer stays
+    /// as it was.
+    pub fn set_compression(
+        &mut self,
+        method: Method,
+        filter: Filter,
+        dictionary: Option<u32>,
+    ) -> Result<()> {
+        if let Some(e) = self.failed {
+            return Err(e);
+        }
+        let now = (
+            self.options.method,
+            self.options.filter,
+            self.options.dictionary,
+        );
+        if (method, filter, dictionary) == now {
+            return Ok(());
+        }
+        let options = WriteOptions {
+            method,
+            filter,
+            dictionary,
+            ..self.options.clone()
+        };
+        options.check()?;
+        check_method(&options)?;
+        self.options.method = method;
+        self.options.filter = filter;
+        self.options.dictionary = dictionary;
+        self.method_changed = true;
+        Ok(())
+    }
+
     /// A file with what `reader` gives, and the bytes it was.
     pub fn add_file<R: Read>(&mut self, entry: NewEntry, reader: &mut R) -> io::Result<u64> {
         self.start_file(entry).map_err(io::Error::other)?;
