@@ -36,8 +36,8 @@ use crate::xz::{
 
 use crate::sevenz::aes7z::{AesEncoder, K_AES_ID, MAX_KEY_CYCLES};
 use crate::sevenz::arc_in::SIGNATURE;
-use crate::sevenz::crc;
 use crate::sevenz::error::{Error, Result};
+use crate::sevenz::{Archive, Entry, Walk, crc};
 use crate::threads::Threads;
 use crate::workers::Workers;
 
@@ -437,6 +437,19 @@ impl NewEntry {
     }
 }
 
+/// What a folder copied is copied in, a piece at a time.
+const COPY_PIECE: usize = 1 << 20;
+
+/// What `entry` of an archive read is, to write again.
+fn new_entry(entry: &Entry) -> NewEntry {
+    NewEntry {
+        name: entry.name.clone(),
+        attributes: entry.attributes,
+        mtime: entry.mtime,
+        ctime: entry.ctime,
+    }
+}
+
 /// `value` as 7z writes numbers: the first byte's leading ones count the bytes
 /// after it, little-endian, and the rest of it holds the top.
 fn number(out: &mut Vec<u8>, value: u64) {
@@ -757,15 +770,24 @@ struct FolderInfo {
     /// Its coders, each reading the one before: the first the packed stream, the
     /// last giving the data.
     coders: Vec<CoderInfo>,
+    /// The folder's description as another archive had it, its coders, their
+    /// bonds and its packed streams, written as it is in place of `coders`: a
+    /// folder copied ([`Writer::copy_from`]).
+    copied: Option<Vec<u8>>,
     /// Each coder's output.
     unpack_sizes: Vec<u64>,
-    pack_size: u64,
+    /// Its packed streams' sizes, in order: one, but in a folder copied.
+    pack_sizes: Vec<u64>,
     /// The CRC of the folder, for an encoded header.
     crc: Option<u32>,
 }
 
 impl FolderInfo {
     fn write(&self, out: &mut Vec<u8>) {
+        if let Some(copied) = &self.copied {
+            out.extend_from_slice(copied);
+            return;
+        }
         number(out, self.coders.len() as u64);
         for (id, props) in &self.coders {
             let flags = id.len() as u8 | if props.is_empty() { 0 } else { 0x20 };
@@ -789,10 +811,11 @@ impl FolderInfo {
 fn streams_info(out: &mut Vec<u8>, pack_pos: u64, folders: &[&FolderInfo]) {
     out.push(nid::PACK_INFO);
     number(out, pack_pos);
-    number(out, folders.len() as u64);
+    let streams: usize = folders.iter().map(|f| f.pack_sizes.len()).sum();
+    number(out, streams as u64);
     out.push(nid::SIZE);
-    for folder in folders {
-        number(out, folder.pack_size);
+    for &size in folders.iter().flat_map(|f| &f.pack_sizes) {
+        number(out, size);
     }
     out.push(nid::END);
 
@@ -833,9 +856,16 @@ struct OpenFolder {
     files: Vec<(u64, u32)>,
 }
 
+/// A file's size and CRC, in a folder: a file of a folder copied may have no
+/// CRC.
+type FileSum = (u64, Option<u32>);
+
 /// A file or directory written.
 struct Written {
     info: NewEntry,
+    /// Its name as UTF-16 units, as an archive copied had it, in place of
+    /// `info.name`: a name that is not text stays as it was.
+    name16: Option<Vec<u16>>,
     /// Neither a directory nor empty.
     has_stream: bool,
     is_dir: bool,
@@ -864,7 +894,9 @@ pub struct Writer<W> {
     /// The method changed since the open folder began: the next file starts
     /// another.
     method_changed: bool,
-    folders: Vec<(FolderInfo, Vec<(u64, u32)>)>,
+    /// The folders written, and the sizes and CRCs of their files: a file of
+    /// a folder copied may have none.
+    folders: Vec<(FolderInfo, Vec<FileSum>)>,
     pack_total: u64,
     failed: Option<Error>,
     progress: WriteProgress,
@@ -934,6 +966,7 @@ impl<W: Write + Seek> Writer<W> {
         self.check(&entry)?;
         self.entries.push(Written {
             info: entry,
+            name16: None,
             has_stream: false,
             is_dir: false,
         });
@@ -979,10 +1012,189 @@ impl<W: Write + Seek> Writer<W> {
         self.check(&entry)?;
         self.entries.push(Written {
             info: entry,
+            name16: None,
             has_stream: false,
             is_dir: true,
         });
         self.in_file = false;
+        Ok(())
+    }
+
+    /// What `keep` keeps of `archive`, put in this archive: an archive changed,
+    /// as 7-Zip changes one, by writing it again. A folder whose files are all
+    /// kept is copied as it is, its packed streams and its description, with
+    /// whatever coders it has, encrypted or not, and nothing decoded; one some
+    /// of whose files go is decoded, and the files kept written again through
+    /// this writer's method and password; one none of whose files are kept is
+    /// left out. Directories and empty files kept go across as they are. Each
+    /// keeps its name, as UTF-16, its attributes, its times and its CRC.
+    ///
+    /// What is copied comes first, in the archive's order, then the files
+    /// written again; what is added after comes after them. A folder decoded
+    /// needs `archive`'s password if it is encrypted; the folders copied keep
+    /// their encryption, so a caller changing an encrypted archive gives this
+    /// writer the same password, and [`WriteOptions::encrypt_headers`] where
+    /// [`Archive::headers_encrypted`] says. [`WriteOptions::stop`] is looked at
+    /// as a folder is copied. An error stays, as any of the writer's does.
+    pub fn copy_from<R: Read + Seek>(
+        &mut self,
+        archive: &mut Archive<R>,
+        keep: impl FnMut(&Entry) -> bool,
+    ) -> Result<()> {
+        if let Some(e) = self.failed {
+            return Err(e);
+        }
+        let copied = self.copy_inner(archive, keep);
+        if let Err(e) = copied {
+            self.failed = Some(e);
+        }
+        copied
+    }
+
+    fn copy_inner<R: Read + Seek>(
+        &mut self,
+        archive: &mut Archive<R>,
+        mut keep: impl FnMut(&Entry) -> bool,
+    ) -> Result<()> {
+        // The file before ends, and its folder: the folders copied come after.
+        self.in_file = false;
+        self.close_folder().map_err(|e| as_error(&e))?;
+        let len = archive.len();
+        let entries: Vec<Entry> = archive.entries().collect();
+        let kept: Vec<bool> = entries.iter().map(&mut keep).collect();
+        let folders = archive.folders();
+        // Whether each folder's files are all kept, and whether any is.
+        let mut whole = vec![true; folders];
+        let mut any = vec![false; folders];
+        for (entry, &kept) in entries.iter().zip(&kept) {
+            if let Some(fo) = entry.folder {
+                whole[fo] &= kept;
+                any[fo] |= kept;
+            }
+        }
+        let mut copied = vec![false; folders];
+        for (entry, _) in entries.iter().zip(&kept).filter(|(_, kept)| **kept) {
+            match entry.folder {
+                None => self.entries.push(Written {
+                    info: new_entry(entry),
+                    name16: Some(entry.name_utf16.clone()),
+                    has_stream: false,
+                    is_dir: entry.is_dir,
+                }),
+                Some(fo) if whole[fo] => {
+                    if !copied[fo] {
+                        self.copy_folder(archive, fo)?;
+                        copied[fo] = true;
+                    }
+                    self.entries.push(Written {
+                        info: new_entry(entry),
+                        name16: Some(entry.name_utf16.clone()),
+                        has_stream: true,
+                        is_dir: false,
+                    });
+                }
+                // Written again below.
+                Some(_) => {}
+            }
+        }
+        // The files kept of folders some of whose files go, decoded.
+        let db = &archive.db;
+        let runs: Vec<std::ops::Range<usize>> = (0..folders)
+            .filter(|&fo| any[fo] && !whole[fo])
+            .map(|fo| db.folder_to_file[fo] as usize..db.folder_to_file[fo + 1] as usize)
+            .collect();
+        let mut buf = vec![0u8; 64 << 10];
+        for run in runs {
+            let mut walk = Walk::new(run.start..run.end.min(len));
+            while let Some(entry) = walk.next(&mut *archive)? {
+                if entry.folder.is_none() || !kept[entry.index] {
+                    continue;
+                }
+                self.start_file(new_entry(&entry))?;
+                if let Some(written) = self.entries.last_mut() {
+                    written.name16 = Some(entry.name_utf16.clone());
+                }
+                loop {
+                    let n = walk.read_current(&mut *archive, &mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    self.write_all(&buf[..n]).map_err(|e| as_error(&e))?;
+                }
+            }
+        }
+        self.in_file = false;
+        Ok(())
+    }
+
+    /// Folder `fo` of `archive` copied as it is: its packed streams, then what
+    /// the header will say of it and of its files.
+    fn copy_folder<R: Read + Seek>(&mut self, archive: &mut Archive<R>, fo: usize) -> Result<()> {
+        let db = &archive.db;
+        let ar = &db.db;
+        let description =
+            ar.coders_data[ar.fo_coders_offsets[fo]..ar.fo_coders_offsets[fo + 1]].to_vec();
+        let unpack_sizes = ar.coder_unpack_sizes[ar.fo_to_coder_unpack_sizes[fo] as usize
+            ..ar.fo_to_coder_unpack_sizes[fo + 1] as usize]
+            .to_vec();
+        let (first, end) = (
+            ar.fo_start_pack_stream_index[fo] as usize,
+            ar.fo_start_pack_stream_index[fo + 1] as usize,
+        );
+        let pack_sizes: Vec<u64> = (first..end)
+            .map(|i| ar.pack_positions[i + 1] - ar.pack_positions[i])
+            .collect();
+        let start = db
+            .data_pos
+            .checked_add(ar.pack_positions[first])
+            .ok_or(Error::Archive)?;
+        let packed = ar.pack_positions[end] - ar.pack_positions[first];
+        let files: Vec<FileSum> = (db.folder_to_file[fo] as usize
+            ..db.folder_to_file[fo + 1] as usize)
+            .filter(|&i| db.file_to_folder[i] as usize == fo)
+            .map(|i| (db.file_size(i), db.crcs.check(i).then(|| db.crcs.vals[i])))
+            .collect();
+        let size = archive.folder_size(fo);
+
+        // The packed streams, a piece at a time.
+        let reader = &mut archive.reader;
+        reader
+            .seek(SeekFrom::Start(start))
+            .map_err(|_| Error::Read)?;
+        let mut left = packed;
+        let mut buf = vec![0u8; COPY_PIECE.min(packed as usize).max(1)];
+        while left > 0 {
+            if self
+                .options
+                .stop
+                .as_ref()
+                .is_some_and(|stop| stop.load(Ordering::Relaxed))
+            {
+                return Err(Error::Progress);
+            }
+            let n = buf.len().min(left as usize);
+            reader
+                .read_exact(&mut buf[..n])
+                .map_err(|e| match e.kind() {
+                    io::ErrorKind::UnexpectedEof => Error::InputEof,
+                    _ => Error::Read,
+                })?;
+            self.w.write_all(&buf[..n]).map_err(|_| Error::Write)?;
+            left -= n as u64;
+        }
+        self.pack_total += packed;
+        self.progress.taken.fetch_add(size, Ordering::Relaxed);
+        self.progress.compressed.fetch_add(size, Ordering::Relaxed);
+        self.folders.push((
+            FolderInfo {
+                coders: Vec::new(),
+                copied: Some(description),
+                unpack_sizes,
+                pack_sizes,
+                crc: None,
+            },
+            files,
+        ));
         Ok(())
     }
 
@@ -1155,11 +1367,16 @@ impl<W: Write + Seek> Writer<W> {
         self.folders.push((
             FolderInfo {
                 coders: folder.coders,
+                copied: None,
                 unpack_sizes,
-                pack_size: folder.packed,
+                pack_sizes: vec![folder.packed],
                 crc: None,
             },
-            folder.files,
+            folder
+                .files
+                .into_iter()
+                .map(|(size, sum)| (size, Some(sum)))
+                .collect(),
         ));
         Ok(())
     }
@@ -1182,10 +1399,20 @@ impl<W: Write + Seek> Writer<W> {
                     number(&mut out, *size);
                 }
             }
-            out.push(nid::CRC);
-            out.push(1); // All are defined.
-            for (_, files) in &self.folders {
-                for (_, crc) in files {
+            let crcs: Vec<Option<u32>> = self
+                .folders
+                .iter()
+                .flat_map(|(_, files)| files.iter().map(|&(_, crc)| crc))
+                .collect();
+            if crcs.iter().any(Option::is_some) {
+                out.push(nid::CRC);
+                if crcs.iter().all(Option::is_some) {
+                    out.push(1); // All are defined.
+                } else {
+                    out.push(0);
+                    bits(&mut out, crcs.iter().map(Option::is_some));
+                }
+                for crc in crcs.iter().flatten() {
                     out.extend_from_slice(&crc.to_le_bytes());
                 }
             }
@@ -1220,8 +1447,17 @@ impl<W: Write + Seek> Writer<W> {
         }
         let mut names = vec![0]; // Not external.
         for entry in &self.entries {
-            for unit in entry.info.name.encode_utf16() {
-                names.extend_from_slice(&unit.to_le_bytes());
+            match &entry.name16 {
+                Some(units) => {
+                    for unit in units {
+                        names.extend_from_slice(&unit.to_le_bytes());
+                    }
+                }
+                None => {
+                    for unit in entry.info.name.encode_utf16() {
+                        names.extend_from_slice(&unit.to_le_bytes());
+                    }
+                }
             }
             names.extend_from_slice(&[0, 0]);
         }
@@ -1306,8 +1542,9 @@ impl<W: Write + Seek> Writer<W> {
         self.w.write_all(&packed)?;
         let info = FolderInfo {
             coders,
+            copied: None,
             unpack_sizes,
-            pack_size: packed.len() as u64,
+            pack_sizes: vec![packed.len() as u64],
             crc: Some(crc(&raw)),
         };
         let mut out = vec![nid::ENCODED_HEADER];

@@ -330,3 +330,14 @@ pub fn damaged(rng: &mut Rng, archive: &[u8]) -> Vec<u8> {
     }
     bad
 }
+
+/// Salts and IVs for the tests, where the system's are not at hand: Windows has
+/// no `/dev/urandom`, and a program there gives its own.
+pub fn random_source() -> hivepack::sevenz::RandomSource {
+    let rng = std::sync::Mutex::new(Rng(0x7a37_7a37));
+    std::sync::Arc::new(move |bytes: &mut [u8]| {
+        let mut rng = rng.lock().unwrap();
+        bytes.iter_mut().for_each(|b| *b = rng.next() as u8);
+        Ok(())
+    })
+}

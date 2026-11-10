@@ -1026,6 +1026,9 @@ pub(crate) struct ArEx {
     pub(crate) file_name_offsets: Option<Vec<usize>>,
     /// UTF-16LE.
     pub(crate) file_names: Vec<u8>,
+    /// Whether the header was encrypted: its names hidden without the
+    /// password.
+    pub(crate) headers_encrypted: bool,
 }
 
 impl ArEx {
@@ -1482,6 +1485,8 @@ impl ArEx {
                 budget,
             )?;
             decoded = bufs.swap_remove(0);
+            self.headers_encrypted =
+                (0..temp_ar.num_folders as usize).any(|fo| dec::folder_is_encrypted(&temp_ar, fo));
             sd = Sd::new(&decoded);
             ty = sd.read_id()?;
         }

@@ -466,6 +466,11 @@ path = "tests/sevenz_threads.rs"
 required-features = ["deflate", "extract", "sevenz"]
 
 [[test]]
+name = "sevenz_update"
+path = "tests/sevenz_update.rs"
+required-features = ["deflate", "sevenz"]
+
+[[test]]
 name = "sevenz_writer"
 path = "tests/sevenz_writer.rs"
 required-features = ["deflate", "sevenz"]

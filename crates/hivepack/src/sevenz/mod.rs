@@ -387,6 +387,13 @@ impl<R: Read + Seek> Archive<R> {
         Ok(file.to_vec())
     }
 
+    /// Whether the archive's header is encrypted, its names hidden without
+    /// the password, as `7z a -mhe=on` writes it: what a writer changing it
+    /// keeps with [`WriteOptions::encrypt_headers`].
+    pub fn headers_encrypted(&self) -> bool {
+        self.db.headers_encrypted
+    }
+
     /// A reader of the files, one after another.
     pub fn files(&mut self) -> Files<'_, R> {
         let len = self.len();
