@@ -1109,7 +1109,31 @@ impl<W: Write + Seek> Writer<W> {
         if let Some(e) = self.failed {
             return Err(e);
         }
-        let copied = self.copy_inner(archive, keep);
+        let copied = self.copy_inner(archive, keep, |_| None);
+        if let Err(e) = copied {
+            self.failed = Some(e);
+        }
+        copied
+    }
+
+    /// [`copy_from`](Writer::copy_from), with the names `rename` gives the
+    /// entries kept, in UTF-16 units as [`Entry::name_utf16`] has them; none
+    /// keeps an entry's own. A name is in the header alone: what is renamed
+    /// is copied as anything kept is, its folder whole if all of it is kept,
+    /// with no password for its data. Renaming a directory renames none of
+    /// what is in it, whose names are whole paths: the caller renames each.
+    /// An empty name, or one with a NUL, is [`Error::Param`], as the
+    /// writer's error, and nothing of the archive is copied.
+    pub fn copy_from_renamed<R: Read + Seek>(
+        &mut self,
+        archive: &mut Archive<R>,
+        keep: impl FnMut(&Entry) -> bool,
+        rename: impl FnMut(&Entry) -> Option<Vec<u16>>,
+    ) -> Result<()> {
+        if let Some(e) = self.failed {
+            return Err(e);
+        }
+        let copied = self.copy_inner(archive, keep, rename);
         if let Err(e) = copied {
             self.failed = Some(e);
         }
@@ -1120,13 +1144,38 @@ impl<W: Write + Seek> Writer<W> {
         &mut self,
         archive: &mut Archive<R>,
         mut keep: impl FnMut(&Entry) -> bool,
+        mut rename: impl FnMut(&Entry) -> Option<Vec<u16>>,
     ) -> Result<()> {
+        // The names first, as a bad one copies nothing.
+        let entries: Vec<Entry> = archive.entries().collect();
+        let kept: Vec<bool> = entries.iter().map(&mut keep).collect();
+        let mut names: Vec<Option<Vec<u16>>> = Vec::with_capacity(entries.len());
+        for (entry, &kept) in entries.iter().zip(&kept) {
+            let name = if kept { rename(entry) } else { None };
+            if name
+                .as_ref()
+                .is_some_and(|n| n.is_empty() || n.contains(&0))
+            {
+                return Err(Error::Param);
+            }
+            names.push(name);
+        }
+        let name_of = |entry: &Entry| -> Vec<u16> {
+            names[entry.index]
+                .clone()
+                .unwrap_or_else(|| entry.name_utf16.clone())
+        };
+        let info_of = |entry: &Entry| -> NewEntry {
+            let mut info = new_entry(entry);
+            if let Some(name) = &names[entry.index] {
+                info.name = String::from_utf16_lossy(name);
+            }
+            info
+        };
         // The file before ends, and its folder: the folders copied come after.
         self.in_file = false;
         self.close_folder().map_err(|e| as_error(&e))?;
         let len = archive.len();
-        let entries: Vec<Entry> = archive.entries().collect();
-        let kept: Vec<bool> = entries.iter().map(&mut keep).collect();
         let folders = archive.folders();
         // Whether each folder's files are all kept, and whether any is.
         let mut whole = vec![true; folders];
@@ -1144,8 +1193,8 @@ impl<W: Write + Seek> Writer<W> {
         for (entry, _) in entries.iter().zip(&kept).filter(|(_, kept)| **kept) {
             match folder_of(entry) {
                 None => self.entries.push(Written {
-                    info: new_entry(entry),
-                    name16: Some(entry.name_utf16.clone()),
+                    info: info_of(entry),
+                    name16: Some(name_of(entry)),
                     has_stream: false,
                     is_dir: entry.is_dir,
                 }),
@@ -1155,8 +1204,8 @@ impl<W: Write + Seek> Writer<W> {
                         copied[fo] = true;
                     }
                     self.entries.push(Written {
-                        info: new_entry(entry),
-                        name16: Some(entry.name_utf16.clone()),
+                        info: info_of(entry),
+                        name16: Some(name_of(entry)),
                         has_stream: true,
                         is_dir: false,
                     });
@@ -1178,9 +1227,9 @@ impl<W: Write + Seek> Writer<W> {
                 if folder_of(&entry).is_none() || !kept[entry.index] {
                     continue;
                 }
-                self.start_file(new_entry(&entry))?;
+                self.start_file(info_of(&entry))?;
                 if let Some(written) = self.entries.last_mut() {
-                    written.name16 = Some(entry.name_utf16.clone());
+                    written.name16 = Some(name_of(&entry));
                 }
                 loop {
                     let n = walk.read_current(&mut *archive, &mut buf)?;

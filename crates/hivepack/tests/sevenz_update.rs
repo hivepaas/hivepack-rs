@@ -418,6 +418,116 @@ fn what_has_no_data_between_a_folder_s_files_is_not_in_it() {
     seven_zip_tests("no-data-taken-out", &out, None);
 }
 
+/// `data`, copied whole, with the names `rename` gives.
+fn renamed(
+    data: &[u8],
+    password: Option<&str>,
+    rename: impl FnMut(&hivepack::sevenz::Entry) -> Option<Vec<u16>>,
+) -> Result<Vec<u8>, Error> {
+    let mut archive = open(data, password);
+    let options = WriteOptions {
+        password: password.map(str::to_owned),
+        encrypt_headers: archive.headers_encrypted(),
+        ..WriteOptions::default()
+    };
+    let mut w = Writer::with_options(Cursor::new(Vec::new()), salted(options))?;
+    w.copy_from_renamed(&mut archive, |_| true, rename)?;
+    Ok(w.finish()?.into_inner())
+}
+
+fn utf16(name: &str) -> Vec<u16> {
+    name.encode_utf16().collect()
+}
+
+/// A name is in the header alone: renamed, the folders are copied whole,
+/// encrypted ones with no password, and the rest of each name as it was.
+#[test]
+fn renamed_the_folders_are_copied_as_they_are() {
+    let (data, _) = sample();
+    let before = held(&data, None);
+    let out = renamed(&data, None, |e| match e.name.as_str() {
+        "a.txt" => Some(utf16("đổi tên.txt")),
+        "d" => Some(utf16("dir")),
+        "d/e.txt" => Some(utf16("dir/e.txt")),
+        "empty" => Some(utf16("trống")),
+        _ => None,
+    })
+    .unwrap();
+    assert_eq!(packed(&out, None), packed(&data, None));
+    let mut expected = before.clone();
+    for (from, to) in [
+        ("a.txt", "đổi tên.txt"),
+        ("d", "dir"),
+        ("d/e.txt", "dir/e.txt"),
+        ("empty", "trống"),
+    ] {
+        let held = expected.remove(from).unwrap();
+        expected.insert(to.to_owned(), held);
+    }
+    assert_eq!(held(&out, None), expected);
+    let back = open(&out, None);
+    let dir = back.entries().find(|e| e.name == "dir").unwrap();
+    assert!(dir.is_dir && !dir.has_stream);
+    seven_zip_tests("renamed", &out, None);
+
+    // A name that is not text, given and kept, and the others as they were.
+    let odd = vec![0xD800, u16::from(b'x')];
+    let out = renamed(&data, None, |e| (e.name == "b.txt").then(|| odd.clone())).unwrap();
+    let back = open(&out, None);
+    assert!(back.entries().any(|e| e.name_utf16 == odd));
+    let again = renamed(&out, None, |_| None).unwrap();
+    assert!(open(&again, None).entries().any(|e| e.name_utf16 == odd));
+    assert_eq!(packed(&again, None), packed(&data, None));
+
+    // Empty, or with a NUL: refused, as the writer's error.
+    for bad in [Vec::new(), vec![u16::from(b'a'), 0]] {
+        let mut archive = open(&data, None);
+        let mut w = Writer::new(Cursor::new(Vec::new())).unwrap();
+        let e = w.copy_from_renamed(
+            &mut archive,
+            |_| true,
+            |e| (e.name == "c.txt").then(|| bad.clone()),
+        );
+        assert_eq!(e, Err(Error::Param));
+        assert_eq!(w.add_directory(NewEntry::new("x")), Err(Error::Param));
+    }
+}
+
+#[test]
+fn an_encrypted_archive_is_renamed_in_with_no_password_but_for_its_names() {
+    let mut rng = Rng(8);
+    let files: Vec<(&str, Vec<u8>)> = vec![
+        ("a.txt", text(&mut rng, 40_000)),
+        ("b.txt", text(&mut rng, 30_000)),
+    ];
+    let options = WriteOptions {
+        password: Some("secret".into()),
+        ..WriteOptions::default()
+    };
+    let data = made(&files, &[], options.clone());
+    let out = renamed(&data, None, |e| (e.name == "a.txt").then(|| utf16("z.txt"))).unwrap();
+    assert_eq!(packed(&out, None), packed(&data, None));
+    let held_out = held(&out, Some("secret"));
+    assert_eq!(held_out["z.txt"].0.as_deref(), Some(&files[0].1[..]));
+    seven_zip_tests("renamed-encrypted", &out, Some("secret"));
+
+    let hidden = made(
+        &files,
+        &[],
+        WriteOptions {
+            encrypt_headers: true,
+            ..options
+        },
+    );
+    let out = renamed(&hidden, Some("secret"), |e| {
+        (e.name == "b.txt").then(|| utf16("y.txt"))
+    })
+    .unwrap();
+    assert!(open(&out, Some("secret")).headers_encrypted());
+    assert!(held(&out, Some("secret")).contains_key("y.txt"));
+    seven_zip_tests("renamed-hidden", &out, Some("secret"));
+}
+
 #[test]
 fn stopping_while_copying() {
     let (data, _) = sample();

@@ -77,6 +77,26 @@ fuzz_target!(|data: &[u8]| {
     // Changed: kept whole, its folders copied as they are, nothing decoded;
     // then every other file, the folders that lose one decoded and stored.
     // What is written opens again, with the entries kept.
+    // Renamed: every name under `r/`, the folders copied whole.
+    let write = WriteOptions {
+        method: Method::Copy,
+        ..WriteOptions::default()
+    };
+    if let Ok(mut writer) = Writer::with_options(Cursor::new(Vec::new()), write)
+        && writer
+            .copy_from_renamed(&mut archive, |_| true, |e| {
+                let mut name: Vec<u16> = "r/".encode_utf16().collect();
+                name.extend(&e.name_utf16);
+                Some(name)
+            })
+            .is_ok()
+        && let Ok(out) = writer.finish()
+    {
+        let back = Archive::open_with(Cursor::new(out.into_inner()), &options)
+            .expect("what copy_from_renamed wrote opens");
+        assert_eq!(back.len(), archive.len());
+    }
+
     let total = (0..archive.folders())
         .map(|folder| archive.folder_size(folder))
         .fold(0u64, u64::saturating_add);
