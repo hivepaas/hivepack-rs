@@ -29,9 +29,10 @@ use crate::deflate::{
     Deflate, ErrorCode as ZErrorCode, Flush, InBuffer as ZIn, OutBuffer as ZOut, Status as ZStatus,
 };
 use crate::xz::{
-    Action as XzAction, DELTA_DIST_MAX, DELTA_DIST_MIN, FILTER_ARM, FILTER_ARM64, FILTER_ARMTHUMB,
-    FILTER_IA64, FILTER_POWERPC, FILTER_RISCV, FILTER_SPARC, FILTER_X86, Filter as XzFilter,
-    InBuffer as XzIn, LzmaOptions, OutBuffer as XzOut, Status as XzStatus, Stream,
+    Action as XzAction, DELTA_DIST_MAX, DELTA_DIST_MIN, DICT_SIZE_MIN, FILTER_ARM, FILTER_ARM64,
+    FILTER_ARMTHUMB, FILTER_IA64, FILTER_POWERPC, FILTER_RISCV, FILTER_SPARC, FILTER_X86,
+    Filter as XzFilter, InBuffer as XzIn, LzmaOptions, OutBuffer as XzOut, Status as XzStatus,
+    Stream,
 };
 
 use crate::sevenz::aes7z::{AesEncoder, K_AES_ID, MAX_KEY_CYCLES};
@@ -189,6 +190,11 @@ pub struct WriteOptions {
     pub method: Method,
     /// What runs over the data before that. None by default.
     pub filter: Filter,
+    /// LZMA's and LZMA2's dictionary, in place of the preset's: from 4 KiB to
+    /// 1.5 GiB, as liblzma takes it. The preset's by default. The other
+    /// methods have none, and leave it be. An encoder takes about 10 times
+    /// it, which [`WriteOptions::memory_usage`] counts.
+    pub dictionary: Option<u32>,
     /// Files go together in a folder, a solid block, which compresses better
     /// and reads worse, until it has this many bytes; `None` gives each file a
     /// folder of its own. 4 GiB by default.
@@ -260,6 +266,9 @@ impl WriteProgress {
     }
 }
 
+/// The largest dictionary liblzma's encoder takes: 1.5 GiB.
+const DICT_SIZE_MAX: u32 = (1 << 30) + (1 << 29);
+
 /// How often a writer waiting for LZMA2's blocks looks at
 /// [`WriteOptions::stop`].
 const STOP_EVERY: Duration = Duration::from_millis(50);
@@ -269,6 +278,7 @@ impl Default for WriteOptions {
         WriteOptions {
             method: Method::Lzma2 { preset: 6 },
             filter: Filter::None,
+            dictionary: None,
             solid_block_size: Some(1 << 32),
             compress_headers: true,
             password: None,
@@ -288,6 +298,7 @@ impl core::fmt::Debug for WriteOptions {
         f.debug_struct("WriteOptions")
             .field("method", &self.method)
             .field("filter", &self.filter)
+            .field("dictionary", &self.dictionary)
             .field("solid_block_size", &self.solid_block_size)
             .field("compress_headers", &self.compress_headers)
             .field("password", &self.password.as_ref().map(|_| "(hidden)"))
@@ -328,6 +339,9 @@ impl WriteOptions {
     fn check(&self) -> Result<()> {
         let lzma = matches!(self.method, Method::Lzma { .. } | Method::Lzma2 { .. });
         if (self.filter != Filter::None && !lzma)
+            || self
+                .dictionary
+                .is_some_and(|d| !(DICT_SIZE_MIN..=DICT_SIZE_MAX).contains(&d))
             || (self.encrypt_headers && self.password.is_none())
             || self.key_cycles > MAX_KEY_CYCLES
         {
@@ -357,10 +371,11 @@ impl WriteOptions {
             u64::MAX => Err(Error::Param),
             bytes => Ok(bytes),
         };
-        let preset = |p| LzmaOptions::preset(p).ok_or(Error::Param);
         let coder = match self.method {
             Method::Copy => 0,
-            Method::Lzma { preset: p } => encoder(&xz_chain(self, XzFilter::lzma1(preset(p)?))?)?,
+            Method::Lzma { preset: p } => {
+                encoder(&xz_chain(self, XzFilter::lzma1(lzma_preset(self, p)?))?)?
+            }
             Method::Lzma2 { preset: p } => match lzma2_options(self, p)? {
                 (lzma, Some(size)) => {
                     self.filter.coder()?;
@@ -380,7 +395,7 @@ impl WriteOptions {
         };
         // The header's encoder comes once the coders are let go.
         let header = if self.compress_headers || self.encrypt_headers {
-            let mut lzma = preset(6)?;
+            let mut lzma = LzmaOptions::preset(6).ok_or(Error::Param)?;
             lzma.dict_size = HEADER_DICT_MIN;
             encoder(&[XzFilter::lzma2(lzma)])?
         } else {
@@ -750,10 +765,20 @@ fn give(
     Ok(())
 }
 
+/// The options of LZMA's or LZMA2's encoder of `preset`, with the
+/// dictionary the options give.
+fn lzma_preset(options: &WriteOptions, preset: u32) -> Result<LzmaOptions> {
+    let mut lzma = LzmaOptions::preset(preset).ok_or(Error::Param)?;
+    if let Some(dictionary) = options.dictionary {
+        lzma.dict_size = dictionary;
+    }
+    Ok(lzma)
+}
+
 /// The options of LZMA2's encoder, and the size of its blocks if it is cut
 /// in blocks: then the dictionary is no larger than a block.
 fn lzma2_options(options: &WriteOptions, preset: u32) -> Result<(LzmaOptions, Option<usize>)> {
-    let mut lzma = LzmaOptions::preset(preset).ok_or(Error::Param)?;
+    let mut lzma = lzma_preset(options, preset)?;
     let Some(size) = options.lzma2_blocks.size(lzma.dict_size)? else {
         return Ok((lzma, None));
     };
@@ -1646,7 +1671,7 @@ fn check_method(options: &WriteOptions) -> Result<Option<Compressor>> {
 /// The compressor of a new folder. `spare`: the encoder of the last one, whose
 /// memory it takes over, which saves much when each file is a folder.
 fn make_compressor(options: &WriteOptions, spare: &mut Option<Box<Stream>>) -> Result<Compressor> {
-    let preset = |p| LzmaOptions::preset(p).ok_or(Error::Param);
+    let preset = |p| lzma_preset(options, p);
     let spare = spare.take();
     let raw = move |filters: Vec<XzFilter>| {
         match spare {
@@ -1676,7 +1701,7 @@ fn make_compressor(options: &WriteOptions, spare: &mut Option<Box<Stream>>) -> R
 
 /// The method's coder as a folder says it.
 fn method_coder(options: &WriteOptions) -> Result<CoderInfo> {
-    let preset = |p| LzmaOptions::preset(p).ok_or(Error::Param);
+    let preset = |p| lzma_preset(options, p);
     Ok(match options.method {
         Method::Copy => (vec![0x00], Vec::new()),
         Method::Lzma { preset: p } => {

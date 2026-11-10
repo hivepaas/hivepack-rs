@@ -49,6 +49,11 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
+    // What each folder was compressed with, read from its description.
+    for folder in 0..archive.folders().min(1 << 12) {
+        let _ = archive.folder_coding(folder);
+    }
+
     let mut left = MAX_OUTPUT;
     for folder in 0..archive.folders() {
         let size = archive.folder_size(folder);

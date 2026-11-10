@@ -91,6 +91,46 @@ pub(crate) fn crc(data: &[u8]) -> u32 {
     crate::deflate::crc32(0, data)
 }
 
+/// What a folder's data was compressed with, as [`Archive::folder_coding`]
+/// reads it from its coders.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Coding {
+    /// The coder that compresses: of BCJ2's, the main stream's.
+    pub method: Compression,
+    /// The filter run over the data before that, of those [`Filter`] has;
+    /// the first, if there are more.
+    pub filter: Filter,
+    /// Whether BCJ2 ran over it, x86's filter of four streams, which
+    /// [`Writer`] does not write: [`Filter::X86`] is the one it writes.
+    pub bcj2: bool,
+    /// LZMA's or LZMA2's dictionary, in bytes.
+    pub dictionary: Option<u32>,
+    /// Whether it is encrypted, with AES-256.
+    pub encrypted: bool,
+}
+
+/// The coder that compresses a folder's data, by its ID in 7-Zip's
+/// `DOC/Methods.txt`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Compression {
+    /// None: the data is stored as it is.
+    Copy,
+    Lzma,
+    Lzma2,
+    /// PPMd, variant H, which [`Writer`] does not write.
+    Ppmd,
+    BZip2,
+    Deflate,
+    /// Which [`Writer`] does not write.
+    Deflate64,
+    /// Zstandard, of 7-Zip's forks, which [`Writer`] does not write.
+    Zstd,
+    /// Another, by its ID.
+    Other(u32),
+}
+
 /// How an archive is opened.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Options {
@@ -385,6 +425,16 @@ impl<R: Read + Seek> Archive<R> {
             return Err(crc_error(db, &self.encrypted, index));
         }
         Ok(file.to_vec())
+    }
+
+    /// Not in the SDK: what folder `folder`'s data was compressed with, as
+    /// its header says, which is what a writer changing the archive can
+    /// compress again as it was; none for a folder that is not there, or
+    /// whose description is not one. The level is not in it, nor how hard
+    /// the encoder looked for matches: those are [`Method`]'s preset, and
+    /// the [`Coding::dictionary`] alone tells of them. See `docs/7z.md`.
+    pub fn folder_coding(&self, folder: usize) -> Option<Coding> {
+        dec::folder_coding(&self.db.db, folder)
     }
 
     /// Whether the archive's header is encrypted, its names hidden without

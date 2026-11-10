@@ -39,6 +39,7 @@ use crate::sevenz::error::{Error, Result};
 use crate::sevenz::lzma_dec::LzmaDec;
 use crate::sevenz::lzma2_mt::{Lzma2Mt, Lzma2Threads};
 use crate::sevenz::ppmd7::{self, ByteIn, Ppmd7};
+use crate::sevenz::{Coding, Compression, Filter as Filter7z};
 
 /// `k_Copy`.
 const K_COPY: u32 = 0;
@@ -1334,6 +1335,90 @@ pub(crate) fn folder_is_encrypted(p: &Ar, fo: usize) -> bool {
             .iter()
             .any(|c| c.method_id == K_AES)
     })
+}
+
+/// Not in the SDK: what folder `fo` of `p` was compressed with, as its
+/// description says; none if it is not one.
+pub(crate) fn folder_coding(p: &Ar, fo: usize) -> Option<Coding> {
+    let data = p
+        .coders_data
+        .get(*p.fo_coders_offsets.get(fo)?..*p.fo_coders_offsets.get(fo + 1)?)?;
+    let folder = arc_in::get_next_folder_item(&mut Sd::new(data)).ok()?;
+    let mut coding = Coding {
+        method: Compression::Copy,
+        filter: Filter7z::None,
+        bcj2: false,
+        dictionary: None,
+        encrypted: false,
+    };
+    let coders = &folder.coders[..folder.num_coders as usize];
+    coding.encrypted = coders.iter().any(|c| c.method_id == K_AES);
+    // From the coder that gives the files, down its first streams, as far as
+    // the one that compresses: of BCJ2's streams, the main one.
+    let mut at = folder.unpack_stream as usize;
+    for _ in 0..coders.len() {
+        let c = coders.get(at)?;
+        let props = data.get(c.props_offset..c.props_offset + usize::from(c.props_size))?;
+        let filter = match c.method_id {
+            K_BCJ => Filter7z::X86,
+            K_ARM => Filter7z::Arm,
+            K_ARMT => Filter7z::ArmThumb,
+            K_ARM64 => Filter7z::Arm64,
+            K_PPC => Filter7z::PowerPc,
+            K_SPARC => Filter7z::Sparc,
+            K_IA64 => Filter7z::Ia64,
+            K_RISCV => Filter7z::RiscV,
+            K_DELTA => Filter7z::Delta(u32::from(props.first().copied().unwrap_or(0)) + 1),
+            _ => Filter7z::None,
+        };
+        let compression = match c.method_id {
+            _ if filter != Filter7z::None => {
+                // The one nearest the files, if there are more.
+                if coding.filter == Filter7z::None {
+                    coding.filter = filter;
+                }
+                None
+            }
+            K_BCJ2 => {
+                coding.bcj2 = true;
+                None
+            }
+            K_AES | K_SWAP2 | K_SWAP4 => None,
+            K_COPY => Some(Compression::Copy),
+            K_LZMA => Some(Compression::Lzma),
+            K_LZMA2 => Some(Compression::Lzma2),
+            K_PPMD => Some(Compression::Ppmd),
+            K_BZIP2 => Some(Compression::BZip2),
+            K_DEFLATE => Some(Compression::Deflate),
+            K_DEFLATE64 => Some(Compression::Deflate64),
+            K_ZSTD => Some(Compression::Zstd),
+            other => Some(Compression::Other(other)),
+        };
+        if let Some(compression) = compression {
+            coding.method = compression;
+            coding.dictionary = match (compression, props) {
+                (Compression::Lzma, [_, d @ ..]) if d.len() == 4 => {
+                    Some(u32::from_le_bytes([d[0], d[1], d[2], d[3]]))
+                }
+                (Compression::Lzma2, [40]) => Some(u32::MAX),
+                (Compression::Lzma2, &[prop]) if prop < 40 => {
+                    Some((2 | u32::from(prop & 1)) << (prop / 2 + 11))
+                }
+                _ => None,
+            };
+            break;
+        }
+        // The coder its first stream comes from; none where it is packed.
+        let first: u32 = coders[..at].iter().map(|c| u32::from(c.num_streams)).sum();
+        match folder.bonds[..folder.num_bonds as usize]
+            .iter()
+            .find(|b| b.in_index == first)
+        {
+            Some(bond) => at = bond.out_index as usize,
+            None => break,
+        }
+    }
+    Some(coding)
 }
 
 impl FolderDecoder {
