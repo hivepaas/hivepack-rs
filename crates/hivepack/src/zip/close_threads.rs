@@ -43,8 +43,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::crypto::system_random;
+use crate::deflate::Library;
 use crate::threads::Threads;
 use crate::workers::Workers;
+use crate::zip::algorithm_deflate::Deflating;
 use crate::zip::close::{needs, pkware_time, settle_methods};
 use crate::zip::dirent::{Dirent, DosTime, cm_actual};
 use crate::zip::error::{Error, ErrorCode, Result};
@@ -138,10 +140,49 @@ impl<R> Archive<R> {
         self.deflate_blocks = blocks;
     }
 
-    /// The threads new data is deflated in blocks in where it is written,
-    /// if it is.
-    pub(crate) fn deflate_blocks(&self) -> Option<Threads> {
-        self.deflate_blocks.then_some(self.threads)
+    /// Sets whose compressor deflates new data when the archive is written:
+    /// [`Library::Zlib`] by default, as libzip deflates. libzip has no
+    /// other.
+    ///
+    /// With [`Library::Libdeflate`], each deflated entry of new data is
+    /// compressed by libdeflate's compressor
+    /// ([`Compressor`](crate::deflate::Compressor)), whose levels 10 to 12
+    /// make smaller entries than zlib's 9. An entry's level
+    /// ([`file_set_compression`]) is then 1 to 12, and 0 or another is 9,
+    /// as for zlib; its general purpose bits say fast below 3 and maximum
+    /// from 8 up, as for zlib. libdeflate compresses a whole buffer at a
+    /// time, so each entry is cut into blocks, compressed alone and joined
+    /// into one deflate stream that every ZIP reader reads
+    /// ([`DeflateMt`](crate::deflate::DeflateMt) with
+    /// [`Library::Libdeflate`]): in the threads of [`set_threads`] if
+    /// [`set_deflate_in_blocks`] is on, as zlib's blocks are, else in the
+    /// thread that compresses the entry. The blocks are of 1, 2 or 4 MiB,
+    /// the largest that still cuts the entry into 32 or more, as the size
+    /// its source tells before it is read says, 1 MiB if it tells none
+    /// ([`libdeflate_block_size`](crate::deflate::libdeflate_block_size));
+    /// an entry no larger than its block is one call. They depend on the
+    /// size alone, never on the threads or the machine, so the archive is
+    /// the same, byte for byte, whatever the threads, and whether in blocks
+    /// or not. Each thread keeps libdeflate's compressor (0.2 MB at level
+    /// 1, 0.7 MB at 2 to 9 and 9 MB at 10 to 12) and two blocks of up to
+    /// 4 MiB, each with room for what it compresses to. Not for
+    /// torrentzip, whose streams are zlib's.
+    ///
+    /// [`file_set_compression`]: Archive::set_file_compression
+    /// [`set_threads`]: Archive::set_threads
+    /// [`set_deflate_in_blocks`]: Archive::set_deflate_in_blocks
+    pub fn set_deflate_library(&mut self, library: Library) {
+        self.deflate_library = library;
+    }
+
+    /// How new data is deflated where it is written: in blocks in which
+    /// threads, if it is, and whose compressor.
+    pub(crate) fn deflating(&self) -> Deflating {
+        Deflating {
+            blocks: self.deflate_blocks.then_some(self.threads),
+            library: self.deflate_library,
+            block_size: 0,
+        }
     }
 }
 
@@ -184,6 +225,9 @@ pub(crate) struct Key {
     encryption: Option<Encryption>,
     /// whether deflate is in blocks, which the thread compresses alone
     blocks: bool,
+    /// whose compressor deflates, and libdeflate's blocks
+    library: Library,
+    block_size: usize,
 }
 
 impl Key {
@@ -193,6 +237,9 @@ impl Key {
             && self.level == other.level
             && self.first_read == other.first_read
             && self.keep_compressing == other.keep_compressing
+            && self.blocks == other.blocks
+            && self.library == other.library
+            && self.block_size == other.block_size
     }
 }
 
@@ -246,12 +293,14 @@ pub(crate) struct Precompressed {
 
 impl Precompressed {
     /// Whether this was made for the entry as it is compressed, with
-    /// `method` and `level`, and encrypted, as `encrypting` says.
+    /// `method` and `level`, deflated as `deflating` says, and encrypted, as
+    /// `encrypting` says.
     pub(crate) fn fits(
         &self,
         source: &Arc<dyn DataSource>,
         method: i32,
         level: u32,
+        deflating: Deflating,
         encrypting: Option<Encrypting<'_>>,
         stream: bool,
     ) -> bool {
@@ -275,6 +324,7 @@ impl Precompressed {
             }
             (Some(_), None) => return false,
         };
+        let deflating = deflating.for_flags(level);
         self.key.fits(&Key {
             source: Arc::clone(source),
             method,
@@ -282,7 +332,9 @@ impl Precompressed {
             first_read,
             keep_compressing: stream && encrypting.is_some(),
             encryption: None,
-            blocks: self.key.blocks,
+            blocks: deflating.blocks.is_some(),
+            library: deflating.library,
+            block_size: deflating.libdeflate_block_size(),
         })
     }
 
@@ -428,8 +480,12 @@ fn encrypt_layer(encryption: &Encryption) -> Option<Layer<Encrypt>> {
 /// than it could, or the archive is no longer written.
 fn compress(_: &mut (), job: Job) -> Made {
     let Job { key, most, stop } = job;
-    let blocks = key.blocks.then_some(Threads::One);
-    let mut compress = Compress::new(key.method, key.level, blocks).ok()?;
+    let deflating = Deflating {
+        blocks: key.blocks.then_some(Threads::One),
+        library: key.library,
+        block_size: key.block_size,
+    };
+    let mut compress = Compress::new(key.method, key.level, deflating).ok()?;
     if key.keep_compressing {
         compress.keep_compressing();
     }
@@ -782,7 +838,11 @@ impl<R: ReadAt> Archive<R> {
                 false => em::NONE,
             };
             let header = encryption_header_length(encryption_method)?;
-            let most = maximum_compressed_size(method, st.size)?
+            let deflating = self
+                .deflating()
+                .for_flags(de.compression_level)
+                .with_size(Some(st.size));
+            let most = maximum_compressed_size(method, st.size, deflating.library)?
                 .checked_add(encryption_overhead(encryption_method)?)?;
             let encrypt = match (draw, password) {
                 (Draw::Bytes(_), Some(password)) => match encryption_method {
@@ -800,7 +860,9 @@ impl<R: ReadAt> Archive<R> {
                 first_read: BUFSIZE - header,
                 keep_compressing: stream && encrypts,
                 encryption: None,
-                blocks: self.deflate_blocks && !self.want_torrentzip(),
+                blocks: deflating.blocks.is_some(),
+                library: deflating.library,
+                block_size: deflating.libdeflate_block_size(),
             };
             Some(PlannedJob { key, most, encrypt })
         })();
@@ -910,7 +972,7 @@ mod tests {
                     let large = sizes
                         .iter()
                         .filter(|&&n| {
-                            maximum_compressed_size(cm::DEFLATE, n as u64).unwrap()
+                            maximum_compressed_size(cm::DEFLATE, n as u64, Library::Zlib).unwrap()
                                 + overhead
                                 + ENTRY_COST
                                 > 2 * memory
@@ -943,12 +1005,57 @@ mod tests {
                 let large = sizes
                     .iter()
                     .filter(|&&n| {
-                        maximum_compressed_size(cm::DEFLATE, n as u64).unwrap() + ENTRY_COST
+                        maximum_compressed_size(cm::DEFLATE, n as u64, Library::Zlib).unwrap()
+                            + ENTRY_COST
                             > 2 * memory
                     })
                     .count();
                 assert_eq!(taken, sizes.len() - large, "{memory}");
             }
+        }
+    }
+
+    /// With libdeflate's compressor, entries are compressed in the threads
+    /// ahead, and taken, and the archive is the same; in blocks too, but
+    /// for those larger than a thread holds, compressed where they are
+    /// written.
+    #[test]
+    fn libdeflate_in_threads() {
+        let sizes = [0, 1, 70_000, 3 << 20, 20_000, (1 << 20) + 1, 5];
+        let write = |threads: Threads, blocks: bool| {
+            TEST_MEMORY.with(|m| m.set(Some(2 << 20)));
+            TAKEN.with(|taken| taken.set(0));
+            let mut archive = Archive::open(&[][..], OpenFlags(0)).unwrap();
+            archive.set_threads(threads);
+            archive.set_deflate_library(Library::Libdeflate);
+            archive.set_deflate_in_blocks(blocks);
+            for (i, &n) in sizes.iter().enumerate() {
+                archive
+                    .file_add(
+                        format!("{i}").as_bytes(),
+                        BufferSource::with_mtime(text(i as u64, n), 1_700_000_000),
+                        Flags::NONE,
+                    )
+                    .unwrap();
+                archive
+                    .set_file_compression(i as u64, i32::from(cm::DEFLATE), 12)
+                    .unwrap();
+            }
+            let mut out = Cursor::new(Vec::new());
+            archive.close_to(&mut out).unwrap();
+            TEST_MEMORY.with(|m| m.set(None));
+            (out.into_inner(), TAKEN.with(std::cell::Cell::get))
+        };
+        let (one, taken) = write(Threads::One, false);
+        assert_eq!(taken, 0);
+        let two = Threads::Exactly(NonZeroU32::new(2).unwrap());
+        for blocks in [false, true] {
+            let (got, taken) = write(two, blocks);
+            assert!(got == one, "in blocks {blocks}: bytes differ");
+            // In blocks, the one of 3 MiB, more than the 2 MiB of a thread,
+            // is compressed where it is written, in both threads.
+            let large = usize::from(blocks);
+            assert_eq!(taken, sizes.len() - large, "in blocks {blocks}");
         }
     }
 
@@ -975,6 +1082,8 @@ mod tests {
                 keep_compressing: false,
                 encryption: None,
                 blocks: false,
+                library: Library::Zlib,
+                block_size: 0,
             },
             open: Ok(()),
             data: b"abc".to_vec(),

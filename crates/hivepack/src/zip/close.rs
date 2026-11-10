@@ -10,7 +10,7 @@
 use std::cmp::Ordering;
 use std::io::{Seek, Write};
 
-use crate::Threads;
+use crate::zip::algorithm_deflate::Deflating;
 use crate::zip::buffer::Buffer;
 use crate::zip::close_threads::{Encrypting, Taken};
 use crate::zip::dirent::{Dirent, DosTime, cm_actual, u2d_time};
@@ -287,7 +287,7 @@ impl<R: ReadAt> Archive<R> {
     ) -> Result<()> {
         let want_torrentzip = self.want_torrentzip();
         let new_data = self.new_data(i);
-        let blocks = self.deflate_blocks();
+        let deflating = self.deflating();
 
         // create new local directory entry
         let entry = &mut self.entry[i];
@@ -336,7 +336,7 @@ impl<R: ReadAt> Archive<R> {
                 self.default_password.as_deref(),
                 self.random.as_ref(),
                 taken,
-                blocks,
+                deflating,
             );
             if let Some(changes) = self.entry[i].changes.as_deref_mut() {
                 *changes = de;
@@ -389,7 +389,7 @@ impl<R: ReadAt> Archive<R> {
         attributes: crate::zip::source_data::FileAttributes,
         out: &mut Output<W>,
     ) -> Result<()> {
-        let blocks = self.deflate_blocks();
+        let deflating = self.deflating();
         let Some(mut de) = self.entry[i].changes.as_deref().cloned() else {
             return Err(Error::new(ErrorCode::Internal, 0));
         };
@@ -409,7 +409,7 @@ impl<R: ReadAt> Archive<R> {
             self.default_password.as_deref(),
             self.random.as_ref(),
             Taken::default(),
-            blocks,
+            deflating,
         );
         if let Some(changes) = self.entry[i].changes.as_deref_mut() {
             *changes = de;
@@ -483,9 +483,11 @@ fn add_data<R: ReadAt + ?Sized, W: Write + Seek>(
     default_password: Option<&[u8]>,
     random: Option<&RandomSource>,
     taken: Taken,
-    blocks: Option<Threads>,
+    deflating: Deflating,
 ) -> Result<()> {
     let mut st = src.stat()?;
+    // libdeflate's blocks are cut as the size says, before compressing.
+    let deflating = deflating.with_size((st.valid & stat::SIZE != 0).then_some(st.size));
 
     de.bitflags &= !GPBF_DATA_DESCRIPTOR;
 
@@ -508,7 +510,8 @@ fn add_data<R: ReadAt + ?Sized, W: Write + Seek>(
             let max_compressed_size = if compression_method == cm::STORE {
                 st.size
             } else {
-                maximum_compressed_size(compression_method, st.size).unwrap_or(u64::MAX)
+                let library = deflating.for_flags(de.compression_level).library;
+                maximum_compressed_size(compression_method, st.size, library).unwrap_or(u64::MAX)
             };
             if max_compressed_size > 0xffff_ffff {
                 // TODO in libzip: not valid for torrentzip
@@ -576,6 +579,7 @@ fn add_data<R: ReadAt + ?Sized, W: Write + Seek>(
                 source,
                 de.comp_method,
                 de.compression_level,
+                deflating,
                 encrypting,
                 out.stream,
             ))
@@ -604,7 +608,7 @@ fn add_data<R: ReadAt + ?Sized, W: Write + Seek>(
         true => Some(Layer::new(Compress::new(
             de.comp_method,
             de.compression_level,
-            blocks,
+            deflating,
         )?)),
         false => None,
     };

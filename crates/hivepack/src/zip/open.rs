@@ -5,7 +5,7 @@
 //! turns out unusable may set it, and the search then goes on, so the error
 //! reported is the last one set.
 
-use crate::deflate::crc32;
+use crate::deflate::{Library, crc32};
 
 use crate::threads::Threads;
 use crate::zip::buffer::Buffer;
@@ -57,6 +57,8 @@ pub struct Archive<R> {
     pub(crate) threads: Threads,
     /// whether new data is deflated in blocks, as pigz does: not in libzip
     pub(crate) deflate_blocks: bool,
+    /// whose compressor deflates new data: not in libzip
+    pub(crate) deflate_library: Library,
 }
 
 /// What `_zip_read_eocd64` found.
@@ -184,6 +186,7 @@ impl<R: ReadAt> Archive<R> {
             random: None,
             threads: Threads::One,
             deflate_blocks: false,
+            deflate_library: Library::Zlib,
         };
         if flags.intersects(OpenFlags::RDONLY) {
             za.flags = za.flags | ArchiveFlags::RDONLY;

@@ -85,7 +85,10 @@ pub use infback9::{Back9, BackIn, BackOut, InflateBack9};
 pub use inflate::{GzHeader, InBuffer, Inflate, OutBuffer};
 pub use inflate9::Inflate9;
 pub use libdeflate::{Compressor, LIBDEFLATE_VERSION};
-pub use mt::{BLOCK_SIZE, DeflateMt, LIBDEFLATE_BLOCK_SIZE, Library, MtOptions};
+pub use mt::{
+    BLOCK_SIZE, DeflateMt, LIBDEFLATE_BLOCK_SIZE, LIBDEFLATE_BLOCKS, Library, MtOptions,
+    libdeflate_block_size,
+};
 pub use zutil::{Error, ErrorCode, Flush, MAX_WBITS, Result, Status};
 
 /// The zlib release this crate follows, as zlib's `ZLIB_VERSION` gives it.

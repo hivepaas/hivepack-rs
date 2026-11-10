@@ -11,8 +11,10 @@ impl<R: ReadAt> Archive<R> {
     /// Sets the method entry `idx` is compressed with when written, a
     /// [`cm`](crate::zip::cm) value or [`cm::DEFAULT`](crate::zip::cm::DEFAULT)
     /// (deflate, unless that makes it larger), and the level, 1 to 9 for
-    /// deflate (9 otherwise): port of `zip_set_file_compression`. Its data
-    /// is decompressed and compressed again if the method changes.
+    /// deflate (9 otherwise), 1 to 12 with libdeflate's compressor
+    /// ([`Archive::set_deflate_library`]): port of
+    /// `zip_set_file_compression`. Its data is decompressed and compressed
+    /// again if the method changes.
     pub fn set_file_compression(&mut self, idx: u64, method: i32, flags: u32) -> Result<()> {
         if idx >= self.entry.len() as u64 {
             return Err(Error::new(ErrorCode::Inval, 0));

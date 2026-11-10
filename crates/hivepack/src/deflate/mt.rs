@@ -36,6 +36,29 @@ pub const BLOCK_SIZE: usize = 128 << 10;
 /// 0.04% and of 256 KiB 0.75%.
 pub const LIBDEFLATE_BLOCK_SIZE: usize = 1 << 20;
 
+/// The blocks [`libdeflate_block_size`] cuts data into at least, where it
+/// can: a constant, not the threads or the cores, so that the same data is
+/// cut the same way on every machine.
+pub const LIBDEFLATE_BLOCKS: u64 = 32;
+
+/// The input of each block with [`Library::Libdeflate`] for data of `size`
+/// bytes, known before it is compressed, or of a size not known: the
+/// largest of 1, 2 and 4 MiB that still cuts the data into
+/// [`LIBDEFLATE_BLOCKS`] blocks or more. Under 64 MiB, 1 MiB; from 64 MiB,
+/// 2 MiB; from 128 MiB, 4 MiB; not known, 1 MiB. Larger blocks are a
+/// little smaller (0.04% at 4 MiB against 0.18% at 1 MiB, at level 12 on
+/// shared libraries), and enough of them still keep the threads busy. It
+/// depends on the size alone, so the stream is the same whatever the
+/// threads; data that turns out longer or shorter keeps the blocks its
+/// size gave.
+pub fn libdeflate_block_size(size: Option<u64>) -> usize {
+    let size = size.unwrap_or(0);
+    [4 << 20, 2 << 20]
+        .into_iter()
+        .find(|&block: &usize| size >= LIBDEFLATE_BLOCKS * block as u64)
+        .unwrap_or(LIBDEFLATE_BLOCK_SIZE)
+}
+
 /// The largest input of a block.
 const BLOCK_SIZE_MAX: usize = 1 << 30;
 
@@ -382,7 +405,8 @@ enum Mode {
 ///
 /// With [`Library::Libdeflate`], each block is compressed by libdeflate's
 /// [`Compressor`] instead, alone, in blocks of [`LIBDEFLATE_BLOCK_SIZE`] by
-/// default, every one but the last ended with a sync marker
+/// default ([`libdeflate_block_size`] chooses them by the input's size, if
+/// it is known), every one but the last ended with a sync marker
 /// ([`Compressor::deflate_compress_part`]). The output is the same whatever
 /// the threads too.
 ///
@@ -721,5 +745,31 @@ impl std::fmt::Debug for DeflateMt {
             .field("total_in", &self.total_in)
             .field("total_out", &self.total_out)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The blocks grow with the size at 64 and 128 MiB, and are 1 MiB for a
+    /// size not known.
+    #[test]
+    fn libdeflate_blocks_grow_with_the_size() {
+        const MIB: u64 = 1 << 20;
+        for (size, block) in [
+            (None, 1),
+            (Some(0), 1),
+            (Some(1), 1),
+            (Some(MIB), 1),
+            (Some(64 * MIB - 1), 1),
+            (Some(64 * MIB), 2),
+            (Some(128 * MIB - 1), 2),
+            (Some(128 * MIB), 4),
+            (Some(10 << 30), 4),
+            (Some(u64::MAX), 4),
+        ] {
+            assert_eq!(libdeflate_block_size(size), block << 20, "{size:?}");
+        }
     }
 }
