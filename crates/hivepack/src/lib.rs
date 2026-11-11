@@ -23,6 +23,7 @@
 //! | [`rar`] | `rar` | reading RAR (UnRAR 7.3.2), under UnRAR's license |
 //! | [`sevenz`] | `sevenz` | 7z archives |
 //! | [`sign`] | `sign` | file signatures (Ed25519 and Ed25519 + ML-DSA-65) |
+//! | [`squashfs`] | `squashfs` | SquashFS images: snaps, AppImages (squashfuse 0.6.5) |
 //! | [`tar`] | `tar` | tar archives |
 //! | [`udf`] | `udf` | UDF volumes |
 //! | [`xar`] | `xar` | XAR archives (macOS `.pkg` and `.xip`) |
@@ -75,6 +76,8 @@ pub mod rar;
 pub mod sevenz;
 #[cfg(feature = "sign")]
 pub mod sign;
+#[cfg(feature = "squashfs")]
+pub mod squashfs;
 #[cfg(feature = "tar")]
 pub mod tar;
 #[cfg(feature = "udf")]
