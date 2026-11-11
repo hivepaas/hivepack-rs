@@ -585,6 +585,13 @@
       "kind": "tool"
     },
     {
+      "name": "unsquashfs",
+      "generate": { "group": "bench", "from": "squashfs-tools-4.6.1-source", "with": ["zlib-1.3.2-source", "xz-5.8.4-source", "lz4-1.10.0-source", "zstd-1.5.7-source", "lzo-2.10-source"], "tool": "unsquashfs" },
+      "source": "squashfs-tools 4.6.1's unsquashfs, built from the release's sources as its Makefile lists them, with the compressors mksquashfs is built with; for tests/extract_squashfs_threads.rs's speed test to compare with. Only a tool: nothing is linked with it",
+      "license": "GPL-2.0-or-later (squashfs-tools, liblzo2), Zlib, 0BSD, BSD-2-Clause and BSD-3-Clause OR GPL-2.0-only",
+      "kind": "tool"
+    },
+    {
       "name": "squashfs-images",
       "generate": { "group": "generated", "from": "mksquashfs", "tool": "squashfs-images", "sources": ["tools/squashfs-images/make.py"] },
       "source": "tools/squashfs-images/make.py: SquashFS images mksquashfs 4.6.1 made of a tree of files it writes, with each compressor and with the options that change the layout; manifest.txt lists each image with the options it was made with",
