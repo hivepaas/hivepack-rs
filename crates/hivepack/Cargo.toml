@@ -1,7 +1,7 @@
 [package]
 name = "hivepack"
 version = "0.10.0"
-description = "Read and write archives and compressed files: ZIP, tar, 7z, RAR, zstd, xz, bzip2, lz4, deflate, age, ISO, UDF, SquashFS, cpio, XAR and more, in safe Rust"
+description = "Read and write archives and compressed files: ZIP, tar, 7z, RAR, zstd, xz, bzip2, lz4, deflate, age, ISO, UDF, SquashFS, AppImage, cpio, XAR and more, in safe Rust"
 license = "MIT AND BSD-2-Clause AND BSD-3-Clause AND Zlib AND 0BSD AND bzip2-1.0.6 AND Unicode-3.0 AND UnRAR"
 readme = "README.md"
 keywords = ["archive", "zip", "compression", "zstd", "extract"]
@@ -40,7 +40,7 @@ features = ["full", "memory"]
 # Every format but RAR, whose code is under UnRAR's license: see LICENSE.md.
 default = ["full"]
 
-full = ["age", "bzip2", "cpio", "crypto", "deflate", "extract", "iso", "lz4", "open", "sevenz", "sign", "squashfs", "tar", "udf", "xar", "xz", "zip", "zstd"]
+full = ["age", "appimage", "bzip2", "cpio", "crypto", "deflate", "extract", "iso", "lz4", "open", "sevenz", "sign", "squashfs", "tar", "udf", "xar", "xz", "zip", "zstd"]
 
 # How much memory the program may still take, and a budget to choose threads
 # under it. Not a format, and so not in `full`: it calls the system through
@@ -58,6 +58,8 @@ xz-unsafe-fast = []
 # One feature for each format; the ones it needs come with it.
 
 age = ["crypto"]
+
+appimage = ["squashfs"]
 
 bzip2 = []
 

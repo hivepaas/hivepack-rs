@@ -5,6 +5,7 @@ The crate's own code is under the MIT license ([LICENSE](LICENSE)). Each port ke
 | Module (feature) | License | Text |
 |---|---|---|
 | `age` | BSD-3-Clause | [src/age/LICENSE](src/age/LICENSE) |
+| `appimage` | MIT | [src/appimage/LICENSE](src/appimage/LICENSE) |
 | `bzip2` | bzip2-1.0.6 | [src/bzip2/LICENSE](src/bzip2/LICENSE) |
 | `cpio` | BSD-2-Clause | [src/cpio/LICENSE](src/cpio/LICENSE) |
 | `crypto` | MIT | [src/crypto/LICENSE](src/crypto/LICENSE) |
