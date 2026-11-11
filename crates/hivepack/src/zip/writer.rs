@@ -11,6 +11,7 @@
 
 use std::io::{Read, Seek, Write};
 
+use crate::deflate::Library;
 use crate::zip::close_threads::Taken;
 use crate::zip::error::{Error, ErrorCode, Result};
 use crate::zip::open::Archive;
@@ -102,6 +103,15 @@ impl<W: Write + Seek> Writer<W> {
     /// [`Archive::set_file_compression`] takes them.
     pub fn set_compression(&mut self, method: i32, level: u32) {
         self.method = (method, level);
+    }
+
+    /// Deflates the files added from now on with `library`'s compressor,
+    /// as [`Archive::set_deflate_library`] says: [`Library::Zlib`] by
+    /// default. With [`Library::Libdeflate`], at levels 1 to 12, on the
+    /// caller's thread, in blocks of 1, 2 or 4 MiB as the size
+    /// [`NewEntry`] tells says, 1 MiB if it tells none.
+    pub fn set_deflate_library(&mut self, library: Library) {
+        self.archive.set_deflate_library(library);
     }
 
     /// Encrypts the files added from now on with `method` (see

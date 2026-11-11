@@ -19,7 +19,9 @@
 //! libzip, [`Writer`] writes an archive an entry at a time, each read once
 //! from a reader as it is added, [`Archive::set_threads`] has new data
 //! compressed and encrypted in threads ahead of the entry written, the
-//! archive the same byte for byte, and it reads split archives from their
+//! archive the same byte for byte, [`Archive::set_deflate_library`] has it
+//! deflated by libdeflate's compressor, whose levels 10 to 12 make smaller
+//! entries than zlib's 9, and it reads split archives from their
 //! volumes, joined by
 //! [`Volumes`] (`name.z01`, …, `name.zip`, or 7-Zip's `name.zip.001`, …).
 //! The rules the port follows are in the repository's `docs/zip.md`.

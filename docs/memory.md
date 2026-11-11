@@ -35,6 +35,10 @@ What they take, from the estimates, in MiB:
 | zstd level 3, frames of 32 MiB | 134 | 69 |
 | zstd level 19, frames of 32 MiB | 220 | 155 |
 | Deflate, blocks of 128 KiB, every level | 2.1 | 0.84 |
+| Deflate, libdeflate's, blocks of 1 MiB, level 1 | 7.2 | 4.2 |
+| Deflate, libdeflate's, blocks of 1 MiB, levels 2 to 9 | 7.7 | 4.7 |
+| Deflate, libdeflate's, blocks of 1 MiB, levels 10 to 12 | 15.6 | 12.6 |
+| Deflate, libdeflate's, blocks of 4 MiB, levels 10 to 12 | 33.6 | 24.6 |
 
 zstd's workers do not cost the same each: the job table, which holds a copy of the output of each job not yet written out, grows by powers of 2 (4 places for 1 worker, 8 for 2 to 5, 16 for 6 to 13, 32 for 14 to 29), each place the output of a job. Level 3 takes 69 MiB with one worker, 120 with 2, 157 with 4 and 572 with 16; level 19 373, 656, 964 and 3,588.
 
@@ -99,6 +103,8 @@ memory_usage(n) = n × (D + 2 × (I + O)) + I + O + 1 MiB
 ```
 
 The level does not change it. `tests/memory_limits.rs` measures 1.8, 4.1 and 6.8 MiB held for 1, 4 and 8 threads, against estimates of 2.1, 4.7 and 8.0 MiB, the test's own buffer of 1 MiB counted.
+
+With libdeflate's compressor (`MtOptions::library`), `I` is the block alone, 1 MiB by default and up to 4 MiB as the ZIP writer chooses it, `O` libdeflate's bound for a part (5 bytes for each 5,000 and 5 more), and `D` libdeflate's compressor at the level, from the sizes of its tables and 16 KiB more: 0.2 MB at level 1, 0.7 MB at 2 to 9, 9 MB at 10 to 12. The level then changes it. `tests/memory_limits.rs` measures 4.2, 17.6, 12.6 and 49.4 MiB held for level 1 on 1 thread, 6 on 4, 12 on 1 and 12 on 4, against estimates of 7.2, 21.6, 15.6 and 53.5 MiB.
 
 ## Readers
 
@@ -280,7 +286,9 @@ fn xz_encoder(budget: &Budget, preset: u32, wanted: u32) -> Result<(xz::Stream, 
 /// What each thread of `zip::Archive::set_threads` takes: up to 32 MiB of
 /// entries compressed ahead, waiting to be written, and its compressor:
 /// Deflate's, 512 KiB at most (bzip2's 7 MiB, LZMA's and XZ's 94 MiB at
-/// preset 6). ZIP's threads take no limit: the threads are all it is told.
+/// preset 6; libdeflate's, with its blocks, 7.7 MiB at levels 2 to 9 and
+/// up to 34 MiB at 10 to 12, `Archive::set_deflate_library`). ZIP's threads
+/// take no limit: the threads are all it is told.
 fn zip_threads<R>(archive: &mut zip::Archive<R>, budget: &Budget, wanted: u32) -> Held {
     let (threads, held) =
         budget.hold_threads(wanted, |n| u64::from(n) * ((32 << 20) + (512 << 10)));

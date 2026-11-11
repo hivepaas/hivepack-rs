@@ -33,7 +33,7 @@ use hivepack::bzip2::{
     Action, CompressMt, InBuffer as BzIn, MtOptions, OutBuffer as BzOut, Status,
 };
 use hivepack::deflate::{
-    DeflateMt, Flush, InBuffer as GzIn, MtOptions as GzOptions, OutBuffer as GzOut,
+    DeflateMt, Flush, InBuffer as GzIn, Library, MtOptions as GzOptions, OutBuffer as GzOut,
     Status as GzStatus,
 };
 use hivepack::open::{Limits, Opener};
@@ -631,15 +631,24 @@ fn deflate_threads() {
     // say: what is held may then be well under it (half of it at 8 threads on
     // macOS's runners, of 3 cores), and only the bound is checked.
     let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
-    for (level, threads) in [(1, 1), (6, 4), (9, 8)] {
+    for (library, level, threads) in [
+        (Library::Zlib, 1, 1),
+        (Library::Zlib, 6, 4),
+        (Library::Zlib, 9, 8),
+        (Library::Libdeflate, 1, 1),
+        (Library::Libdeflate, 6, 4),
+        (Library::Libdeflate, 12, 1),
+        (Library::Libdeflate, 12, 4),
+    ] {
         let options = GzOptions {
             level,
             threads: Threads::of(threads),
+            library,
             ..GzOptions::default()
         };
         let estimate = options.memory_usage(threads).unwrap();
         let (actual, _) = measure(|| deflate_mt(&data, &options));
-        let what = format!("deflate level {level}, {threads} threads");
+        let what = format!("deflate {library:?} level {level}, {threads} threads");
         if threads as usize <= cores {
             check(&what, actual, estimate);
         } else {

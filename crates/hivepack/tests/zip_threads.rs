@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use hivepack::Threads;
 use hivepack::zip::{
     Archive, ArchiveFlags, BufferSource, Closed, DataSource, ErrorCode, FileAttributes, FileSource,
-    Flags, OpenFlags, RandomSource, Stat, cm, em, stat,
+    Flags, NewEntry, OpenFlags, RandomSource, Stat, Writer, cm, em, stat,
 };
 
 /// The thread counts compared with one.
@@ -1149,4 +1149,178 @@ fn deflate_in_blocks() {
         seekable(&mut a)
     };
     assert!(write(true).0 == write(false).0, "torrentzip in blocks");
+}
+
+/// The raw stream libdeflate's blocks of 1 MiB make of `data` at `level`,
+/// compressed one by one: every block but the last a part, then the last.
+fn libdeflate_blocks(data: &[u8], level: u32) -> Vec<u8> {
+    use hivepack::deflate::{Compressor, LIBDEFLATE_BLOCK_SIZE};
+    let mut compressor = Compressor::new(level as i32).unwrap();
+    let mut stream = Vec::new();
+    let mut blocks: Vec<&[u8]> = data.chunks(LIBDEFLATE_BLOCK_SIZE).collect();
+    let last = blocks.pop().unwrap_or(&[]);
+    for block in blocks {
+        let mut out = vec![0; compressor.deflate_compress_part_bound(block.len())];
+        let n = compressor.deflate_compress_part(block, &mut out);
+        stream.extend_from_slice(&out[..n]);
+    }
+    let mut out = vec![0; compressor.deflate_compress_bound(last.len())];
+    let n = compressor.deflate_compress(last, &mut out);
+    stream.extend_from_slice(&out[..n]);
+    stream
+}
+
+/// The general purpose bit flags of each entry, as the central directory
+/// has them.
+fn central_flags(bytes: &[u8]) -> Vec<u16> {
+    let u16_at = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
+    let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+    let eocd = bytes.windows(4).rposition(|w| w == b"PK\x05\x06").unwrap();
+    let count = u16_at(eocd + 10);
+    let mut at = u32_at(eocd + 16) as usize;
+    let mut flags = Vec::new();
+    for _ in 0..count {
+        assert_eq!(&bytes[at..at + 4], b"PK\x01\x02");
+        flags.push(u16_at(at + 8));
+        at += 46 + usize::from(u16_at(at + 28) + u16_at(at + 30) + u16_at(at + 32));
+    }
+    flags
+}
+
+/// Deflate with libdeflate's compressor, asked: each entry, about 0, one
+/// byte, 1 MiB and several, at levels 1 to 12, is libdeflate's blocks of
+/// 1 MiB joined, whether in blocks in the threads or not, the archive the
+/// same whatever the threads, to a file or a stream, encrypted too; its
+/// level's bits are fast below 3 and maximum from 8; 0 and 13 are 9; read
+/// back by the port and by Info-ZIP. Off, zlib's as before; torrentzip is
+/// zlib's still. `Writer` writes the same entries.
+#[test]
+fn deflate_with_libdeflate() {
+    use hivepack::deflate::Library;
+    const MIB: usize = 1 << 20;
+    let mut specs = Vec::new();
+    for (i, (n, level)) in [
+        (0, 12),
+        (1, 12),
+        (1, 1),
+        (MIB - 1, 6),
+        (MIB, 10),
+        (MIB + 1, 12),
+        (3 * MIB + 77, 9),
+        (5000, 2),
+        (70_000, 3),
+        (200_000, 8),
+        (100_000, 11),
+        (60_000, 0),
+        (60_000, 13),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        specs.push(spec(
+            format!("f{i}"),
+            text(100 + i as u64, n),
+            deflate(level),
+        ));
+    }
+    specs.push(spec("default", text(90, 300_000), None));
+    specs.push(spec("big", text(91, 34 << 20), deflate(1)));
+    let mut unsized_ = spec("unsized", text(92, 2 * MIB + 5), deflate(12));
+    unsized_.source = SourceKind::Unsized;
+    specs.push(unsized_);
+    let mut aes = spec("aes", text(93, MIB + 3), deflate(12));
+    aes.encryption = Some(em::AES_256);
+    specs.push(aes);
+    let write = |threads: Threads, blocks: bool, stream: bool| {
+        let mut a = archive(&specs, threads);
+        a.set_deflate_library(Library::Libdeflate);
+        a.set_deflate_in_blocks(blocks);
+        if stream {
+            streamed(&mut a)
+        } else {
+            seekable(&mut a)
+        }
+    };
+    let one = write(Threads::One, false, false);
+    let one_stream = write(Threads::One, false, true);
+    assert!(one.1.is_ok() && one_stream.1.is_ok());
+    for threads in std::iter::once(Threads::One).chain(many()) {
+        for blocks in [false, true] {
+            assert!(
+                write(threads, blocks, false).0 == one.0,
+                "{threads:?}, in blocks {blocks}: bytes differ"
+            );
+            assert!(
+                write(threads, blocks, true).0 == one_stream.0,
+                "{threads:?}, in blocks {blocks}, stream: bytes differ"
+            );
+        }
+    }
+    let flags = central_flags(&one.0);
+    for (i, s) in specs.iter().enumerate() {
+        let level = match s.method.map_or(9, |(_, level)| level) {
+            level @ 1..=12 => level,
+            _ => 9,
+        };
+        let bits = match level {
+            1 | 2 => 4,
+            8.. => 2,
+            _ => 0,
+        };
+        assert_eq!(flags[i] & 6, bits, "{}: level {level}", s.name);
+        // An empty entry is stored, as libzip writes it.
+        if s.encryption.is_some() || s.data.is_empty() {
+            continue;
+        }
+        assert!(
+            compressed(&one.0, i as u64) == libdeflate_blocks(&s.data, level),
+            "{}",
+            s.name
+        );
+    }
+    reads_back(&one.0, &specs);
+    reads_back(&one_stream.0, &specs);
+    info_zip_agrees(&one.0, "libdeflate", true);
+
+    // Off, as libzip deflates, and as before.
+    let off = seekable(&mut archive(&specs, Threads::Auto));
+    let mut zlib = archive(&specs, Threads::Auto);
+    zlib.set_deflate_library(Library::Zlib);
+    assert!(seekable(&mut zlib).0 == off.0);
+    let f5 = specs.iter().position(|s| s.name == "f5").unwrap() as u64;
+    assert!(compressed(&off.0, f5) != compressed(&one.0, f5));
+
+    // The Writer, on one thread, writes the same entries.
+    let mut writer = Writer::new(Cursor::new(Vec::new()));
+    writer.set_deflate_library(Library::Libdeflate);
+    for s in specs.iter().take(13) {
+        let (method, level) = s.method.unwrap();
+        writer.set_compression(method, level);
+        writer
+            .add_file(&NewEntry::new(s.name.clone()), &mut &s.data[..])
+            .unwrap();
+    }
+    let written = writer.finish().unwrap().into_inner();
+    for (i, _) in specs.iter().enumerate().take(13) {
+        assert!(
+            compressed(&written, i as u64) == compressed(&one.0, i as u64),
+            "Writer, f{i}"
+        );
+    }
+
+    let torrent: Vec<Spec> = (0..20u64)
+        .map(|i| spec(format!("t{i}"), text(i, 200_000), None))
+        .collect();
+    let write = |library: Library| {
+        let mut a = archive(&torrent, Threads::Auto);
+        a.set_deflate_library(library);
+        a.set_deflate_in_blocks(true);
+        a.set_archive_flag(ArchiveFlags::WANT_TORRENTZIP, true)
+            .unwrap();
+        seekable(&mut a)
+    };
+    assert!(
+        write(Library::Libdeflate).0 == write(Library::Zlib).0,
+        "torrentzip with libdeflate"
+    );
 }

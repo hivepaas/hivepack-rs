@@ -2,9 +2,11 @@
 //! `zip_source_compress.c`, with deflate, bzip2, LZMA, XZ and Zstandard for algorithms,
 //! and PPMd and Deflate64 to decompress, which libzip does not read.
 
-use crate::Threads;
+use crate::deflate::Library;
 use crate::zip::algorithm_bzip2::{self, Bzip2};
-use crate::zip::algorithm_deflate::{self, CompressionStatus, DeflateCompress, DeflateDecompress};
+use crate::zip::algorithm_deflate::{
+    self, CompressionStatus, DeflateCompress, DeflateDecompress, Deflating,
+};
 use crate::zip::algorithm_ppmd::Ppmd;
 use crate::zip::algorithm_xz::{self, Xz};
 use crate::zip::algorithm_zstd::{self, Zstd};
@@ -181,12 +183,12 @@ pub(crate) fn get_compression_algorithm(method: u16) -> Option<DecompressAlgorit
 fn get_compressing_algorithm(
     method: u16,
     compression_flags: u32,
-    blocks: Option<Threads>,
+    deflating: Deflating,
 ) -> Option<CompressAlgorithm> {
     match method {
         cm::DEFLATE => Some(CompressAlgorithm::Deflate(DeflateCompress::new(
             compression_flags,
-            blocks,
+            deflating,
         ))),
         cm::BZIP2 => Some(CompressAlgorithm::Bzip2(Bzip2::compressor(
             compression_flags,
@@ -201,10 +203,11 @@ fn get_compressing_algorithm(
 }
 
 /// The most the compressed data of `size` bytes can take with `method`:
-/// its algorithm's `maximum_compressed_size`, or `None` without one.
-pub(crate) fn maximum_compressed_size(method: u16, size: u64) -> Option<u64> {
+/// its algorithm's `maximum_compressed_size`, or `None` without one. Not
+/// in libzip: deflate's with `library`'s compressor.
+pub(crate) fn maximum_compressed_size(method: u16, size: u64, library: Library) -> Option<u64> {
     match method {
-        cm::DEFLATE => Some(algorithm_deflate::maximum_compressed_size(size)),
+        cm::DEFLATE => Some(algorithm_deflate::maximum_compressed_size(size, library)),
         cm::BZIP2 => Some(algorithm_bzip2::maximum_compressed_size(size)),
         cm::LZMA | cm::XZ => Some(algorithm_xz::maximum_compressed_size(size)),
         cm::ZSTD => Some(algorithm_zstd::maximum_compressed_size(size)),
@@ -220,7 +223,7 @@ pub(crate) fn compression_method_supported(method: i32, compress: bool) -> bool 
     }
     let real_method = cm_actual(method);
     if compress {
-        get_compressing_algorithm(real_method, 0, None).is_some()
+        get_compressing_algorithm(real_method, 0, Deflating::default()).is_some()
     } else {
         get_compression_algorithm(real_method).is_some()
     }
@@ -444,14 +447,14 @@ impl Compress {
     /// Port of `compression_source_new` and `context_new` for compressing
     /// with `method` at `compression_flags`: fails with
     /// `ZIP_ER_COMPNOTSUPP` if `method` has no algorithm. Not in libzip:
-    /// with `blocks`, deflate is in blocks, in those threads.
+    /// deflate is as `deflating` says, in blocks or not, and whose.
     pub(crate) fn new(
         method: i32,
         compression_flags: u32,
-        blocks: Option<Threads>,
+        deflating: Deflating,
     ) -> Result<Compress> {
         let Some(algorithm) =
-            get_compressing_algorithm(cm_actual(method), compression_flags, blocks)
+            get_compressing_algorithm(cm_actual(method), compression_flags, deflating)
         else {
             return Err(Error::new(ErrorCode::CompNotSupp, 0));
         };

@@ -561,3 +561,135 @@ fn near_optimal_is_smaller() {
     }
     assert!(sizes[2] < sizes[1] && sizes[1] <= sizes[0], "{sizes:?}");
 }
+
+/// Inflates `stream`, which must end, and must take all of it.
+fn inflate_all(stream: &[u8], len: usize) -> Vec<u8> {
+    inflate(stream, &vec![0; len])
+}
+
+/// A part, compressed into room of its bound.
+fn part(compressor: &mut Compressor, data: &[u8]) -> Vec<u8> {
+    let mut out = vec![0u8; compressor.deflate_compress_part_bound(data.len())];
+    let size = compressor.deflate_compress_part(data, &mut out);
+    assert!(
+        size > 0,
+        "the part's bound is too small for {} bytes",
+        data.len()
+    );
+    out.truncate(size);
+    out
+}
+
+/// A part is what `deflate_compress` writes, its last block's BFINAL
+/// cleared, then a sync marker: the one bit that differs is found, and is
+/// the stream's only difference. An empty part is the marker alone. Parts
+/// of every size and kind, then a last piece, inflate as one stream to
+/// their input; a part alone inflates without reaching the end. Without
+/// the oracle: `deflate_compress` is libdeflate's, which the other tests
+/// show.
+#[test]
+fn parts_are_streams_without_their_end() {
+    let mut rng = Rng(0x9A27);
+    let mut compressors = compressors();
+    let sizes = [
+        0, 1, 2, 3, 6, 7, 8, 30, 52, 56, 100, 4999, 5000, 5001, 65_535, 65_536, 70_000, 300_000,
+        400_000,
+    ];
+    for level in LEVELS {
+        let compressor = compressors[(level + 1) as usize].as_mut().unwrap();
+        let mut joined = Vec::new();
+        let mut whole = Vec::new();
+        for (i, &len) in sizes.iter().enumerate() {
+            // Random bytes now and then, which are stored.
+            let data = match i % 4 {
+                1 => piece(&mut rng, 1, len),
+                _ => input(&mut rng, len),
+            };
+            let got = part(compressor, &data);
+            assert_eq!(
+                &got[got.len() - 4..],
+                [0, 0, 0xFF, 0xFF],
+                "level {level}, {len} bytes"
+            );
+            if data.is_empty() {
+                assert_eq!(got, [0, 0, 0, 0xFF, 0xFF], "level {level}");
+            } else {
+                let mut out = vec![0u8; compressor.deflate_compress_bound(len)];
+                let size = compressor.deflate_compress(&data, &mut out);
+                let full = &out[..size];
+                // The marker's 3 bits fit in the stream's last byte, or
+                // take one more.
+                let extra = got.len() - full.len() - 4;
+                assert!(extra <= 1, "level {level}, {len} bytes: {extra}");
+                if extra == 1 {
+                    assert_eq!(got[full.len()], 0, "level {level}, {len} bytes");
+                }
+                let differ: Vec<(usize, u8)> = full
+                    .iter()
+                    .zip(&got)
+                    .enumerate()
+                    .filter(|(_, (a, b))| a != b)
+                    .map(|(at, (a, b))| (at, a ^ b))
+                    .collect();
+                assert_eq!(differ.len(), 1, "level {level}, {len} bytes: {differ:?}");
+                let (at, bit) = differ[0];
+                assert!(bit.is_power_of_two(), "level {level}, {len} bytes");
+                assert_eq!(full[at] & bit, bit, "level {level}, {len} bytes: BFINAL");
+            }
+            // Alone, it does not end.
+            let mut inflate = Inflate::new(-15).unwrap();
+            let mut out = vec![0u8; len + 1];
+            let mut output = OutBuffer::new(&mut out);
+            let mut input = InBuffer::new(&got);
+            let status = inflate.inflate(&mut output, &mut input, Flush::SyncFlush);
+            let written = output.pos;
+            assert_eq!(status, Ok(Status::Ok), "level {level}, {len} bytes");
+            assert_eq!(input.pos, got.len(), "level {level}, {len} bytes");
+            assert!(out[..written] == data[..], "level {level}, {len} bytes");
+            joined.extend_from_slice(&got);
+            whole.extend_from_slice(&data);
+        }
+        for last in [&b""[..], b"x", &text(&mut rng, 20_000)] {
+            let mut stream = joined.clone();
+            let mut out = vec![0u8; compressor.deflate_compress_bound(last.len())];
+            let size = compressor.deflate_compress(last, &mut out);
+            stream.extend_from_slice(&out[..size]);
+            let mut want = whole.clone();
+            want.extend_from_slice(last);
+            assert!(
+                inflate_all(&stream, want.len()) == want,
+                "level {level}, last of {} bytes",
+                last.len()
+            );
+        }
+    }
+}
+
+/// A part fits exactly its size, and not a byte less, whatever the room
+/// short of it; the same part comes from a new compressor.
+#[test]
+fn parts_fit_or_not() {
+    let mut rng = Rng(0x9A28);
+    for level in LEVELS {
+        let mut compressor = Compressor::new(level).unwrap();
+        for len in [0, 1, 9, 60, 5000, 70_000] {
+            let data = input(&mut rng, len);
+            let want = part(&mut compressor, &data);
+            let mut exact = vec![0u8; want.len()];
+            assert_eq!(
+                compressor.deflate_compress_part(&data, &mut exact),
+                want.len()
+            );
+            assert_eq!(exact, want, "level {level}, {len} bytes");
+            for room in [want.len() - 1, want.len() - 4, want.len() / 2, 0] {
+                let mut short = vec![0u8; room];
+                assert_eq!(
+                    compressor.deflate_compress_part(&data, &mut short),
+                    0,
+                    "level {level}, {len} bytes, room {room}"
+                );
+            }
+            assert_eq!(part(&mut Compressor::new(level).unwrap(), &data), want);
+        }
+    }
+}

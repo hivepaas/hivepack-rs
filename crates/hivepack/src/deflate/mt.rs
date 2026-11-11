@@ -10,17 +10,54 @@
 //!
 //! The blocks are cut where their size says, never where the threads would:
 //! the output is the same whatever the threads, one or many.
+//!
+//! With [`Library::Libdeflate`], each block is libdeflate's instead
+//! ([`Compressor`]), at its levels 0 to 12: blocks of 1 MiB by default,
+//! each compressed alone, without the input before it, every one but the
+//! last with [`Compressor::deflate_compress_part`], which ends it with a
+//! sync marker. libdeflate's compressor takes a whole buffer at once, and
+//! has no dictionary to give it.
 
 use super::deflate::OS_CODE;
 use crate::Threads;
 use crate::deflate::{
-    DEF_MEM_LEVEL, Deflate, Error, ErrorCode, Flush, InBuffer, OutBuffer, Result, Status,
-    Z_DEFAULT_COMPRESSION, Z_DEFAULT_STRATEGY, Z_FIXED, Z_HUFFMAN_ONLY, crc32, crc32_combine,
+    Compressor, DEF_MEM_LEVEL, Deflate, Error, ErrorCode, Flush, InBuffer, OutBuffer, Result,
+    Status, Z_DEFAULT_COMPRESSION, Z_DEFAULT_STRATEGY, Z_FIXED, Z_HUFFMAN_ONLY, crc32,
+    crc32_combine,
 };
 use crate::workers::Workers;
 
 /// The input of each block by default: 128 KiB, pigz's.
 pub const BLOCK_SIZE: usize = 128 << 10;
+
+/// The input of each block by default with [`Library::Libdeflate`]: 1 MiB.
+/// Each block is compressed alone, without the 32 KiB before it, which
+/// costs 0.2% at level 12 on shared libraries, where blocks of 4 MiB cost
+/// 0.04% and of 256 KiB 0.75%.
+pub const LIBDEFLATE_BLOCK_SIZE: usize = 1 << 20;
+
+/// The blocks [`libdeflate_block_size`] cuts data into at least, where it
+/// can: a constant, not the threads or the cores, so that the same data is
+/// cut the same way on every machine.
+pub const LIBDEFLATE_BLOCKS: u64 = 32;
+
+/// The input of each block with [`Library::Libdeflate`] for data of `size`
+/// bytes, known before it is compressed, or of a size not known: the
+/// largest of 1, 2 and 4 MiB that still cuts the data into
+/// [`LIBDEFLATE_BLOCKS`] blocks or more. Under 64 MiB, 1 MiB; from 64 MiB,
+/// 2 MiB; from 128 MiB, 4 MiB; not known, 1 MiB. Larger blocks are a
+/// little smaller (0.04% at 4 MiB against 0.18% at 1 MiB, at level 12 on
+/// shared libraries), and enough of them still keep the threads busy. It
+/// depends on the size alone, so the stream is the same whatever the
+/// threads; data that turns out longer or shorter keeps the blocks its
+/// size gave.
+pub fn libdeflate_block_size(size: Option<u64>) -> usize {
+    let size = size.unwrap_or(0);
+    [4 << 20, 2 << 20]
+        .into_iter()
+        .find(|&block: &usize| size >= LIBDEFLATE_BLOCKS * block as u64)
+        .unwrap_or(LIBDEFLATE_BLOCK_SIZE)
+}
 
 /// The largest input of a block.
 const BLOCK_SIZE_MAX: usize = 1 << 30;
@@ -29,21 +66,36 @@ const BLOCK_SIZE_MAX: usize = 1 << 30;
 /// window, 32 KiB.
 const DICT: usize = 32 << 10;
 
+/// Whose compressor compresses the blocks of a [`DeflateMt`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Library {
+    /// zlib's, [`Deflate`]: each block with the 32 KiB of input before it as
+    /// its dictionary, as pigz compresses them. The default.
+    #[default]
+    Zlib,
+    /// libdeflate's, [`Compressor`]: each block alone, at levels 0 to 12,
+    /// whose 10 to 12 make smaller streams than zlib's 9.
+    Libdeflate,
+}
+
 /// How a [`DeflateMt`] compresses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MtOptions {
     /// 0 to 9, or [`Z_DEFAULT_COMPRESSION`] (6), as [`Deflate::new`] takes
-    /// it: the default.
+    /// it: the default. With [`Library::Libdeflate`], 0 to 12, as
+    /// [`Compressor::new`] takes it.
     pub level: i32,
     /// [`Z_DEFAULT_STRATEGY`] to [`Z_FIXED`], as [`Deflate::new`] takes it:
-    /// [`Z_DEFAULT_STRATEGY`] by default.
+    /// [`Z_DEFAULT_STRATEGY`] by default. libdeflate has no strategies:
+    /// with [`Library::Libdeflate`], only [`Z_DEFAULT_STRATEGY`].
     pub strategy: i32,
     /// Raw deflate, without gzip's header and trailer, as in a ZIP entry:
     /// off by default.
     pub raw: bool,
     /// The threads, besides the caller's, that compress the blocks.
     pub threads: Threads,
-    /// The input of each block, or 0 for [`BLOCK_SIZE`]; at most 1 GiB.
+    /// The input of each block, or 0 for [`BLOCK_SIZE`], and
+    /// [`LIBDEFLATE_BLOCK_SIZE`] with [`Library::Libdeflate`]; at most 1 GiB.
     pub block_size: usize,
     /// The most bytes compressing may take: the threads are lowered until
     /// [`MtOptions::memory_usage`] says they fit
@@ -51,6 +103,9 @@ pub struct MtOptions {
     /// where it takes more: the output is the same whatever the threads. No
     /// limit (`u64::MAX`) by default. See `docs/memory.md`.
     pub memory_limit: u64,
+    /// Whose compressor compresses the blocks: [`Library::Zlib`] by
+    /// default.
+    pub library: Library,
 }
 
 impl Default for MtOptions {
@@ -62,6 +117,7 @@ impl Default for MtOptions {
             threads: Threads::One,
             block_size: 0,
             memory_limit: u64::MAX,
+            library: Library::Zlib,
         }
     }
 }
@@ -69,17 +125,27 @@ impl Default for MtOptions {
 impl MtOptions {
     /// The input of each block.
     fn block(&self) -> usize {
-        match self.block_size {
-            0 => BLOCK_SIZE,
-            size => size,
+        match (self.block_size, self.library) {
+            (0, Library::Zlib) => BLOCK_SIZE,
+            (0, Library::Libdeflate) => LIBDEFLATE_BLOCK_SIZE,
+            (size, _) => size,
         }
     }
 
-    /// `ErrorCode::Stream` where [`Deflate::new`] would give it, or for a
-    /// block size over 1 GiB.
+    /// `ErrorCode::Stream` where [`Deflate::new`] would give it, or
+    /// [`Compressor::new`] would give `None`, for another strategy than
+    /// the default with libdeflate, or for a block size over 1 GiB.
     fn check(&self) -> Result<()> {
-        let level = (0..=9).contains(&self.level) || self.level == Z_DEFAULT_COMPRESSION;
-        let strategy = (Z_DEFAULT_STRATEGY..=Z_FIXED).contains(&self.strategy);
+        let (level, strategy) = match self.library {
+            Library::Zlib => (
+                (0..=9).contains(&self.level) || self.level == Z_DEFAULT_COMPRESSION,
+                (Z_DEFAULT_STRATEGY..=Z_FIXED).contains(&self.strategy),
+            ),
+            Library::Libdeflate => (
+                Compressor::memory_usage(self.level).is_some(),
+                self.strategy == Z_DEFAULT_STRATEGY,
+            ),
+        };
         if !level || !strategy || self.block() > BLOCK_SIZE_MAX {
             return Err(Error::stream());
         }
@@ -89,19 +155,31 @@ impl MtOptions {
     /// The most bytes a [`DeflateMt`] with these options takes, in
     /// `threads` threads (0 is taken for 1): an upper bound, of what it
     /// allocates, whatever the input. `ErrorCode::Stream` where
-    /// [`Deflate::new`] would give it, or for a block size over 1 GiB.
+    /// [`DeflateMt::new`] would give it.
     ///
     /// Each thread keeps a compressor, zlib's 256 KiB and its own state; and
     /// two blocks for each thread are in flight at most, each holding its
     /// input, the 32 KiB before it, and room for what it compresses to;
     /// besides the block being filled and the one being written out. Blocks
-    /// of 128 KiB: 0.84 MiB a thread. See `docs/memory.md`.
+    /// of 128 KiB: 0.84 MiB a thread. With [`Library::Libdeflate`], the
+    /// compressor is libdeflate's, 0.2 MB at level 1, 0.7 MB at 2 to 9 and
+    /// 9 MB at 10 to 12, and a block holds no input before it: blocks of
+    /// 1 MiB, 4.2 MiB a thread at level 1, 4.7 MiB at 2 to 9 and 12.6 MiB
+    /// at 10 to 12; of 4 MiB, 16.2, 16.7 and 24.6 MiB. See `docs/memory.md`.
     pub fn memory_usage(&self, threads: u32) -> Result<u64> {
         self.check()?;
         let threads = u64::from(threads.max(1));
         let block = self.block() as u64;
-        let piece = block + DICT as u64 + output_room(self.block());
-        let per_thread = DEFLATE_MEMORY + 2 * piece;
+        let (compressor, dict, room) = match self.library {
+            Library::Zlib => (DEFLATE_MEMORY, DICT as u64, output_room(self.block())),
+            Library::Libdeflate => (
+                Compressor::memory_usage(self.level).unwrap_or(0) + LIBDEFLATE_STATE,
+                0,
+                Compressor::part_bound(self.block()) as u64,
+            ),
+        };
+        let piece = block + dict + room;
+        let per_thread = compressor + 2 * piece;
         Ok(threads
             .saturating_mul(per_thread)
             .saturating_add(piece + MT_MEMORY))
@@ -124,6 +202,11 @@ impl MtOptions {
 /// window, `prev`, `head` and pending buffer (256 KiB), and the port's
 /// state around them, counted high.
 const DEFLATE_MEMORY: u64 = 288 << 10;
+
+/// What a libdeflate compressor takes besides what
+/// `Compressor::memory_usage` counts: what the allocator rounds up, counted
+/// high.
+const LIBDEFLATE_STATE: u64 = 16 << 10;
 
 /// What a [`DeflateMt`] takes besides its blocks and compressors: the
 /// threads' channels, and itself.
@@ -156,6 +239,7 @@ enum End {
 struct Job {
     data: Vec<u8>,
     dict: usize,
+    library: Library,
     level: i32,
     strategy: i32,
     end: End,
@@ -168,13 +252,55 @@ struct Block {
     size: usize,
 }
 
-/// What a thread keeps: a compressor, at its level and strategy.
+/// What a thread keeps: a compressor, zlib's at its level and strategy, or
+/// libdeflate's at its level.
 #[derive(Default)]
-struct Kept(Option<(i32, i32, Deflate)>);
+struct Kept {
+    zlib: Option<(i32, i32, Deflate)>,
+    libdeflate: Option<Compressor>,
+}
+
+thread_local! {
+    /// The libdeflate compressor the last [`DeflateMt`] on this thread
+    /// kept, for the next to take at the same level. Making one takes up to
+    /// 9 MB, which with an entry of a few KB a [`DeflateMt`], as a ZIP
+    /// archive of small files has, took most of the time: 52 MB of headers
+    /// in 4,657 entries took 1.13 s at level 10 in 32 threads, and 0.16 s
+    /// with the compressor kept. A thread so holds one compressor once its
+    /// last [`DeflateMt`] is gone, till it ends.
+    static SPARE: std::cell::RefCell<Option<Compressor>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The thread's spare compressor, if it is at `level`.
+fn spare(level: i32) -> Option<Compressor> {
+    SPARE
+        .try_with(|spare| {
+            let mut spare = spare.borrow_mut();
+            match &*spare {
+                Some(compressor) if compressor.compression_level() as i32 == level => spare.take(),
+                _ => None,
+            }
+        })
+        .ok()
+        .flatten()
+}
+
+/// libdeflate's compressor is kept by the thread, for the next.
+impl Drop for Kept {
+    fn drop(&mut self) {
+        if let Some(compressor) = self.libdeflate.take() {
+            let _ = SPARE.try_with(|spare| *spare.borrow_mut() = Some(compressor));
+        }
+    }
+}
 
 /// `job`'s block, compressed with the compressor the thread keeps.
 fn compress_block(kept: &mut Kept, job: Job) -> Result<Block> {
-    let deflate = match &mut kept.0 {
+    if job.library == Library::Libdeflate {
+        return compress_libdeflate(kept, job);
+    }
+    let deflate = match &mut kept.zlib {
         Some((level, strategy, deflate)) if *level == job.level && *strategy == job.strategy => {
             deflate.reset();
             deflate
@@ -216,6 +342,38 @@ fn compress_block(kept: &mut Kept, job: Job) -> Result<Block> {
         bytes,
         crc: crc32(0, input.src),
         size: input.src.len(),
+    })
+}
+
+/// `job`'s block, compressed alone by libdeflate's compressor: the last
+/// with [`Compressor::deflate_compress`], every other with
+/// [`Compressor::deflate_compress_part`], which ends it with a sync marker.
+fn compress_libdeflate(kept: &mut Kept, job: Job) -> Result<Block> {
+    let compressor = match &mut kept.libdeflate {
+        Some(compressor) if compressor.compression_level() as i32 == job.level => compressor,
+        slot => {
+            let made = match spare(job.level) {
+                Some(compressor) => compressor,
+                None => Compressor::new(job.level).ok_or_else(Error::stream)?,
+            };
+            slot.insert(made)
+        }
+    };
+    let input = &job.data[job.dict..];
+    let mut bytes = vec![0; Compressor::part_bound(input.len())];
+    let size = match job.end {
+        End::Last => compressor.deflate_compress(input, &mut bytes),
+        End::Byte | End::Full => compressor.deflate_compress_part(input, &mut bytes),
+    };
+    if size == 0 {
+        // The bound says it always fits.
+        return Err(Error::new(ErrorCode::Stream, Some("a block did not fit")));
+    }
+    bytes.truncate(size);
+    Ok(Block {
+        bytes,
+        crc: crc32(0, input),
+        size: input.len(),
     })
 }
 
@@ -286,12 +444,20 @@ enum Mode {
 /// pigz 2.8's, byte for byte, but for gzip's header, which has neither a
 /// name nor a time, as [`Deflate`]'s has not.
 ///
+/// With [`Library::Libdeflate`], each block is compressed by libdeflate's
+/// [`Compressor`] instead, alone, in blocks of [`LIBDEFLATE_BLOCK_SIZE`] by
+/// default ([`libdeflate_block_size`] chooses them by the input's size, if
+/// it is known), every one but the last ended with a sync marker
+/// ([`Compressor::deflate_compress_part`]). The output is the same whatever
+/// the threads too.
+///
 /// With [`Threads::One`], each block is compressed in the call that fills
 /// it. With more, at most two blocks for each thread are in flight, and a
 /// call waits for the oldest of them when it can go no further without.
 /// [`MtOptions::memory_limit`] lowers the threads to fit what
 /// [`MtOptions::memory_usage`] counts.
 pub struct DeflateMt {
+    library: Library,
     level: i32,
     strategy: i32,
     raw: bool,
@@ -304,6 +470,9 @@ pub struct DeflateMt {
     /// of `dict` bytes, then its own.
     piece: Vec<u8>,
     dict: usize,
+    /// The most input before a block that it takes: 32 KiB, none with
+    /// libdeflate.
+    dict_max: usize,
     /// What is being written out, and how much of it is.
     out: Vec<u8>,
     out_pos: usize,
@@ -319,7 +488,9 @@ pub struct DeflateMt {
 
 impl DeflateMt {
     /// A compressor with `options`: `ErrorCode::Stream` where
-    /// [`Deflate::new`] would give it, or for a block size over 1 GiB.
+    /// [`Deflate::new`] would give it, or [`Compressor::new`] `None` with
+    /// [`Library::Libdeflate`], for another strategy than the default with
+    /// it, or for a block size over 1 GiB.
     pub fn new(options: &MtOptions) -> Result<DeflateMt> {
         let threads = options.threads_used()?;
         let level = match options.level {
@@ -330,17 +501,19 @@ impl DeflateMt {
             Vec::new()
         } else {
             // zlib's header, without a name or a time: the extra flags say
-            // the slowest or the fastest.
-            let xfl = if level == 9 {
-                2
-            } else if options.strategy >= Z_HUFFMAN_ONLY || level < 2 {
-                4
-            } else {
-                0
+            // the slowest or the fastest. libdeflate's gzip header says them
+            // for its own levels.
+            let xfl = match options.library {
+                Library::Zlib if level == 9 => 2,
+                Library::Zlib if options.strategy >= Z_HUFFMAN_ONLY || level < 2 => 4,
+                Library::Libdeflate if level < 2 => 4,
+                Library::Libdeflate if level >= 8 => 2,
+                _ => 0,
             };
             vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, xfl, OS_CODE]
         };
         Ok(DeflateMt {
+            library: options.library,
             level,
             strategy: options.strategy,
             raw: options.raw,
@@ -350,6 +523,10 @@ impl DeflateMt {
             in_flight: 2 * threads as usize,
             piece: Vec::new(),
             dict: 0,
+            dict_max: match options.library {
+                Library::Zlib => DICT,
+                Library::Libdeflate => 0,
+            },
             out,
             out_pos: 0,
             crc: 0,
@@ -371,7 +548,9 @@ impl DeflateMt {
     /// - `Flush::SyncFlush` ends the current block on a byte once the input
     ///   given is read, and writes out every block: what was given can then
     ///   be decompressed. `Flush::FullFlush` does the same with a sync
-    ///   marker, and the block after it takes no dictionary. Either is done
+    ///   marker, and the block after it takes no dictionary. With
+    ///   [`Library::Libdeflate`], whose blocks take none, both end the block
+    ///   with a sync marker, as every block but the last ends. Either is done
     ///   when it returns with room left in `output`; till then, call again
     ///   with the same flush. A flush with nothing given since the last one
     ///   writes nothing, where zlib writes an empty block.
@@ -511,7 +690,7 @@ impl DeflateMt {
     /// What of `input` fits in the block.
     fn take(&mut self, input: &mut InBuffer<'_>) {
         if self.piece.capacity() == 0 {
-            self.piece.reserve_exact(DICT + self.block_size);
+            self.piece.reserve_exact(self.dict_max + self.block_size);
         }
         let filled = self.piece.len() - self.dict;
         let n = (self.block_size - filled).min(input.src.len() - input.pos);
@@ -531,11 +710,11 @@ impl DeflateMt {
         let data = std::mem::take(&mut self.piece);
         let dict = self.dict;
         self.dict = 0;
-        if end == End::Byte {
+        if end == End::Byte && self.dict_max > 0 {
             // The next block takes the end of this one's input, and of the
             // input before it, as its dictionary.
-            let kept = data.len().min(DICT);
-            self.piece.reserve_exact(DICT + self.block_size);
+            let kept = data.len().min(self.dict_max);
+            self.piece.reserve_exact(self.dict_max + self.block_size);
             self.piece.extend_from_slice(&data[data.len() - kept..]);
             self.dict = kept;
         }
@@ -548,6 +727,7 @@ impl DeflateMt {
         self.workers.give(Job {
             data,
             dict,
+            library: self.library,
             level: self.level,
             strategy: self.strategy,
             end,
@@ -597,6 +777,7 @@ impl DeflateMt {
 impl std::fmt::Debug for DeflateMt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DeflateMt")
+            .field("library", &self.library)
             .field("level", &self.level)
             .field("strategy", &self.strategy)
             .field("raw", &self.raw)
@@ -605,5 +786,31 @@ impl std::fmt::Debug for DeflateMt {
             .field("total_in", &self.total_in)
             .field("total_out", &self.total_out)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The blocks grow with the size at 64 and 128 MiB, and are 1 MiB for a
+    /// size not known.
+    #[test]
+    fn libdeflate_blocks_grow_with_the_size() {
+        const MIB: u64 = 1 << 20;
+        for (size, block) in [
+            (None, 1),
+            (Some(0), 1),
+            (Some(1), 1),
+            (Some(MIB), 1),
+            (Some(64 * MIB - 1), 1),
+            (Some(64 * MIB), 2),
+            (Some(128 * MIB - 1), 2),
+            (Some(128 * MIB), 4),
+            (Some(10 << 30), 4),
+            (Some(u64::MAX), 4),
+        ] {
+            assert_eq!(libdeflate_block_size(size), block << 20, "{size:?}");
+        }
     }
 }
