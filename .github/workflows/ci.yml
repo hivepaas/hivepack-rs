@@ -70,6 +70,7 @@ jobs:
           echo "RUSTUP_TOOLCHAIN=$v" >> "$GITHUB_ENV"
       - run: cargo check -p hivepack --lib --locked --no-default-features --features sevenz
       - run: cargo check -p hivepack --lib --locked --no-default-features --features age
+      - run: cargo check -p hivepack --lib --locked --no-default-features --features ar
       - run: cargo check -p hivepack --lib --locked --no-default-features --features bzip2
       - run: cargo check -p hivepack --lib --locked --no-default-features --features cpio
       - run: cargo check -p hivepack --lib --locked --no-default-features --features xz
@@ -644,6 +645,19 @@ jobs:
           mkdir -p fuzz/corpus/extract_xar
           for f in fuzz/corpus/xar/*; do { printf '\x22'; cat "$f"; } > "fuzz/corpus/extract_xar/$(basename "$f")"; done
       - run: cargo fuzz run --target x86_64-unknown-linux-gnu extract_xar -- -max_total_time=${FUZZ_SECONDS:-60} -rss_limit_mb=4096
+      - name: Seed the ar corpus with the recorded archives
+        run: |
+          mkdir -p fuzz/corpus/ar
+          python3 - <<'PY'
+          import pathlib
+          # libarchive's test archive, damaged copies of it and archives its
+          # writers made, as the recorded requests hold them.
+          lines = pathlib.Path("testdata/oracle/ar.txt").read_text().splitlines()
+          for i, line in enumerate(l for l in lines if l.startswith("read ")):
+              data = line.split("\t")[0].split(" ")[-1]
+              pathlib.Path(f"fuzz/corpus/ar/r{i}").write_bytes(b"" if data == "-" else bytes.fromhex(data))
+          PY
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu ar -- -max_total_time=${FUZZ_SECONDS:-60}
       - name: Seed the cpio corpus with the recorded archives
         run: |
           mkdir -p fuzz/corpus/cpio

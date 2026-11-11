@@ -1,6 +1,7 @@
 //! Opening what hivepack reads, through the layers around it: age
 //! encryption, zstd, xz, lzip, .lzma, LZ4, gzip, bzip2 or pbzx
-//! compression, and RPM packages' lead and headers, found by their first
+//! compression, RPM packages' lead and headers, and Debian packages' ar
+//! archive around their `data.tar`, found by their first
 //! bytes and taken off one after the other, as many as there are, until
 //! what is under them is a container (a tar, ZIP, 7z, cpio or XAR archive,
 //! an ISO 9660 image, a UDF volume), or plain data.
