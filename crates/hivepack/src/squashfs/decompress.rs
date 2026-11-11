@@ -5,7 +5,7 @@
 //! |---|---|---|
 //! | 1, zlib | zlib's `uncompress` | `hivepack::deflate::Inflate`, as `uncompress` drives it |
 //! | 2, LZMA | liblzma's `lzma_alone_decoder`, as squashfs-tools reads it | `hivepack::xz::Stream::alone_decoder` |
-//! | 3, LZO | liblzo2's `lzo1x_decompress_safe` | not yet: [`SqfsErr::BadComp`](super::SqfsErr::BadComp), as squashfuse built without LZO |
+//! | 3, LZO | liblzo2's `lzo1x_decompress_safe` | `hivepack::lzo::decompress`, its port |
 //! | 4, xz | liblzma's `lzma_stream_buffer_decode` | `hivepack::xz::Stream::stream_decoder` |
 //! | 5, LZ4 | liblz4's `LZ4_decompress_safe` | `hivepack::lz4::block::decompress_safe` |
 //! | 6, zstd | libzstd's `ZSTD_decompress` | `hivepack::zstd::decompress` |
@@ -28,7 +28,7 @@ pub enum Compression {
     Zlib,
     /// 2: LZMA, the legacy format squashfs-tools 4.0 to 4.3 wrote.
     Lzma,
-    /// 3: LZO, which is not read yet.
+    /// 3: LZO.
     Lzo,
     /// 4: xz.
     Xz,
@@ -67,7 +67,7 @@ impl Compression {
         }
     }
 
-    /// Whether its data is read: all but LZO, for now, and unknown ids.
+    /// Whether its data is read: all but unknown ids.
     pub fn is_supported(self) -> bool {
         sqfs_decompressor_get(self).is_some()
     }
@@ -101,11 +101,7 @@ pub fn sqfs_decompressor_get(compression: Compression) -> Option<Decompressor> {
     match compression {
         Compression::Zlib => Some(sqfs_decompressor_zlib),
         Compression::Lzma => Some(sqfs_decompressor_lzma),
-        // Not yet: hivepack has no LZO decoder. With `hivepack::lzo`
-        // (`lzo1x_decompress_safe`), this is `Some(sqfs_decompressor_lzo)`,
-        // a function like `sqfs_decompressor_lz4` that calls
-        // `crate::lzo::decompress(input, &mut out)`.
-        Compression::Lzo => None,
+        Compression::Lzo => Some(sqfs_decompressor_lzo),
         Compression::Xz => Some(sqfs_decompressor_xz),
         Compression::Lz4 => Some(sqfs_decompressor_lz4),
         Compression::Zstd => Some(sqfs_decompressor_zstd),
@@ -204,6 +200,16 @@ fn sqfs_decompressor_lzma(_: &mut Contexts, input: &[u8], outsize: usize) -> Opt
         return None;
     }
     out.truncate(uncompressed_size as usize);
+    Some(out)
+}
+
+/// `sqfs_decompressor_lzo`: `lzo1x_decompress_safe`, whose every error
+/// fails, `LZO_E_INPUT_NOT_CONSUMED` among them (bytes after the block's
+/// end).
+fn sqfs_decompressor_lzo(_: &mut Contexts, input: &[u8], outsize: usize) -> Option<Vec<u8>> {
+    let mut out = vec![0u8; outsize];
+    let n = crate::lzo::decompress(input, &mut out).ok()?;
+    out.truncate(n);
     Some(out)
 }
 

@@ -8,8 +8,8 @@
 //! with fragments, holes and the block index, symbolic links, devices,
 //! FIFOs and sockets, basic and extended), with owners, extended attributes
 //! and the export table, through the same caches; data compressed with
-//! zlib, LZMA, xz, LZ4 or zstd, by hivepack's own decoders, or stored as it
-//! is. LZO is not read yet. Where squashfuse would read past its buffers or
+//! zlib, LZMA, LZO, xz, LZ4 or zstd, by hivepack's own decoders, or stored
+//! as it is. Where squashfuse would read past its buffers or
 //! loop for good, the port has bounds instead, which `docs/squashfs.md` in
 //! the repository lists, with how the port is checked against squashfuse.
 //!

@@ -17,7 +17,7 @@ use std::io::{Cursor, Read};
 use std::path::Path;
 
 use hivepack::extract::{ErrorKind, Links, OnRefused, Options, Summary, extract_squashfs};
-use hivepack::squashfs::{Compression, Squashfs, Step};
+use hivepack::squashfs::{Squashfs, Step};
 use support::{Scratch, listing, options};
 
 fn committed(name: &str) -> Vec<u8> {
@@ -149,9 +149,6 @@ fn extracts_as_read_with(name: &str, image: &[u8], inside: bool) {
 fn committed_images_extract_as_read() {
     for name in ["gzip", "lzma", "lzo", "xz", "lz4", "zstd", "uncompressed"] {
         let image = committed(&format!("{name}.sqfs"));
-        if name == "lzo" && !Compression::Lzo.is_supported() {
-            continue;
-        }
         extracts_as_read(name, &image);
     }
 }

@@ -196,13 +196,7 @@ impl<R: Read + Seek> Sqfs<R> {
         fs.decompressor = match sqfs_decompressor_get(Compression::from_id(fs.sb.compression)) {
             Some(decompressor) => decompressor,
             None => {
-                return Err(Error::new(
-                    SqfsErr::BadComp,
-                    match Compression::from_id(fs.sb.compression) {
-                        Compression::Lzo => "LZO compression is not supported yet",
-                        _ => "an unknown compressor",
-                    },
-                ));
+                return Err(Error::new(SqfsErr::BadComp, "an unknown compressor"));
             }
         };
 
