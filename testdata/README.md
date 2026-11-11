@@ -8,7 +8,7 @@
 
 ```sh
 python3 scripts/testdata.py fetch                  # the core sets: a 16 MB download
-python3 scripts/testdata.py fetch --group all      # everything: 129 MB to download, 734 MB unpacked
+python3 scripts/testdata.py fetch --group all      # everything: 241 MB to download, 969 MB unpacked
 python3 scripts/testdata.py list                   # every set, and where it lives
 ```
 
