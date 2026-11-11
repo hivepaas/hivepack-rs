@@ -1,7 +1,7 @@
 //! What a stream is, from its first bytes: a layer to take off (age, a
 //! compressor, an RPM package's lead and headers), a container (tar, ZIP,
-//! 7z, cpio, XAR, an ISO 9660 image, a UDF volume, a SquashFS image), or
-//! plain data.
+//! 7z, cpio, XAR, an ISO 9660 image, a UDF volume, a SquashFS image, an
+//! AppImage), or plain data.
 
 /// A layer over the data: encryption or compression.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -64,6 +64,15 @@ pub enum Container {
     /// most DVDs') is one, as the files are on its UDF side; `hivepack::iso`
     /// reads its ISO 9660 side.
     Udf,
+    /// A type 2 AppImage: an ELF program, AppImage's runtime, with a
+    /// SquashFS image after it, which `hivepack::appimage::open_squashfs`
+    /// opens where the program ends, by random access: in a layer, it must
+    /// be taken out to a file first.
+    AppImageType2,
+    /// A type 1 AppImage: an ISO 9660 image whose system area holds the
+    /// program, which `hivepack::iso` reads from the start, as an ISO 9660
+    /// image, in a layer too.
+    AppImageType1,
     /// A SquashFS image (a snap package, `.sqfs`, `.squashfs`), which
     /// `hivepack::squashfs` reads by random access: in a layer, it must be
     /// taken out to a file first.
@@ -113,6 +122,9 @@ const RAR14_MAGIC: &[u8] = b"RE~^";
 /// A 7z archive's signature (`hivepack::sevenz::SIGNATURE`, kept here so that
 /// telling one does not take the decoder).
 const SEVEN_ZIP_MAGIC: &[u8] = &[b'7', b'z', 0xBC, 0xAF, 0x27, 0x1C];
+
+/// An ELF file's magic (`hivepack::appimage::ELF_MAGIC`).
+const ELF_MAGIC: &[u8] = b"\x7fELF";
 
 /// SquashFS's magic, `hsqs` (`hivepack::squashfs::MAGIC`, kept here so
 /// that telling one does not take the reader), as squashfuse and `file`
@@ -363,6 +375,15 @@ pub fn detect(head: &[u8], name: Option<&str>) -> Detected {
     }
     if head.len() >= 4 && starts(b"BZh") && (b'1'..=b'9').contains(&head[3]) {
         return Detected::Layer(Layer::Bzip2);
+    }
+    // An AppImage: an ELF program with `AI` and its type at byte 8, in the
+    // padding of e_ident, as AppImage's specification and `file` tell one.
+    if starts(ELF_MAGIC) {
+        match head.get(8..11) {
+            Some(b"AI\x02") => return Detected::Container(Container::AppImageType2),
+            Some(b"AI\x01") => return Detected::Container(Container::AppImageType1),
+            _ => {}
+        }
     }
     if starts(b"PK\x03\x04") || starts(b"PK\x05\x06") || starts(b"PK\x07\x08") {
         return Detected::Container(Container::Zip);
@@ -648,6 +669,22 @@ mod tests {
         for head in [&wrong[..], &unnamed, &[0; 512], &v7[..511], b""] {
             assert_eq!(layer(head), Detected::Container(Container::Data));
         }
+    }
+
+    #[test]
+    fn appimages_by_their_elf_header() {
+        let mut head = b"\x7fELF\x02\x01\x01\x00AI\x02".to_vec();
+        head.resize(64, 0);
+        assert_eq!(layer(&head), Detected::Container(Container::AppImageType2));
+        head[10] = 1;
+        assert_eq!(layer(&head), Detected::Container(Container::AppImageType1));
+        // Another type, no AI, or no ELF magic: data.
+        for (at, byte) in [(10, 3), (8, b'X'), (0, 0)] {
+            let mut other = head.clone();
+            other[at] = byte;
+            assert_eq!(layer(&other), Detected::Container(Container::Data));
+        }
+        assert_eq!(layer(&head[..10]), Detected::Container(Container::Data));
     }
 
     #[test]

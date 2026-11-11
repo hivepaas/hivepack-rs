@@ -210,6 +210,11 @@ path = "tests/age_oracle.rs"
 required-features = ["age", "crypto"]
 
 [[test]]
+name = "appimage_appimage"
+path = "tests/appimage_appimage.rs"
+required-features = ["appimage", "iso", "open", "squashfs", "xz", "zstd"]
+
+[[test]]
 name = "bzip2_bzip2"
 path = "tests/bzip2_bzip2.rs"
 required-features = ["bzip2"]
