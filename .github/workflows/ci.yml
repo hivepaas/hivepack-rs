@@ -83,6 +83,7 @@ jobs:
       - run: cargo check -p hivepack --lib --locked --no-default-features --features lz4,lz4-unsafe-fast
       - run: cargo check -p hivepack --lib --locked --no-default-features --features lzo
       - run: cargo check -p hivepack --lib --locked --no-default-features --features open
+      - run: cargo check -p hivepack --lib --locked --no-default-features --features squashfs
       - run: cargo check -p hivepack --lib --locked --no-default-features --features tar
       - run: cargo check -p hivepack --lib --locked --no-default-features --features udf
       - run: cargo check -p hivepack --lib --locked --no-default-features --features xar
@@ -710,6 +711,13 @@ jobs:
           mkdir -p fuzz/corpus/extract_udf
           for f in fuzz/corpus/udf/*; do { printf '\x22'; cat "$f"; } > "fuzz/corpus/extract_udf/$(basename "$f")"; done
       - run: cargo fuzz run --target x86_64-unknown-linux-gnu extract_udf -- -max_total_time=${FUZZ_SECONDS:-60} -rss_limit_mb=4096 -max_len=400000
+      - name: Seed the SquashFS corpora with testdata/squashfs, and behind a byte of options
+        run: |
+          mkdir -p fuzz/corpus/squashfs fuzz/corpus/extract_squashfs
+          cp testdata/squashfs/*.sqfs fuzz/corpus/squashfs/
+          for f in testdata/squashfs/*.sqfs; do { printf '\x22'; cat "$f"; } > "fuzz/corpus/extract_squashfs/$(basename "$f")"; done
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu squashfs -- -max_total_time=${FUZZ_SECONDS:-60} -rss_limit_mb=4096 -max_len=65536
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu extract_squashfs -- -max_total_time=${FUZZ_SECONDS:-60} -rss_limit_mb=4096 -max_len=65536
       - name: Seed the xz corpus
         run: |
           mkdir -p fuzz/corpus/xz

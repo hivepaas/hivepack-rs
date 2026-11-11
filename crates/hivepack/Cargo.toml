@@ -1,7 +1,7 @@
 [package]
 name = "hivepack"
 version = "0.10.0"
-description = "Read and write archives and compressed files: ZIP, tar, 7z, RAR, zstd, xz, bzip2, lz4, deflate, age, ISO, UDF, cpio, XAR and more, in safe Rust"
+description = "Read and write archives and compressed files: ZIP, tar, 7z, RAR, zstd, xz, bzip2, lz4, deflate, age, ISO, UDF, SquashFS, cpio, XAR and more, in safe Rust"
 license = "MIT AND BSD-2-Clause AND BSD-3-Clause AND Zlib AND 0BSD AND bzip2-1.0.6 AND Unicode-3.0 AND UnRAR"
 readme = "README.md"
 keywords = ["archive", "zip", "compression", "zstd", "extract"]
@@ -40,7 +40,7 @@ features = ["full", "memory"]
 # Every format but RAR, whose code is under UnRAR's license: see LICENSE.md.
 default = ["full"]
 
-full = ["age", "ar", "bzip2", "cpio", "crypto", "deflate", "extract", "iso", "lz4", "lzo", "open", "sevenz", "sign", "tar", "udf", "xar", "xz", "zip", "zstd"]
+full = ["age", "ar", "bzip2", "cpio", "crypto", "deflate", "extract", "iso", "lz4", "lzo", "open", "sevenz", "sign", "squashfs", "tar", "udf", "xar", "xz", "zip", "zstd"]
 
 # How much memory the program may still take, and a budget to choose threads
 # under it. Not a format, and so not in `full`: it calls the system through
@@ -86,7 +86,7 @@ crypto = [
 
 deflate = []
 
-extract = ["zip", "tar", "iso", "cpio", "xar", "open", "udf", "sevenz", "dep:cap-std", "dep:cap-fs-ext", "dep:nix", "dep:rustix", "dep:windows-sys"]
+extract = ["zip", "tar", "iso", "cpio", "xar", "open", "udf", "squashfs", "sevenz", "dep:cap-std", "dep:cap-fs-ext", "dep:nix", "dep:rustix", "dep:windows-sys"]
 
 iso = ["deflate"]
 
@@ -101,6 +101,8 @@ rar = ["crypto", "deflate"]
 sevenz = ["bzip2", "crypto", "deflate", "xz", "zstd"]
 
 sign = ["age", "crypto"]
+
+squashfs = ["deflate", "lz4", "xz", "zstd"]
 
 tar = []
 
@@ -375,6 +377,11 @@ path = "tests/extract_tar_threads.rs"
 required-features = ["extract", "tar", "cpio"]
 
 [[test]]
+name = "extract_squashfs"
+path = "tests/extract_squashfs.rs"
+required-features = ["extract", "squashfs", "xz", "zip"]
+
+[[test]]
 name = "extract_udf"
 path = "tests/extract_udf.rs"
 required-features = ["crypto", "extract", "udf", "xz", "zip"]
@@ -457,7 +464,7 @@ required-features = ["age", "extract", "open"]
 [[test]]
 name = "open_open"
 path = "tests/open_open.rs"
-required-features = ["cpio", "extract", "iso", "open", "sevenz", "udf", "xar", "zip"]
+required-features = ["cpio", "extract", "iso", "open", "sevenz", "squashfs", "udf", "xar", "zip"]
 
 [[test]]
 name = "rar_oracle"
@@ -528,6 +535,11 @@ required-features = ["tar"]
 name = "tar_writer"
 path = "tests/tar_writer.rs"
 required-features = ["bzip2", "crypto", "tar"]
+
+[[test]]
+name = "squashfs_oracle"
+path = "tests/squashfs_oracle.rs"
+required-features = ["squashfs"]
 
 [[test]]
 name = "udf_crafted"

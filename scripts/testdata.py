@@ -7,9 +7,10 @@ testdata/manifest.json lists every set:
   into <cache>/<name>.
 - Sets with "generate" are made in <cache>/<name> by zstd's own tools, or
   by the oracles in tools/, built from the pinned zstd, zlib, libdeflate,
-  bzip2, lz4, liblzo2, XZ Utils, libzip, nettle, libarchive and libxml2
-  releases (and lzokay's commit), or with Go from the modules their go.sum
-  pins.
+  bzip2, lz4, liblzo2, XZ Utils, libzip, nettle, libarchive, libxml2 and
+  squashfuse releases (and lzokay's commit), or with Go from the modules
+  their go.sum pins, or are SquashFS images made by mksquashfs, built
+  from squashfs-tools' release.
 
 The cache is target/testdata, or $HIVEPACK_TESTDATA when set.
 
@@ -305,6 +306,106 @@ SEVENZ_FLAGS = ["-DZ7_PPMD_SUPPORT", "-DZ7_EXTRACT_ONLY"]
 # with xxHash's names prefixed as there.
 LZ4_SOURCES = ["lz4.c", "lz4frame.c", "lz4hc.c", "xxhash.c"]
 LZ4_FLAGS = ["-DXXH_NAMESPACE=LZ4_"]
+
+
+# squashfs-tools: the files its Makefile builds mksquashfs from
+# (MKSQUASHFS_OBJS), with those that GZIP_SUPPORT, LZMA_XZ_SUPPORT (legacy
+# LZMA through liblzma's lzma_alone coders), XZ_SUPPORT, LZO_SUPPORT,
+# LZ4_SUPPORT, ZSTD_SUPPORT and XATTR_SUPPORT add, and the CFLAGS it sets
+# for them and for its release.
+MKSQUASHFS_SOURCES = [
+    "mksquashfs.c", "read_fs.c", "action.c", "swap.c", "pseudo.c", "compressor.c", "sort.c",
+    "progressbar.c", "info.c", "restore.c", "process_fragments.c", "caches-queues-lists.c",
+    "reader.c", "tar.c", "date.c", "gzip_wrapper.c", "lzma_xz_wrapper.c", "xz_wrapper.c",
+    "lzo_wrapper.c", "lz4_wrapper.c", "zstd_wrapper.c", "xattr.c", "read_xattrs.c", "tar_xattr.c",
+    "pseudo_xattr.c",
+]
+MKSQUASHFS_FLAGS = [
+    "-D_FILE_OFFSET_BITS=64", "-D_LARGEFILE_SOURCE", "-D_GNU_SOURCE", '-DCOMP_DEFAULT="gzip"',
+    "-DGZIP_SUPPORT", "-DLZMA_SUPPORT", "-DXZ_SUPPORT", "-DLZO_SUPPORT", "-DLZ4_SUPPORT",
+    "-DZSTD_SUPPORT", "-DXATTR_SUPPORT", "-DXATTR_DEFAULT", "-DREPRODUCIBLE_DEFAULT",
+    '-DVERSION="4.6.1"', '-DDATE="2023/03/25"', '-DYEAR="2023"',
+]
+
+
+# squashfuse: its library (libsquashfuse_convenience in Makefile.am), single
+# threaded (cache.c, not cache_mt.c), without what only the FUSE programs use
+# (hash.c, util.c), and with the stat and makedev of libfuseprivate, which
+# sqfs_stat needs.
+SQUASHFUSE_SOURCES = [
+    "swap.c", "cache.c", "table.c", "dir.c", "file.c", "fs.c", "decompress.c", "xattr.c", "stack.c",
+    "traverse.c", "nonstd-pread.c", "nonstd-stat.c", "stat.c", "nonstd-makedev.c",
+]
+
+
+def squashfs_compressors(extra: list, folder: Path, compiler: str) -> tuple:
+    """The compressors of mksquashfs and squashfuse, from the `extra` sets in
+    this order: zlib, XZ Utils, lz4, zstd and LZO. Each library is compiled
+    apart, as their headers have common names: zlib without its gzip file
+    functions, liblzma (liblzma_objects), liblz4's block and high-compression
+    functions, libzstd's common, compress and decompress parts without the
+    assembly loop, and the whole of liblzo2 (src/*.c, as its Makefile builds
+    it). The objects, and the -I flags for the headers they are used with."""
+    zlib = next(extra[0].glob("zlib-*"))
+    xz = next(extra[1].glob("xz-*/src/liblzma"))
+    lz4 = next(extra[2].glob("lz4-*/lib"))
+    zstd = next(extra[3].glob("zstd-*/lib"))
+    lzo = next(extra[4].glob("lzo-*"))
+    parts = [
+        ("zlib", [f for f in zlib.glob("*.c") if not f.name.startswith("gz")], [f"-I{zlib}"]),
+        ("liblz4", [lz4 / "lz4.c", lz4 / "lz4hc.c"], [f"-I{lz4}"]),
+        ("libzstd", [f for part in ("common", "compress", "decompress") for f in (zstd / part).glob("*.c")],
+         ["-DZSTD_DISABLE_ASM"]),
+        ("liblzo2", list((lzo / "src").glob("*.c")), [f"-I{lzo / 'include'}", f"-I{lzo}", f"-I{lzo / 'src'}"]),
+    ]
+    objects = liblzma_objects(xz, folder, compiler)
+    for name, files, flags in parts:
+        out = folder / name
+        out.mkdir()
+        subprocess.run([compiler, "-O2", "-w", *flags, "-c", *sorted(str(f) for f in files)],
+                       check=True, cwd=out)
+        objects += sorted(str(f) for f in out.glob("*.o"))
+    includes = [f"-I{zlib}", f"-I{xz / 'api'}", f"-I{lz4}", f"-I{zstd}", f"-I{lzo / 'include'}"]
+    return objects, includes
+
+
+def build_mksquashfs(source: Path, sources: list, folder: Path, extra: list) -> None:
+    """squashfs-tools' mksquashfs, from the release's sources with the system
+    C compiler: its Makefile's files and flags (MKSQUASHFS_SOURCES and
+    MKSQUASHFS_FLAGS), linked with the compressors built from the pinned
+    sources (squashfs_compressors) in place of the system's libraries. The
+    header of `sources` (tools/squashfs-images/devices.h) is included before
+    each file, which keeps a device's 12-bit major number on macOS too. The
+    objects are left out of the set: only the program is kept."""
+    tools = next(source.glob("squashfs-tools-*/squashfs-tools"))
+    compiler = os.environ.get("CC", "cc")
+    print(f"  building mksquashfs from {tools.parent.name}")
+    build = folder / "build"
+    build.mkdir()
+    objects, includes = squashfs_compressors(extra, build, compiler)
+    forced = [arg for s in sources if s.endswith(".h") for arg in ("-include", str(ROOT / s))]
+    subprocess.run([compiler, "-O2", "-w", "-pthread", *MKSQUASHFS_FLAGS, *forced, f"-I{tools}", *includes,
+                    *[str(tools / name) for name in MKSQUASHFS_SOURCES], *objects,
+                    "-o", str(folder / "mksquashfs"), "-lm"], check=True)
+    shutil.rmtree(build)
+
+
+def build_squashfs_oracle(squashfuse: Path, sources: list, folder: Path, extra: list, compiler: str) -> None:
+    """tools/squashfs-oracle: squashfuse's library (SQUASHFUSE_SOURCES), with
+    tools/squashfs-oracle/config.h in place of the one its configure script
+    writes, and the compressors (squashfs_compressors). With -DNDEBUG, as a
+    release is built: cache.c asserts that an entry it finds again is valid,
+    which one whose block failed to read is not, and a damaged image would
+    stop the oracle there."""
+    build = folder / "build"
+    build.mkdir()
+    objects, includes = squashfs_compressors(extra, build, compiler)
+    config = ROOT / Path(sources[0]).parent
+    files = [str(ROOT / s) for s in sources if s.endswith(".c")]
+    files += [str(squashfuse / name) for name in SQUASHFUSE_SOURCES]
+    subprocess.run([compiler, "-O2", "-w", "-DNDEBUG", f"-I{config}", f"-I{squashfuse}", *includes, *files, *objects,
+                    "-o", str(folder / "oracle")], check=True)
+    shutil.rmtree(build)
 
 
 # liblzo2: the LZO1X compressors the oracle calls (lzo1x_1, its 1_11, 1_12
@@ -606,7 +707,10 @@ def build_oracle(source: Path, sources: list, included: list, folder: Path, extr
     GnuTLS and its bzip2 algorithm among them, its own config.h and
     zipconf.h in place of those libzip's CMake build writes, the part of
     GnuTLS that backend uses in gnutls/, and zlib's, nettle's, libbzip2's
-    and liblzma's (the `extra` sets)."""
+    and liblzma's (the `extra` sets).
+    tools/squashfs-oracle is built with squashfuse's SQUASHFUSE_SOURCES,
+    its own config.h, and zlib's, liblzma's, liblz4's, libzstd's and
+    liblzo2's (build_squashfs_oracle)."""
     files = [str(ROOT / s) for s in sources if s.endswith(".c")]
     compiler = os.environ.get("CC", "cc")
     if (source / "C" / "7zArcIn.c").exists():
@@ -626,6 +730,10 @@ def build_oracle(source: Path, sources: list, included: list, folder: Path, extr
             system += ["-lpowrprof", "-lbcrypt", "-lole32", "-loleaut32", "-luuid", "-lshlwapi", "-lshell32"]
         subprocess.run([os.environ.get("CXX", "c++"), "-O2", "-w", "-std=c++11", *UNRAR_FLAGS,
                         f"-I{unrar}", *files, "-o", str(folder / "oracle"), *system], check=True)
+        return
+    squashfuse = next(source.glob("squashfuse-*"), None)
+    if squashfuse is not None:
+        build_squashfs_oracle(squashfuse, sources, folder, extra, compiler)
         return
     libzip = next(source.glob("libzip-*"), None)
     if libzip is not None:
@@ -780,15 +888,23 @@ def generate_set(entry: dict, cache: Path, sets: dict) -> None:
         print(f"  {entry['name']}: generated")
         return
     origin = sets[generate["from"]]
-    fetch_set(origin, cache)
+    make_set(origin, cache, sets)
     extra = [sets[name] for name in generate.get("with", [])]
     for entry_with in extra:
-        fetch_set(entry_with, cache)
+        make_set(entry_with, cache, sets)
     if folder.exists():
         shutil.rmtree(folder)
     folder.mkdir(parents=True)
     if generate["tool"] == "7zz":
         build_7zz(cache / origin["name"], folder)
+    elif generate["tool"] == "mksquashfs":
+        build_mksquashfs(cache / origin["name"], generate.get("sources", []), folder,
+                         [cache / e["name"] for e in extra])
+    elif generate["tool"] == "squashfs-images":
+        # The script (the first of the sources) makes the images with the
+        # mksquashfs of the `from` set.
+        subprocess.run([sys.executable, str(ROOT / generate["sources"][0]), "full",
+                        str(cache / origin["name"] / "mksquashfs"), str(folder)], check=True)
     elif generate["tool"] == "uudecode":
         # Each file the glob (or globs) finds, decoded, named without its
         # `.uu` and libarchive's `test_read_format_`.
@@ -807,6 +923,14 @@ def generate_set(entry: dict, cache: Path, sets: dict) -> None:
                        stdout=subprocess.DEVNULL)
     mark_current(folder, stamp)
     print(f"  {entry['name']}: generated")
+
+
+def make_set(entry: dict, cache: Path, sets: dict) -> None:
+    """A set another is made from, fetched or generated as it says."""
+    if "fetch" in entry:
+        fetch_set(entry, cache)
+    else:
+        generate_set(entry, cache, sets)
 
 
 def load_sets() -> dict:
@@ -863,10 +987,7 @@ def main() -> None:
         group = group_of(entry)
         if group not in groups and entry["name"] not in args.set:
             continue
-        if "fetch" in entry:
-            fetch_set(entry, cache)
-        else:
-            generate_set(entry, cache, sets)
+        make_set(entry, cache, sets)
 
 
 if __name__ == "__main__":

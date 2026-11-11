@@ -1,0 +1,38 @@
+The SquashFS images in this folder were made by the repository's
+tools/squashfs-images/make.py, with squashfs-tools 4.6.1's mksquashfs as
+scripts/testdata.py builds it (the mksquashfs set), from a small tree of
+files the script writes: three files, one of 9,000 bytes (two 4 KiB blocks
+and a tail), a second name for one of them, a directory, a symbolic link,
+and from mksquashfs's pseudo file a block device, a FIFO and extended
+attributes:
+
+  python3 scripts/testdata.py fetch --set mksquashfs
+  python3 tools/squashfs-images/make.py small \
+      "${HIVEPACK_TESTDATA:-target/testdata}/mksquashfs/mksquashfs" testdata/squashfs
+
+There is one image for each compressor (gzip, lzma, lzo, xz, lz4, zstd), and
+uncompressed.sqfs, gzip with nothing compressed (-noI -noD -noF -noX).
+manifest.txt lists the arguments each was made with. They are under the
+repository's license:
+
+MIT License
+
+Copyright (c) 2026 HivePaaS
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

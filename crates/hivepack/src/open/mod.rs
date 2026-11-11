@@ -4,7 +4,7 @@
 //! archive around their `data.tar`, found by their first
 //! bytes and taken off one after the other, as many as there are, until
 //! what is under them is a container (a tar, ZIP, 7z, cpio or XAR archive,
-//! an ISO 9660 image, a UDF volume), or plain data.
+//! an ISO 9660 image, a UDF volume, a SquashFS image), or plain data.
 //!
 //! ```no_run
 //! use std::sync::Arc;
@@ -33,8 +33,8 @@
 //!
 //! Each [`Opener::open`] reads the file from its start again: the age
 //! layers' file keys are kept from the first, so that a passphrase is asked
-//! for once. A ZIP or 7z archive and a UDF volume are read by random access;
-//! under layers, they must be taken out to a file first.
+//! for once. A ZIP or 7z archive, a UDF volume and a SquashFS image are read
+//! by random access; under layers, they must be taken out to a file first.
 //!
 //! The design is in the repository's `docs/open.md`.
 

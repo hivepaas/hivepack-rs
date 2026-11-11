@@ -17,6 +17,7 @@ The crate's own code is under the MIT license ([LICENSE](LICENSE)). Each port ke
 | `rar` | **UnRAR**, which is not an open source license: it may not be used to develop a RAR-compatible archiver or to re-create RAR's compression | [src/rar/LICENSE](src/rar/LICENSE) |
 | `sevenz` | MIT | [src/sevenz/LICENSE](src/sevenz/LICENSE) |
 | `sign` | MIT | [src/sign/LICENSE](src/sign/LICENSE) |
+| `squashfs` | BSD-2-Clause | [src/squashfs/LICENSE](src/squashfs/LICENSE) |
 | `tar` | BSD-3-Clause | [src/tar/LICENSE](src/tar/LICENSE) |
 | `udf` | BSD-2-Clause AND BSD-3-Clause | [src/udf/LICENSE](src/udf/LICENSE) |
 | `xar` | BSD-2-Clause AND MIT | [src/xar/LICENSE](src/xar/LICENSE) |

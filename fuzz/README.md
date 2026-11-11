@@ -3,7 +3,7 @@
 `cargo-fuzz` targets that compare hivepack::zstd with libzstd,
 hivepack::deflate with zlib, hivepack::bzip2 with libbzip2, hivepack::lz4 with
 liblz4, and hivepack::xz with liblzma, and that feed hivepack::lzo, hivepack::zip,
-hivepack::extract, hivepack::age, hivepack::tar, hivepack::iso, hivepack::cpio, hivepack::open, hivepack::sevenz and hivepack::udf any input. They need
+hivepack::extract, hivepack::age, hivepack::tar, hivepack::iso, hivepack::cpio, hivepack::open, hivepack::sevenz, hivepack::udf and hivepack::squashfs any input. They need
 nightly, where `rust-toolchain.toml` pins a stable: the nightly CI uses
 (`NIGHTLY` in `.github/workflows/ci.yml`), chosen for the shell with
 `export RUSTUP_TOOLCHAIN=<that nightly>`, and
@@ -57,6 +57,8 @@ nightly, where `rust-toolchain.toml` pins a stable: the nightly CI uses
 | `open` | Opening the input through its layers with hivepack::open (the age key of `crates/hivepack/tests/open_age.rs`'s files; a name ending in `.lzma` if its first byte is odd; small limits), three times with one opener, the later opens with the file keys kept, and reading up to 4 MiB in pieces of different sizes: the same layers, container and end each time, the same data, or after an error data of which one starts the other (libzstd gives out less before an error when its output buffer is larger), and no panic |
 | `udf` | Mounting the image the input describes (its first byte the sector size, its next three the number of sectors, then sectors by number, length and bytes) and walking it twice: every directory listed, every node's attributes, every link's target, up to 1 MiB of every file, the first 16 names of each directory looked up: the same both times, every name found when its directory reads whole, and no panic (`crates/udf/tests` compares the answers with Linux) |
 | `extract_udf` | Extracting the image the input describes, after a byte of options (as `extract_iso`'s, and whether hidden entries are listed), as the `udf` target reads it, with hivepack::extract: nothing written beside the destination, every link created staying inside it, the summary counting what is there (a hard link's file once), and no file left cut off |
+| `squashfs` | Opening the input as a SquashFS image and walking it twice, as `tests/squashfs_oracle.rs` walks it beside squashfuse: every entry, its inode, attributes, link target, extended attributes, export table entry and up to 256 KiB of its data, and a directory without an index listed again from each entry's `next_offset`: the same transcript both times, the entry after it found, no panic, at most 4,096 entries |
+| `extract_squashfs` | Extracting the input, after a byte of options (as `extract_udf`'s), as a SquashFS image, with hivepack::extract: nothing written beside the destination, every link created staying inside it, the summary counting what is there, no file left cut off |
 
 Seed the corpus with the frames in `testdata`, then run, with the
 `unsafe-fast` feature or without:
@@ -144,6 +146,17 @@ mkdir -p fuzz/corpus/extract_udf
 for f in fuzz/corpus/udf/*; do { printf '\x22'; cat "$f"; } > "fuzz/corpus/extract_udf/$(basename "$f")"; done
 cargo fuzz run udf -- -max_total_time=3600 -rss_limit_mb=4096 -max_len=400000
 cargo fuzz run extract_udf -- -max_total_time=3600 -rss_limit_mb=4096 -max_len=400000
+```
+
+CI seeds `squashfs` with `testdata/squashfs`'s images, and `extract_squashfs`
+with the same behind a byte of options:
+
+```sh
+mkdir -p fuzz/corpus/squashfs fuzz/corpus/extract_squashfs
+cp testdata/squashfs/*.sqfs fuzz/corpus/squashfs/
+for f in testdata/squashfs/*.sqfs; do { printf '\x22'; cat "$f"; } > "fuzz/corpus/extract_squashfs/$(basename "$f")"; done
+cargo fuzz run squashfs -- -max_total_time=3600 -rss_limit_mb=4096 -max_len=65536
+cargo fuzz run extract_squashfs -- -max_total_time=3600 -rss_limit_mb=4096 -max_len=65536
 ```
 
 `cargo fuzz` builds with AddressSanitizer, so with the feature an access out

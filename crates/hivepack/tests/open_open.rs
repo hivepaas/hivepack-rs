@@ -740,6 +740,33 @@ fn udf_volumes_under_layers_open() {
     }
 }
 
+/// SquashFS images of `testdata/squashfs`, made by mksquashfs: found by
+/// their magic, alone and under layers, and opened by hivepack::squashfs
+/// from what comes out.
+#[test]
+fn squashfs_images_under_layers_open() {
+    for name in ["gzip.sqfs", "xz.sqfs", "zstd.sqfs", "uncompressed.sqfs"] {
+        let path = support::repository().join("testdata/squashfs").join(name);
+        let image = std::fs::read(path).unwrap();
+        assert_eq!(
+            open(&image).unwrap(),
+            (vec![], Container::Squashfs, image.clone()),
+            "{name}"
+        );
+        for (layer, compress) in [(Layer::Zstd, zstd as Compress), (Layer::Xz, xz)] {
+            let (layers, container, out) = open(&compress(&image)).unwrap();
+            assert_eq!(
+                (layers, container),
+                (vec![layer], Container::Squashfs),
+                "{name}"
+            );
+            let mut fs = hivepack::squashfs::Squashfs::open(Cursor::new(out)).unwrap();
+            let root = fs.root().unwrap();
+            assert!(fs.lookup(&root, b"hello.txt").unwrap().is_some(), "{name}");
+        }
+    }
+}
+
 /// 7z archives of `testdata/7z`, made by 7-Zip: found by their signature,
 /// alone and under layers, and opened by hivepack::sevenz from what comes out.
 #[test]
