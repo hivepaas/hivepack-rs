@@ -445,7 +445,7 @@ required-features = ["age", "extract", "open"]
 [[test]]
 name = "open_open"
 path = "tests/open_open.rs"
-required-features = ["cpio", "extract", "iso", "open", "sevenz", "udf", "xar", "zip"]
+required-features = ["cpio", "extract", "iso", "open", "sevenz", "squashfs", "udf", "xar", "zip"]
 
 [[test]]
 name = "rar_oracle"

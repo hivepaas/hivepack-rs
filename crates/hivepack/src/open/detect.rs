@@ -1,6 +1,7 @@
 //! What a stream is, from its first bytes: a layer to take off (age, a
 //! compressor, an RPM package's lead and headers), a container (tar, ZIP,
-//! 7z, cpio, XAR, an ISO 9660 image, a UDF volume), or plain data.
+//! 7z, cpio, XAR, an ISO 9660 image, a UDF volume, a SquashFS image), or
+//! plain data.
 
 /// A layer over the data: encryption or compression.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -63,6 +64,10 @@ pub enum Container {
     /// most DVDs') is one, as the files are on its UDF side; `hivepack::iso`
     /// reads its ISO 9660 side.
     Udf,
+    /// A SquashFS image (a snap package, `.sqfs`, `.squashfs`), which
+    /// `hivepack::squashfs` reads by random access: in a layer, it must be
+    /// taken out to a file first.
+    Squashfs,
     /// Data: one file, compressed or encrypted (`notes.txt.zst`).
     Data,
 }
@@ -108,6 +113,11 @@ const RAR14_MAGIC: &[u8] = b"RE~^";
 /// A 7z archive's signature (`hivepack::sevenz::SIGNATURE`, kept here so that
 /// telling one does not take the decoder).
 const SEVEN_ZIP_MAGIC: &[u8] = &[b'7', b'z', 0xBC, 0xAF, 0x27, 0x1C];
+
+/// SquashFS's magic, `hsqs` (`hivepack::squashfs::MAGIC`, kept here so
+/// that telling one does not take the reader), as squashfuse and `file`
+/// tell an image.
+const SQUASHFS_MAGIC: &[u8] = b"hsqs";
 
 /// Whether `head` starts with a skippable frame's magic, 0x184D2A50 to
 /// 0x184D2A5F, little-endian: zstd's and LZ4's, which share them.
@@ -362,6 +372,9 @@ pub fn detect(head: &[u8], name: Option<&str>) -> Detected {
     }
     if starts(RAR14_MAGIC) || starts(RAR_MAGIC) && matches!(head.get(6), Some(0 | 1)) {
         return Detected::Container(Container::Rar);
+    }
+    if starts(SQUASHFS_MAGIC) {
+        return Detected::Container(Container::Squashfs);
     }
     if is_xar(head) {
         return Detected::Container(Container::Xar);
@@ -634,6 +647,18 @@ mod tests {
         let unnamed = tar_block(b"", b"", None);
         for head in [&wrong[..], &unnamed, &[0; 512], &v7[..511], b""] {
             assert_eq!(layer(head), Detected::Container(Container::Data));
+        }
+    }
+
+    #[test]
+    fn squashfs_by_its_magic() {
+        let mut head = b"hsqs".to_vec();
+        head.extend_from_slice(&[0; 92]);
+        assert_eq!(layer(&head), Detected::Container(Container::Squashfs));
+        // Its magic in the other byte order (SquashFS 3 and older on
+        // big-endian machines), and near misses, are data.
+        for other in [&b"sqsh"[..], b"hsq", b"Hsqs", b"hsqt"] {
+            assert_eq!(layer(other), Detected::Container(Container::Data));
         }
     }
 
