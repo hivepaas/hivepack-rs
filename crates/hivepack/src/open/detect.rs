@@ -1,5 +1,6 @@
 //! What a stream is, from its first bytes: a layer to take off (age, a
-//! compressor, an RPM package's lead and headers), a container (tar, ZIP,
+//! compressor, an RPM package's lead and headers, a Debian package's ar
+//! archive around its data), a container (tar, ZIP,
 //! 7z, cpio, XAR, an ISO 9660 image, a UDF volume), or plain data.
 
 /// A layer over the data: encryption or compression.
@@ -28,6 +29,12 @@ pub enum Layer {
     /// An RPM package: its lead and headers, around its payload, a cpio
     /// archive, compressed.
     Rpm,
+    /// A Debian package (`.deb`, `.udeb`): an ar archive, `debian-binary`
+    /// first, around its `data.tar`, a tar archive, compressed or not. What
+    /// is under the layer is that `data.tar`, the files the package
+    /// installs, as `dpkg-deb --fsys-tarfile` gives them; `hivepack::ar`
+    /// reads the package's other members, `control.tar` among them.
+    Deb,
 }
 
 /// What is under the layers.
@@ -108,6 +115,24 @@ const RAR14_MAGIC: &[u8] = b"RE~^";
 /// A 7z archive's signature (`hivepack::sevenz::SIGNATURE`, kept here so that
 /// telling one does not take the decoder).
 const SEVEN_ZIP_MAGIC: &[u8] = &[b'7', b'z', 0xBC, 0xAF, 0x27, 0x1C];
+
+/// Whether `head` starts a Debian package: an ar archive whose first
+/// member is `debian-binary`, its name padded with spaces, or ending in
+/// GNU's `/`, as dpkg reads it.
+fn is_deb(head: &[u8]) -> bool {
+    let Some(name) = head
+        .strip_prefix(b"!<arch>\n")
+        .and_then(|rest| rest.get(..16))
+    else {
+        return false;
+    };
+    let mut name = name;
+    while let [rest @ .., b' '] = name {
+        name = rest;
+    }
+    let name = name.strip_suffix(b"/").unwrap_or(name);
+    name == b"debian-binary"
+}
 
 /// Whether `head` starts with a skippable frame's magic, 0x184D2A50 to
 /// 0x184D2A5F, little-endian: zstd's and LZ4's, which share them.
@@ -348,6 +373,9 @@ pub fn detect(head: &[u8], name: Option<&str>) -> Detected {
     if crate::cpio::rpm::bid(head) > 0 {
         return Detected::Layer(Layer::Rpm);
     }
+    if is_deb(head) {
+        return Detected::Layer(Layer::Deb);
+    }
     if starts(&[0x1F, 0x8B]) {
         return Detected::Layer(Layer::Gzip);
     }
@@ -487,6 +515,28 @@ mod tests {
             header(28, 1, 1)[..27].to_vec(),
         ] {
             assert_eq!(layer(&head), Detected::Container(Container::Data));
+        }
+    }
+
+    #[test]
+    fn debian_packages_by_their_first_member() {
+        for name in [&b"debian-binary   "[..], b"debian-binary/  "] {
+            let head = [
+                &b"!<arch>\n"[..],
+                name,
+                b"1700000000  0     0     100644  4         `\n2.0\n",
+            ]
+            .concat();
+            assert_eq!(layer(&head), Detected::Layer(Layer::Deb));
+        }
+        // An ar archive whose first member is another, a static library's,
+        // and one cut in its first name.
+        for head in [
+            &b"!<arch>\nhello.o/        "[..],
+            b"!<arch>\ndebian-bin",
+            b"!<arch>\ndebian-binaryx  ",
+        ] {
+            assert_eq!(layer(head), Detected::Container(Container::Data));
         }
     }
 

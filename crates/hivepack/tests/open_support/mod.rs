@@ -404,6 +404,39 @@ pub fn rpm(payload: &[u8]) -> Vec<u8> {
     out
 }
 
+/// An ar member as dpkg-deb writes one: its name padded with spaces, the
+/// time, owner 0, mode 100644 and size in the header, its data, and a
+/// newline to an even offset.
+pub fn ar_member(name: &str, data: &[u8]) -> Vec<u8> {
+    let mut out = format!(
+        "{name:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n",
+        1_700_000_000,
+        0,
+        0,
+        "100644",
+        data.len()
+    )
+    .into_bytes();
+    assert_eq!(out.len(), 60);
+    out.extend(data);
+    if data.len() % 2 == 1 {
+        out.push(b'\n');
+    }
+    out
+}
+
+/// A Debian package, as dpkg-deb writes one: `debian-binary`, a
+/// `control.tar.xz` of a `control` file, and `data`, the files, as the
+/// member `data_name`.
+pub fn deb(data_name: &str, data: &[u8]) -> Vec<u8> {
+    let control = tar(&[("./control", b"Package: hello\nVersion: 1.0\n")]);
+    let mut out = b"!<arch>\n".to_vec();
+    out.extend(ar_member("debian-binary", b"2.0\n"));
+    out.extend(ar_member("control.tar.xz", &xz(&control)));
+    out.extend(ar_member(data_name, data));
+    out
+}
+
 /// Where `scripts/testdata.py` keeps the sets it fetches.
 pub fn testdata() -> PathBuf {
     std::env::var_os("HIVEPACK_TESTDATA")

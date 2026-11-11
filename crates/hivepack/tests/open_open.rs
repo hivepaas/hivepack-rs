@@ -14,8 +14,8 @@ use std::io::{self, Cursor, Read};
 use hivepack::Threads;
 use hivepack::open::{Container, DecodeError, Error, Layer, Limits, Opener};
 use support::{
-    Scratch, bzip2, gzip, lz4, lz4_legacy, lzip, lzma, newc, pbzx, pbzx_chunk, pbzx_of, rpm,
-    sample_tar, xz, xz_no_check, xz_preset, zstd,
+    Scratch, ar_member, bzip2, deb, gzip, lz4, lz4_legacy, lzip, lzma, newc, pbzx, pbzx_chunk,
+    pbzx_of, rpm, sample_tar, small_tar, tar, xz, xz_no_check, xz_preset, zstd,
 };
 
 /// A reference library's compressor.
@@ -420,6 +420,161 @@ fn rpm_packages_without_a_payload_fail() {
     let mut outer = gzip(&package);
     outer.truncate(outer.len() - 4);
     assert_eq!(failed_layer(open(&outer)), Layer::Gzip);
+}
+
+/// A Debian package's files under each compressor dpkg-deb writes them
+/// with, or none: the package's ar archive taken off down to its
+/// `data.tar`, then the compression, the tar archive left.
+#[test]
+fn debian_packages_open_to_their_files() {
+    let tar = sample_tar();
+    let cases: [(&str, Layer, Compress); 4] = [
+        ("data.tar.gz", Layer::Gzip, gzip),
+        ("data.tar.xz", Layer::Xz, xz),
+        ("data.tar.zst", Layer::Zstd, zstd),
+        ("data.tar.bz2", Layer::Bzip2, bzip2),
+    ];
+    for (name, layer, compress) in cases {
+        let (layers, container, data) = open(&deb(name, &compress(&tar))).unwrap();
+        assert_eq!(
+            (layers, container),
+            (vec![Layer::Deb, layer], Container::Tar),
+            "{name}"
+        );
+        assert!(data == tar, "{name}");
+    }
+    // LZMA, which old packages have, without magic: its header tells it.
+    let (layers, container, data) = open(&deb("data.tar.lzma", &lzma(&tar))).unwrap();
+    assert_eq!(
+        (layers, container),
+        (vec![Layer::Deb, Layer::Lzma], Container::Tar)
+    );
+    assert!(data == tar);
+    // Uncompressed.
+    assert_eq!(
+        open(&deb("data.tar", &tar)).unwrap(),
+        (vec![Layer::Deb], Container::Tar, tar.clone())
+    );
+    // GNU's names, which end in a slash, and members dpkg passes over.
+    let mut gnu = b"!<arch>\n".to_vec();
+    gnu.extend(ar_member("debian-binary/", b"2.0\n"));
+    gnu.extend(ar_member("control.tar/", &small_tar()));
+    gnu.extend(ar_member("_gpgorigin/", b"signature"));
+    gnu.extend(ar_member("data.tar.xz/", &xz(&tar)));
+    let (layers, container, data) = open(&gnu).unwrap();
+    assert_eq!(
+        (layers, container),
+        (vec![Layer::Deb, Layer::Xz], Container::Tar)
+    );
+    assert!(data == tar);
+    // An ar archive that is not a package (a static library) is data.
+    let mut library = b"!<arch>\n".to_vec();
+    library.extend(ar_member("hello.o/", b"\x7fELF"));
+    assert_eq!(
+        open(&library).unwrap(),
+        (vec![], Container::Data, library.clone())
+    );
+    // Under another layer too.
+    let (layers, container, _) = open(&gzip(&deb("data.tar.zst", &zstd(&tar)))).unwrap();
+    assert_eq!(
+        (layers, container),
+        (vec![Layer::Gzip, Layer::Deb, Layer::Zstd], Container::Tar)
+    );
+}
+
+/// A Debian package extracts through the opener: the files it installs.
+#[test]
+fn a_debian_package_extracts_through_the_opener() {
+    let data = tar(&[
+        ("./", b""),
+        ("./usr/", b""),
+        ("./usr/bin/", b""),
+        ("./usr/bin/hello", b"#!/bin/sh\necho hello\n"),
+    ]);
+    let package = deb("data.tar.xz", &xz(&data));
+    let scratch = Scratch::new();
+    let out = scratch.path().join("out");
+    let mut opener = Opener::new(|| Ok(Cursor::new(&package[..])));
+    hivepack::extract::extract_tar(
+        || Ok(opener.open()?),
+        &out,
+        &hivepack::extract::Options::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read(out.join("usr/bin/hello")).unwrap(),
+        b"#!/bin/sh\necho hello\n"
+    );
+    assert!(
+        !out.join("control").exists(),
+        "control.tar is not extracted"
+    );
+}
+
+/// Packages without their data, cut short, or broken, fail with
+/// libarchive's messages, or say there is no `data.tar`.
+#[test]
+fn broken_debian_packages_fail() {
+    let package = deb("data.tar.gz", &gzip(&sample_tar()));
+    let data_header = package.windows(8).position(|w| w == b"data.tar").unwrap();
+    let no_data = package[..data_header].to_vec();
+    let mut bad_signature = package.clone();
+    bad_signature[data_header + 58] = b'x';
+    for (file, message) in [
+        (no_data.clone(), "the package has no data.tar member"),
+        // A header cut short is the end, as libarchive reads it.
+        (
+            package[..data_header + 30].to_vec(),
+            "the package has no data.tar member",
+        ),
+        (package[..data_header + 70].to_vec(), "Truncated ar archive"),
+        (bad_signature, "Incorrect file header signature"),
+    ] {
+        assert_eq!(failure(open(&file)), (Layer::Deb, message.to_string()));
+    }
+    // An outer layer's error comes through the package as it is. What
+    // follows `data.tar` is not read, as dpkg-deb reads it: the outer
+    // layer is cut in the middle.
+    let mut outer = gzip(&package);
+    outer.truncate(outer.len() / 2);
+    assert_eq!(failed_layer(open(&outer)), Layer::Gzip);
+}
+
+/// GNU hello's Debian packages, when the core sets are there
+/// (`scripts/testdata.py fetch`): a package of today, its data in xz, and
+/// one from 2009, in gzip, opened to their files and extracted.
+#[test]
+fn real_debian_packages_open_and_extract() {
+    let folder = support::testdata().join("debian-packages");
+    if !folder.join(".complete").exists() {
+        eprintln!("skipping: the debian-packages set is not fetched");
+        return;
+    }
+    for (name, layer, binary) in [
+        ("hello_2.10-3_amd64.deb", Layer::Xz, "usr/bin/hello"),
+        ("hello_2.4-3_i386.deb", Layer::Gzip, "usr/bin/hello"),
+    ] {
+        let package = std::fs::read(folder.join(name)).unwrap();
+        let (layers, container, _) = open(&package).unwrap();
+        assert_eq!(
+            (layers, container),
+            (vec![Layer::Deb, layer], Container::Tar),
+            "{name}"
+        );
+        let scratch = Scratch::new();
+        let out = scratch.path().join("out");
+        let mut opener = Opener::new(|| Ok(Cursor::new(&package[..])));
+        let summary = hivepack::extract::extract_tar(
+            || Ok(opener.open()?),
+            &out,
+            &hivepack::extract::Options::default(),
+        )
+        .unwrap();
+        assert!(summary.files > 3, "{name}: {summary:?}");
+        let program = std::fs::read(out.join(binary)).unwrap();
+        assert!(program.starts_with(b"\x7fELF"), "{name}");
+        assert!(out.join("usr/share/doc/hello/copyright").exists(), "{name}");
+    }
 }
 
 /// libarchive's own cpio archives and RPM packages, when the core sets are
