@@ -2,7 +2,7 @@
 
 Reading SquashFS images (snap packages, AppImages' images, live systems' root file systems) in safe Rust, ported from squashfuse's library.
 
-> **Status:** reads SquashFS 4.0 as squashfuse 0.6.5 does: every inode type, basic and extended (directories with their index, files with fragments, holes and the block index, symbolic links, block and character devices, FIFOs, sockets), hard links, owners, extended attributes stored inline and out of line, and the export table; data and metadata compressed with zlib, LZMA, xz, LZ4 or zstd through hivepack's own decoders, or stored. LZO is not read yet: such an image fails to open with `SQFS_BADCOMP`, as squashfuse built without LZO does. What it reads is squashfuse's, line for line, on 31 images mksquashfs 4.6.1 makes (all but its LZO ones), a snap and an AppImage, and thousands of damaged copies of them. Writing is not ported. This crate is not on crates.io.
+> **Status:** reads SquashFS 4.0 as squashfuse 0.6.5 does: every inode type, basic and extended (directories with their index, files with fragments, holes and the block index, symbolic links, block and character devices, FIFOs, sockets), hard links, owners, extended attributes stored inline and out of line, and the export table; data and metadata compressed with zlib, LZMA, LZO, xz, LZ4 or zstd through hivepack's own decoders, or stored. What it reads is squashfuse's, line for line, on 31 images mksquashfs 4.6.1 makes (all but its LZO ones), a snap and an AppImage, and thousands of damaged copies of them. Writing is not ported. This crate is not on crates.io.
 
 ```rust
 use std::io::Read;

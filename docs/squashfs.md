@@ -33,12 +33,12 @@ The API is the library's: `Squashfs::open` and `open_at` (`sqfs_init` with its `
 |---|---|---|
 | zlib (1) | zlib's `uncompress` | `hivepack::deflate::Inflate`, driven as `uncompress` drives `inflate` |
 | LZMA (2), the format squashfs-tools 4.0 to 4.3 wrote | liblzma's `lzma_alone_decoder`, with a header squashfuse took from squashfs-tools | `hivepack::xz::Stream::alone_decoder`, with the same header |
-| LZO (3) | liblzo2's `lzo1x_decompress_safe` | not yet: `SQFS_BADCOMP`, as squashfuse built without LZO |
+| LZO (3) | liblzo2's `lzo1x_decompress_safe` | `hivepack::lzo::decompress`, its port ([lzo.md](lzo.md)), every error a failure as in squashfuse, bytes after a block's end among them |
 | xz (4) | liblzma's `lzma_stream_buffer_decode` | `hivepack::xz::Stream::stream_decoder`, called as `lzma_stream_buffer_decode` calls it |
 | LZ4 (5) | liblz4's `LZ4_decompress_safe` | `hivepack::lz4::block::decompress_safe` |
 | zstd (6) | libzstd's `ZSTD_decompress` | `hivepack::zstd::decompress` |
 
-The compressor options mksquashfs writes after the superblock are not read, as squashfuse does not read them: a decoder needs none of them (xz's filters are in each stream). LZO waits for hivepack's own port of `lzo1x_decompress_safe`; with it, `sqfs_decompressor_get` gives one more function, as `decompress.rs` says.
+The compressor options mksquashfs writes after the superblock are not read, as squashfuse does not read them: a decoder needs none of them (xz's filters are in each stream).
 
 ## What differs
 
@@ -68,7 +68,7 @@ A metadata block is at most 8 KiB once decompressed, 32 KiB stored; a data block
 - **Real files**: KeeWeb 1.18.7's snap (96 MB, xz, 385 entries) and appimagetool 1.9.1's AppImage (15 MB, its image of zstd at byte 944,632, the end of its ELF program), fetched by their pinned URL and SHA-256 (`squashfs-real`), read whole.
 - **Damaged copies**: each image cut short at the start and in the middle of each of its parts (superblock, data, inode table, directory table, fragment, export, id and xattr tables), a byte off its end, and changed in each part in turn: a bit, up to four bits, a byte set to 0xff or 0. Each copy is compared with up to 3,000 entries and 256 KiB of each file.
 - **The counts.** Every image whole, and in CI 300 damaged copies of each committed image (2,107 comparisons, which `testdata/oracle/squashfs.txt` replays where the oracle is not built: Windows, and the emulated i686 and s390x jobs), 48 of each generated image (1,323), and 68 of the real files, damaged in their tables (70). Once, 400 of each generated image: 10,827 comparisons. All agree, but where squashfuse reads past a metadata block (30 of the 10,827, none of the committed ones' 2,107): there the port fails, and the answers must be the same up to that line, which must be of the same kind.
-- **LZO images**, the three that mksquashfs makes, are read by the oracle; the port must fail to open them with `SQFS_BADCOMP`, until it reads LZO, when the test compares them as the others.
+- **LZO images**, the three that mksquashfs makes (`-comp lzo`, its default `lzo1x_999`, and `-Xalgorithm lzo1x_1`), and the committed one, are compared as the others, whole and damaged.
 - **Extraction**, in [extract.md](extract.md#squashfs).
 - **Fuzzing**: the `squashfs` target opens any input as an image and walks it twice, as the oracle test does, and lists each directory again from each entry's `next_offset`; the transcripts must be the same and nothing may panic. The `extract_squashfs` target extracts it, as `extract_udf`'s does a UDF volume. CI seeds both with `testdata/squashfs`. The first fifteen minutes of `squashfs`, 276,000 inputs, and five of `extract_squashfs`, 3.3 million, found nothing.
 
@@ -82,13 +82,14 @@ Reading every file of an image, 128 KiB at a time, from opening it on, by squash
 | appimagetool 1.9.1's AppImage (zstd) | 8 | 36.9 MB | 30 ms (1,224 MB/s) | 39 ms (952 MB/s) | 0.78× |
 | the full tree, gzip | 2,044 | 19.8 MB | 14 ms | 9 ms | 1.52× |
 | the full tree, LZMA | 2,044 | 19.8 MB | 53 ms | 57 ms | 0.93× |
+| the full tree, LZO | 2,044 | 19.8 MB | 7.0 ms | 4.9 ms | 1.45× |
 | the full tree, xz | 2,044 | 19.8 MB | 55 ms | 58 ms | 0.96× |
 | the full tree, LZ4 | 2,044 | 19.8 MB | 2.1 ms | 2.9 ms | 0.73× |
 | the full tree, zstd | 2,044 | 19.8 MB | 5.1 ms | 6.3 ms | 0.82× |
 | the full tree, zstd, blocks of 1 MiB | 2,044 | 19.8 MB | 4.2 ms | 5.4 ms | 0.78× |
 | the full tree, nothing compressed | 2,044 | 19.8 MB | 0.55 ms | 0.72 ms | 0.76× |
 
-A snap is xz, and there the time is liblzma's and hivepack::xz's, which is 0.94× liblzma's assembly on Silesia ([xz.md](xz.md)): reading a snap takes 6% longer than squashfuse. gzip is faster through hivepack::deflate's inflate ([deflate.md](deflate.md#where-decompression-stands)). Where the decoder is fast (LZ4, zstd, nothing compressed), what is left is the port's own work for each block: its output zeroed before it is decoded into, the block read into memory zeroed first, and its metadata copied. The zstd and zlib decoders are kept from one block to the next, which squashfuse's calls do not, and a block after the one read last is read without seeking; neither changed these numbers by more than 2%.
+A snap is xz, and there the time is liblzma's and hivepack::xz's, which is 0.94× liblzma's assembly on Silesia ([xz.md](xz.md)): reading a snap takes 6% longer than squashfuse. gzip is faster through hivepack::deflate's inflate ([deflate.md](deflate.md#where-decompression-stands)). So is LZO, through hivepack::lzo ([lzo.md](lzo.md)), which squashfuse's liblzo2 decodes at 0.7× its speed on mksquashfs's `lzo1x_999` blocks. Where the decoder is fast (LZ4, zstd, nothing compressed), what is left is the port's own work for each block: its output zeroed before it is decoded into, the block read into memory zeroed first, and its metadata copied. The zstd and zlib decoders are kept from one block to the next, which squashfuse's calls do not, and a block after the one read last is read without seeking; neither changed these numbers by more than 2%.
 
 ## Following new releases
 

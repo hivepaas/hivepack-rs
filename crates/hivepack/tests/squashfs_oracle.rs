@@ -19,9 +19,6 @@
 //! - `squashfs-real`: a snap (KeeWeb 1.18.7's) and an AppImage
 //!   (appimagetool 1.9.1's, its image at the end of its ELF program), read
 //!   whole, and damaged in their tables.
-//!
-//! LZO images, which the port does not read yet, must fail to open with
-//! `SQFS_BADCOMP`, as squashfuse built without LZO does, until it does.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -34,7 +31,6 @@ use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use hivepack::squashfs::Compression;
 use support::{
     FNV_OFFSET, Limits, Oracle, Scratch, WHOLE, damaged, elf_end, fnv1a, port_list, repository, set,
 };
@@ -69,14 +65,6 @@ fn seed(name: &str) -> u64 {
     fnv1a(FNV_OFFSET, name.as_bytes())
 }
 
-/// Whether the image (at `offset`) is LZO, which the port does not read
-/// yet.
-fn lzo_pending(image: &[u8], offset: usize) -> bool {
-    image.len() >= offset + 22
-        && u16::from_le_bytes([image[offset + 20], image[offset + 21]]) == 3
-        && !Compression::Lzo.is_supported()
-}
-
 /// The hash of an answer.
 fn answer_hash(lines: &[String]) -> String {
     let mut hash = FNV_OFFSET;
@@ -103,9 +91,8 @@ fn difference(port: &[String], oracle: &[String]) -> String {
     )
 }
 
-/// Compares the port with squashfuse on `image`, as a file for the oracle;
-/// for an LZO image while the port does not read it, the port must fail to
-/// open it. The oracle's answer.
+/// Compares the port with squashfuse on `image`, as a file for the oracle.
+/// The oracle's answer.
 fn compare(
     oracle: &mut Oracle,
     scratch: &Scratch,
@@ -123,17 +110,6 @@ fn compare(
 /// Checks the port's answer on `image` against squashfuse's.
 fn check(image: &[u8], offset: usize, limits: Limits, expected: &[String], what: &str) {
     let port = port_list(Cursor::new(image), offset as u64, limits);
-    if lzo_pending(image, offset) {
-        // What squashfuse checks before the compressor fails the same.
-        let before =
-            expected.len() == 1 && (expected[0] == "end init 2" || expected[0] == "end init 3");
-        if before {
-            assert_eq!(port, expected, "{what}");
-        } else {
-            assert_eq!(port, ["end init 4"], "{what}: LZO must fail to open");
-        }
-        return;
-    }
     // Where squashfuse reads past a metadata block, what it reads is what
     // was in memory: the answers are the same up to there.
     if let Some(at) = port.iter().position(|l| l.ends_with(" err past")) {
@@ -203,10 +179,7 @@ fn committed_images() {
                     .get(&key)
                     .unwrap_or_else(|| panic!("{key} not recorded"));
                 let port = port_list(Cursor::new(image), 0, *limits);
-                if lzo_pending(image, 0) {
-                    assert!(port.len() == 1 && port[0].starts_with("end init"), "{what}");
-                } else if let Some((at, hash)) =
-                    hash.strip_prefix("past ").and_then(|h| h.split_once(' '))
+                if let Some((at, hash)) = hash.strip_prefix("past ").and_then(|h| h.split_once(' '))
                 {
                     let at: usize = at.parse().unwrap();
                     assert!(port[at].ends_with(" err past"), "{what}");
@@ -288,13 +261,11 @@ fn generated_images() {
             WHOLE,
             &format!("{name} whole"),
         );
-        if !lzo_pending(&image, 0) {
-            assert_eq!(answer.last().map(String::as_str), Some("end ok"), "{name}");
-            assert!(
-                !answer.iter().any(|l| l.contains(" err ")),
-                "{name} reads with errors"
-            );
-        }
+        assert_eq!(answer.last().map(String::as_str), Some("end ok"), "{name}");
+        assert!(
+            !answer.iter().any(|l| l.contains(" err ")),
+            "{name} reads with errors"
+        );
         compared += 1;
         for (i, (how, copy)) in damaged(&image, 0, copies, seed(&name))
             .into_iter()
@@ -415,6 +386,7 @@ fn speed() {
     for name in [
         "gzip",
         "lzma",
+        "lzo",
         "xz",
         "lz4",
         "zstd",

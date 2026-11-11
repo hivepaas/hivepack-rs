@@ -104,7 +104,7 @@ sevenz = ["bzip2", "crypto", "deflate", "xz", "zstd"]
 
 sign = ["age", "crypto"]
 
-squashfs = ["deflate", "lz4", "xz", "zstd"]
+squashfs = ["deflate", "lz4", "lzo", "xz", "zstd"]
 
 tar = []
 
