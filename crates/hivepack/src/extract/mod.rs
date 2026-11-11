@@ -33,8 +33,8 @@
 //!   ([`Options::time_limit`]), stopped from another thread ([`Cancel`]),
 //!   and followed ([`Options::progress`]).
 //! - **Threads**: a ZIP archive's files, a RAR archive's that is not solid,
-//!   and a 7z archive's folders can be written several at once, each in a
-//!   thread of its own, a tar or cpio archive's by threads while it is read,
+//!   a SquashFS image's, and a 7z archive's folders can be written several
+//!   at once, each in a thread of its own, a tar or cpio archive's by threads while it is read,
 //!   a XAR package's payloads decoded in threads too, and a solid RAR 5
 //!   archive's decompressed a Huffman block in each thread
 //!   ([`Options::threads`]); what is written is the same.
@@ -91,6 +91,7 @@ mod plan;
 mod progress;
 #[cfg(feature = "rar")]
 mod rar;
+mod remote;
 mod sevenz;
 mod sink;
 mod squashfs;

@@ -10,7 +10,7 @@ The port follows squashfuse **0.6.5** (tag `0.6.5`, commit `b3a880aacc63641c570f
 
 ## What following squashfuse means
 
-As in the other ports ([porting.md](porting.md)), each C file is a module, functions keep their names in snake case (`sqfs_read_range`, `sqfs_dir_next`), each doc comment names its C original, and where the Rust works otherwise a comment starting with `Differs from squashfuse:` says how and why. The library is ported single-threaded, as squashfuse builds it by default, with `cache.c`, not `cache_mt.c`.
+As in the other ports ([porting.md](porting.md)), each C file is a module, functions keep their names in snake case (`sqfs_read_range`, `sqfs_dir_next`), each doc comment names its C original, and where the Rust works otherwise a comment starting with `Differs from squashfuse:` says how and why. The library is ported single-threaded, as squashfuse builds it by default, with `cache.c`, not `cache_mt.c`. `extract_squashfs`'s threads ([extract.md](extract.md#threads)) each read an image through caches of their own, which the port has crate-private additions for, each marked `Not in squashfuse:`: the image opened again over another reader without reading it again (`Sqfs::with_reader`), the places a file's data is read from (`check_data_with`), whether a file's block index leads where its block sizes do (`sqfs_blockidx_check`), a data block read past the caches, and blocks decoded ahead by another thread, which the data cache takes before reading one (`Sqfs::set_ahead`).
 
 | squashfuse | Port | What |
 |---|---|---|
@@ -51,6 +51,7 @@ Where squashfuse would read past its buffers or go on for good, the port has a b
 - **Data an LZMA block does not have**, up to the size its header gives, is zeros, where squashfuse leaves what was in memory.
 - **Sizes are 64-bit on every machine**, as squashfuse's `size_t` and `off_t` are on 64-bit ones; and the inode's `xtra` union is laid out as C lays it out on a 64-bit little-endian machine, on every machine, so that a damaged inode whose mode names another type than its own reads as squashfuse reads it there.
 - **The cache** asserts, in squashfuse, that an entry it finds again is valid, which one whose block failed to read is not; built without assertions, as a release is, it gives it, and the caller reads the block again, as the port does.
+- **A data block decoded ahead**, by another of `extract_squashfs`'s threads, is taken by the data cache in place of reading it (`Sqfs::set_ahead`), where it does not have it: it is what reading it gives, the same function on the same bytes. Nothing else sets it, and without it the port reads as squashfuse does.
 - **A read into nothing reads nothing**: `read_at` with an empty buffer returns 0, where `sqfs_read_range` of no bytes fails.
 - **The owners are the image's.** squashfuse's mount options that give every inode one owner and group (`uid=`, `gid=`) are not ported.
 
@@ -70,7 +71,7 @@ A metadata block is at most 8 KiB once decompressed, 32 KiB stored; a data block
 - **The counts.** Every image whole, and in CI 300 damaged copies of each committed image (2,107 comparisons, which `testdata/oracle/squashfs.txt` replays where the oracle is not built: Windows, and the emulated i686 and s390x jobs), 48 of each generated image (1,323), and 68 of the real files, damaged in their tables (70). Once, 400 of each generated image: 10,827 comparisons. All agree, but where squashfuse reads past a metadata block (30 of the 10,827, none of the committed ones' 2,107): there the port fails, and the answers must be the same up to that line, which must be of the same kind.
 - **LZO images**, the three that mksquashfs makes (`-comp lzo`, its default `lzo1x_999`, and `-Xalgorithm lzo1x_1`), and the committed one, are compared as the others, whole and damaged.
 - **Extraction**, in [extract.md](extract.md#squashfs).
-- **Fuzzing**: the `squashfs` target opens any input as an image and walks it twice, as the oracle test does, and lists each directory again from each entry's `next_offset`; the transcripts must be the same and nothing may panic. The `extract_squashfs` target extracts it, as `extract_udf`'s does a UDF volume. CI seeds both with `testdata/squashfs`. The first fifteen minutes of `squashfs`, 276,000 inputs, and five of `extract_squashfs`, 3.3 million, found nothing.
+- **Fuzzing**: the `squashfs` target opens any input as an image and walks it twice, as the oracle test does, and lists each directory again from each entry's `next_offset`; the transcripts must be the same and nothing may panic. The `extract_squashfs` target extracts it, as `extract_udf`'s does a UDF volume; half the time with three threads, and then, when it is not cancelled, once more with one, the files and the summary the same, or both failing. CI seeds both with `testdata/squashfs`. The first fifteen minutes of `squashfs`, 276,000 inputs, and five of `extract_squashfs`, 3.3 million, found nothing.
 
 ## Speed
 

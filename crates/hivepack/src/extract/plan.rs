@@ -427,7 +427,8 @@ pub struct Options {
     /// How many threads extraction may use, at most; one by default. Where the
     /// archive's entries are apart (ZIP, and RAR that is not solid), that many
     /// files are written at once, each read and decompressed in a thread of
-    /// its own. A tar or cpio archive, a stream, is read on the caller's
+    /// its own; so are a SquashFS image's, whose large files' blocks the
+    /// threads with nothing else to take decompress ahead. A tar or cpio archive, a stream, is read on the caller's
     /// thread, and its files written by the others, as many at once. In 7z,
     /// that many folders (solid blocks, or the files of an archive that is not
     /// solid) are decoded at once, each by a thread that writes its files; the
@@ -447,7 +448,9 @@ pub struct Options {
     /// PPMd's model in RAR 4; 7z's ([`extract_7z`](crate::extract::extract_7z)),
     /// whose every thread has its folder's dictionaries and models, LZMA2's
     /// blocks decoded ahead taking what they leave, where they would
-    /// otherwise be held to `sevenz::Options::decoder_memory_limit`. The threads are lowered
+    /// otherwise be held to `sevenz::Options::decoder_memory_limit`;
+    /// SquashFS's ([`extract_squashfs`](crate::extract::extract_squashfs)),
+    /// whose every thread has its caches, a few blocks and its decoder. The threads are lowered
     /// until what they take, counted for the most each may hold, fits; one is
     /// always allowed, as it takes what extracting without threads does. For
     /// tar and cpio, the data read and handed to threads to write, 32 MiB at

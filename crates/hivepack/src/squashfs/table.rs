@@ -10,7 +10,7 @@ use super::squashfs_fs::SQUASHFS_METADATA_SIZE;
 use super::swap::le64;
 
 /// `sqfs_table`.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Table {
     each: usize,
     count: u64,

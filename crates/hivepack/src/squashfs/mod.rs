@@ -63,7 +63,9 @@ pub use traverse::{MAX_DEPTH, Step};
 
 use dir::Dir;
 use error::err;
+pub(crate) use file::{BlockIndex, DataPlace};
 use fs::Sqfs;
+pub(crate) use fs::{Block, DataAhead};
 use nonstd::{S_IFMT, s_isblk, s_ischr, s_isdir, s_islnk, s_isreg};
 use xattr::XattrIter;
 
@@ -215,6 +217,49 @@ impl<R: Read + Seek> Squashfs<R> {
     /// found when it is read.
     pub fn check_data(&mut self, inode: &Inode) -> Result<(), Error> {
         self.fs.check_data(inode)
+    }
+
+    /// Not in squashfuse: [`Squashfs::check_data`], telling `each` every
+    /// place the file's data is read from, in order: each data block but its
+    /// holes, then its fragment's block.
+    pub(crate) fn check_data_with(
+        &mut self,
+        inode: &Inode,
+        each: &mut dyn FnMut(DataPlace),
+    ) -> Result<(), Error> {
+        self.fs.check_data_with(inode, each)
+    }
+
+    /// Not in squashfuse: the block index reading a file makes and keeps,
+    /// if it makes one, and whether it leads where the block sizes do.
+    pub(crate) fn block_index(&mut self, inode: &Inode) -> BlockIndex {
+        self.fs.sqfs_blockidx_check(inode)
+    }
+
+    /// Not in squashfuse: the data block at `pos` of header `hdr`, read and
+    /// decompressed, past the caches (`sqfs_data_block_read`).
+    pub(crate) fn data_block(&mut self, pos: u64, hdr: u32) -> Result<Block, Error> {
+        self.fs.sqfs_data_block_read(pos as i64, hdr)
+    }
+
+    /// Not in squashfuse: the image opened again over `reader`, which holds
+    /// the same bytes, without reading it again, its caches empty: for
+    /// another thread to read it.
+    pub(crate) fn with_reader<S>(&self, reader: S) -> Squashfs<S> {
+        Squashfs {
+            fs: self.fs.with_reader(reader),
+        }
+    }
+
+    /// Not in squashfuse: the reader, to read from elsewhere.
+    pub(crate) fn reader_mut(&mut self) -> &mut R {
+        self.fs.reader_mut()
+    }
+
+    /// Not in squashfuse: where data blocks decoded ahead by other threads
+    /// are taken from, before they are read; `None` to read them all here.
+    pub(crate) fn set_ahead(&mut self, ahead: Option<Box<dyn DataAhead + Send>>) {
+        self.fs.set_ahead(ahead);
     }
 
     /// The data of a regular file, to read and seek.

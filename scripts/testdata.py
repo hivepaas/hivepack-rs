@@ -320,6 +320,14 @@ MKSQUASHFS_SOURCES = [
     "lzo_wrapper.c", "lz4_wrapper.c", "zstd_wrapper.c", "xattr.c", "read_xattrs.c", "tar_xattr.c",
     "pseudo_xattr.c",
 ]
+# unsquashfs: the files its Makefile builds it from (UNSQUASHFS_OBJS), with
+# the same compressors and xattrs, for measuring extraction only.
+UNSQUASHFS_SOURCES = [
+    "unsquashfs.c", "unsquash-1.c", "unsquash-2.c", "unsquash-3.c", "unsquash-4.c",
+    "unsquash-123.c", "unsquash-34.c", "unsquash-1234.c", "unsquash-12.c", "swap.c", "compressor.c",
+    "unsquashfs_info.c", "date.c", "gzip_wrapper.c", "lzma_xz_wrapper.c", "xz_wrapper.c",
+    "lzo_wrapper.c", "lz4_wrapper.c", "zstd_wrapper.c", "read_xattrs.c", "unsquashfs_xattr.c",
+]
 MKSQUASHFS_FLAGS = [
     "-D_FILE_OFFSET_BITS=64", "-D_LARGEFILE_SOURCE", "-D_GNU_SOURCE", '-DCOMP_DEFAULT="gzip"',
     "-DGZIP_SUPPORT", "-DLZMA_SUPPORT", "-DXZ_SUPPORT", "-DLZO_SUPPORT", "-DLZ4_SUPPORT",
@@ -369,24 +377,27 @@ def squashfs_compressors(extra: list, folder: Path, compiler: str) -> tuple:
     return objects, includes
 
 
-def build_mksquashfs(source: Path, sources: list, folder: Path, extra: list) -> None:
-    """squashfs-tools' mksquashfs, from the release's sources with the system
-    C compiler: its Makefile's files and flags (MKSQUASHFS_SOURCES and
-    MKSQUASHFS_FLAGS), linked with the compressors built from the pinned
-    sources (squashfs_compressors) in place of the system's libraries. The
-    header of `sources` (tools/squashfs-images/devices.h) is included before
-    each file, which keeps a device's 12-bit major number on macOS too. The
-    objects are left out of the set: only the program is kept."""
+def build_mksquashfs(source: Path, sources: list, folder: Path, extra: list,
+                     program: str = "mksquashfs") -> None:
+    """squashfs-tools' mksquashfs, or its unsquashfs, from the release's
+    sources with the system C compiler: its Makefile's files and flags
+    (MKSQUASHFS_SOURCES or UNSQUASHFS_SOURCES, and MKSQUASHFS_FLAGS), linked
+    with the compressors built from the pinned sources (squashfs_compressors)
+    in place of the system's libraries. The header of `sources`
+    (tools/squashfs-images/devices.h) is included before each file, which
+    keeps a device's 12-bit major number on macOS too. The objects are left
+    out of the set: only the program is kept."""
     tools = next(source.glob("squashfs-tools-*/squashfs-tools"))
     compiler = os.environ.get("CC", "cc")
-    print(f"  building mksquashfs from {tools.parent.name}")
+    print(f"  building {program} from {tools.parent.name}")
     build = folder / "build"
     build.mkdir()
     objects, includes = squashfs_compressors(extra, build, compiler)
     forced = [arg for s in sources if s.endswith(".h") for arg in ("-include", str(ROOT / s))]
+    files = MKSQUASHFS_SOURCES if program == "mksquashfs" else UNSQUASHFS_SOURCES
     subprocess.run([compiler, "-O2", "-w", "-pthread", *MKSQUASHFS_FLAGS, *forced, f"-I{tools}", *includes,
-                    *[str(tools / name) for name in MKSQUASHFS_SOURCES], *objects,
-                    "-o", str(folder / "mksquashfs"), "-lm"], check=True)
+                    *[str(tools / name) for name in files], *objects,
+                    "-o", str(folder / program), "-lm"], check=True)
     shutil.rmtree(build)
 
 
@@ -897,9 +908,9 @@ def generate_set(entry: dict, cache: Path, sets: dict) -> None:
     folder.mkdir(parents=True)
     if generate["tool"] == "7zz":
         build_7zz(cache / origin["name"], folder)
-    elif generate["tool"] == "mksquashfs":
+    elif generate["tool"] in ("mksquashfs", "unsquashfs"):
         build_mksquashfs(cache / origin["name"], generate.get("sources", []), folder,
-                         [cache / e["name"] for e in extra])
+                         [cache / e["name"] for e in extra], generate["tool"])
     elif generate["tool"] == "squashfs-images":
         # The script (the first of the sources) makes the images with the
         # mksquashfs of the `from` set.
