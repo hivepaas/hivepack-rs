@@ -1,0 +1,14 @@
+[package]
+name = "lzo-bench"
+version = "0.0.0"
+description = "Times hivepack::lzo against liblzo2's lzo1x_decompress_safe and lzokay on the same blocks"
+publish = false
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+hivepack = { workspace = true, features = ["lzo"] }

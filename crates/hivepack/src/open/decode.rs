@@ -677,6 +677,55 @@ impl<R: Read> Read for RpmLayer<R> {
     }
 }
 
+/// A Debian package's data: hivepack::ar's port of libarchive's ar reader,
+/// past `debian-binary`, `control.tar` and any other member, to the first
+/// whose name starts with `data.tar`, given as it is in the package; its
+/// errors given as the other layers' are, and the errors of the reader
+/// under it as they are.
+struct DebLayer<R> {
+    reader: crate::ar::Reader<R>,
+    /// The `data.tar` member was found: its data is read.
+    found: bool,
+}
+
+impl<R: Read> DebLayer<R> {
+    /// `e` as this layer gives it.
+    fn error(e: crate::ar::Error) -> io::Error {
+        match e {
+            crate::ar::Error::Io(e) => e,
+            e => {
+                // libarchive gives no message for a package that ends in
+                // its filename table.
+                let message = match e.message() {
+                    Some(text) => String::from_utf8_lossy(&text).into_owned(),
+                    None => "the stream is cut short".into(),
+                };
+                decode_error(Layer::Deb, message)
+            }
+        }
+    }
+}
+
+impl<R: Read> Read for DebLayer<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        while !self.found {
+            match self.reader.next() {
+                Ok(Some(member)) => self.found = member.path.starts_with(b"data.tar"),
+                Ok(None) => {
+                    return Err(decode_error(
+                        Layer::Deb,
+                        "the package has no data.tar member".into(),
+                    ));
+                }
+                Err(e) => return Err(Self::error(e)),
+            }
+        }
+        self.reader
+            .read(buf)
+            .map_err(|e| Self::error(crate::ar::Error::from(e)))
+    }
+}
+
 /// The limits of the decoders.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DecodeLimits {
@@ -772,6 +821,10 @@ pub(crate) fn decoder<'a, R: Read + Send + 'a>(
         )),
         Layer::Rpm => Box::new(RpmLayer {
             reader: crate::cpio::rpm::Reader::new(inner),
+        }),
+        Layer::Deb => Box::new(DebLayer {
+            reader: crate::ar::Reader::new(inner),
+            found: false,
         }),
         Layer::Lz4 => Box::new(Lz4Layer {
             decoder: crate::lz4::Decoder::new(Tagged(inner)),

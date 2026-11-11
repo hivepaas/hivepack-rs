@@ -29,6 +29,10 @@ FORMATS = {
     "lz4": {"sets": ["silesia"], "go": False, "machines": ALL, "package": "lz4-bench",
             "runs": [f"--levels 1,9 {SILESIA}", f"--levels 1,9 --frame {SILESIA}",
                      f"--levels 1,9 --compress {SILESIA}"]},
+    # tools/lzo-oracle, which times liblzo2 and lzokay, is built with the
+    # system's C and C++ compilers; not tried with MinGW's yet.
+    "lzo": {"sets": ["silesia", "lzo-oracle"], "go": False, "machines": [LINUX, MACOS],
+            "package": "lzo-bench", "runs": [f"--methods 1,999 {SILESIA}"]},
     "xz": {"sets": ["silesia"], "go": False, "machines": ALL, "package": "xz-bench",
            "runs": [f"--presets 0,6 {SILESIA}", f"--presets 0,6 --compress {SILESIA}"]},
     "zstd": {"sets": ["silesia"], "go": False, "machines": ALL, "package": "zstd-bench",

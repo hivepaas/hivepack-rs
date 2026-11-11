@@ -7,9 +7,10 @@ testdata/manifest.json lists every set:
   into <cache>/<name>.
 - Sets with "generate" are made in <cache>/<name> by zstd's own tools, or
   by the oracles in tools/, built from the pinned zstd, zlib, libdeflate,
-  bzip2, lz4, XZ Utils, libzip, nettle, libarchive, libxml2, squashfuse and
-  LZO releases, or with Go from the modules their go.sum pins, or are
-  SquashFS images made by mksquashfs, built from squashfs-tools' release.
+  bzip2, lz4, liblzo2, XZ Utils, libzip, nettle, libarchive, libxml2 and
+  squashfuse releases (and lzokay's commit), or with Go from the modules
+  their go.sum pins, or are SquashFS images made by mksquashfs, built
+  from squashfs-tools' release.
 
 The cache is target/testdata, or $HIVEPACK_TESTDATA when set.
 
@@ -407,6 +408,15 @@ def build_squashfs_oracle(squashfuse: Path, sources: list, folder: Path, extra: 
     shutil.rmtree(build)
 
 
+# liblzo2: the LZO1X compressors the oracle calls (lzo1x_1, its 1_11, 1_12
+# and 1_15 forms, and lzo1x_999), its safe decompressor, and what they need,
+# compiled as C apart from the oracle, which is C++ for lzokay.
+LZO_SOURCES = [
+    "lzo_init.c", "lzo_ptr.c", "lzo1x_1.c", "lzo1x_1k.c", "lzo1x_1l.c", "lzo1x_1o.c", "lzo1x_9x.c",
+    "lzo1x_d2.c",
+]
+
+
 # libdeflate: its compressor and what it needs, with the flags of its CMake
 # build for releases (-O2 -DNDEBUG); the processor features are looked up
 # at run time, as there, though the compressor's output does not depend on
@@ -491,6 +501,17 @@ LIBARCHIVE_CPIO_SOURCES = [
     "archive_util.c", "archive_virtual.c", "archive_write.c", "archive_write_add_filter_none.c",
     "archive_write_set_format_cpio_binary.c", "archive_write_set_format_cpio_newc.c",
     "archive_write_set_format_cpio_odc.c",
+]
+
+
+# libarchive: the ar reader and writers, what they call, and the memory and
+# callback inputs and outputs tools/ar-oracle uses.
+LIBARCHIVE_AR_SOURCES = [
+    "archive_acl.c", "archive_check_magic.c", "archive_entry.c", "archive_entry_sparse.c",
+    "archive_entry_xattr.c", "archive_options.c", "archive_read.c", "archive_read_open_memory.c",
+    "archive_read_set_options.c", "archive_read_support_format_ar.c", "archive_string.c",
+    "archive_string_sprintf.c", "archive_util.c", "archive_virtual.c", "archive_write.c",
+    "archive_write_add_filter_none.c", "archive_write_set_format_ar.c",
 ]
 
 
@@ -668,14 +689,17 @@ def build_oracle(source: Path, sources: list, included: list, folder: Path, extr
     tools/zlib-oracle is built with zlib's, without the gzip file functions
     (gz*.c), which it does not use, and with contrib/infback9 for
     Deflate64. tools/bzip2-oracle is built with libbzip2's BZIP2_SOURCES,
-    tools/lz4-oracle with liblz4's LZ4_SOURCES, tools/libdeflate-oracle
+    tools/lz4-oracle with liblz4's LZ4_SOURCES, tools/lzo-oracle (C++)
+    with liblzo2's LZO_SOURCES and lzokay's lzokay.cpp (the `extra` set),
+    tools/libdeflate-oracle
     with libdeflate's LIBDEFLATE_SOURCES, and tools/xz-oracle with
     liblzma's, from LIBLZMA_DIRS, and its own config.h.
     tools/nettle-oracle is built with nettle's NETTLE_SOURCES.
     tools/iso-oracle is built with libarchive's LIBARCHIVE_SOURCES, its
     archive_string.c without the Unicode normalization (libarchive_string),
     its own config.h, and zlib's (the `extra` set); tools/cpio-oracle, told
-    by its folder, with LIBARCHIVE_CPIO_SOURCES and its own config.h;
+    by its folder, with LIBARCHIVE_CPIO_SOURCES and its own config.h, and
+    tools/ar-oracle so with LIBARCHIVE_AR_SOURCES;
     tools/xar-oracle, told by its folder too, with XAR_LIBARCHIVE_SOURCES,
     the same archive_string.c, and libxml2's, zlib's, libbzip2's,
     liblzma's and nettle's (build_xar_oracle).
@@ -751,8 +775,9 @@ def build_oracle(source: Path, sources: list, included: list, folder: Path, extr
     if libarchive is not None and Path(sources[0]).parent.name == "xar-oracle":
         build_xar_oracle(libarchive, sources, folder, extra, compiler)
         return
-    if libarchive is not None and folder.name == "cpio-oracle":
-        files += [str(libarchive / name) for name in LIBARCHIVE_CPIO_SOURCES]
+    if libarchive is not None and folder.name in ("cpio-oracle", "ar-oracle"):
+        files += [str(libarchive / name) for name in
+                  (LIBARCHIVE_CPIO_SOURCES if folder.name == "cpio-oracle" else LIBARCHIVE_AR_SOURCES)]
         config = ROOT / Path(sources[0]).parent
         subprocess.run([compiler, "-O2", "-w", "-DHAVE_CONFIG_H", f"-I{config}", f"-I{libarchive}",
                         *files, "-o", str(folder / "oracle")], check=True)
@@ -796,6 +821,18 @@ def build_oracle(source: Path, sources: list, included: list, folder: Path, extr
         files += [str(lz4 / name) for name in LZ4_SOURCES]
         subprocess.run([compiler, "-O2", *LZ4_FLAGS, f"-I{lz4}", *files, "-o", str(folder / "oracle")],
                        check=True)
+        return
+    lzo = next(source.glob("lzo-*"), None)
+    if lzo is not None:
+        lzokay = next(extra[0].glob("lzokay-*"))
+        objects = folder / "liblzo2"
+        objects.mkdir()
+        subprocess.run([compiler, "-O2", f"-I{lzo / 'include'}", f"-I{lzo}", f"-I{lzo / 'src'}", "-c",
+                        *[str(lzo / "src" / name) for name in LZO_SOURCES]], check=True, cwd=objects)
+        files = [str(ROOT / s) for s in sources if s.endswith(".cpp")] + [str(lzokay / "lzokay.cpp")]
+        files += sorted(str(f) for f in objects.glob("*.o"))
+        subprocess.run([os.environ.get("CXX", "c++"), "-O2", "-std=c++14", f"-I{lzo / 'include'}",
+                        f"-I{lzokay}", *files, "-o", str(folder / "oracle")], check=True)
         return
     libdeflate = next(source.glob("libdeflate-*"), None)
     if libdeflate is not None:

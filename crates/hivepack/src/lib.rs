@@ -11,6 +11,7 @@
 //! | Module | Feature | What it is |
 //! |---|---|---|
 //! | [`age`] | `age` | age encryption (decrypt, encrypt, keys) |
+//! | [`ar`] | `ar` | ar archives and Debian packages (`.deb`) |
 //! | [`bzip2`] | `bzip2` | bzip2 (libbzip2 1.0.8) |
 //! | [`cpio`] | `cpio` | cpio archives and RPM payloads |
 //! | [`crypto`] | `crypto` | the cryptography of the formats, behind one interface |
@@ -18,6 +19,7 @@
 //! | [`extract`] | `extract` | extracting archives to disk, safe by default |
 //! | [`iso`] | `iso` | ISO 9660 images |
 //! | [`lz4`] | `lz4` | LZ4 (liblz4 1.10.0) |
+//! | [`lzo`] | `lzo` | LZO1X blocks, decompression (lzokay; liblzo2 2.10's results) |
 //! | [`memory`](memory/index.html) | `memory` | the memory the program may still take, and a budget for threads |
 //! | [`open`] | `open` | opening files through their layers (age, zstd, xz, gzip, ...) |
 //! | [`rar`] | `rar` | reading RAR (UnRAR 7.3.2), under UnRAR's license |
@@ -41,6 +43,8 @@ extern crate self as hivepack;
 
 #[cfg(feature = "age")]
 pub mod age;
+#[cfg(feature = "ar")]
+pub mod ar;
 #[cfg(feature = "bzip2")]
 pub mod bzip2;
 #[cfg(all(
@@ -66,6 +70,8 @@ mod hidden;
 pub mod iso;
 #[cfg(feature = "lz4")]
 pub mod lz4;
+#[cfg(feature = "lzo")]
+pub mod lzo;
 #[cfg(feature = "memory")]
 pub mod memory;
 #[cfg(feature = "open")]
