@@ -319,6 +319,27 @@
       "kind": "tool"
     },
     {
+      "name": "lzo-2.10-source",
+      "fetch": { "group": "generated", "files": [{ "url": "https://www.oberhumer.com/opensource/lzo/download/lzo-2.10.tar.gz", "sha256": "c0f892943208266f9b6543b3ae308fab6284c5c90e627931446fb49b4221a072", "unpack": "tar.gz" }] },
+      "source": "https://www.oberhumer.com/opensource/lzo/ (LZO 2.10, 1 March 2017, still the latest release), the SHA-256 the download page gives",
+      "license": "GPL-2.0-or-later (built into tools/lzo-oracle only, never into hivepack)",
+      "kind": "source"
+    },
+    {
+      "name": "lzokay-db2df1f-source",
+      "fetch": { "group": "generated", "files": [{ "url": "https://github.com/jackoalan/lzokay/archive/db2df1fcbebc2ed06c10f727f72567d40f06a2be.tar.gz", "sha256": "e5314402b590e656474c0087af1f9d6fac727cb7718011791cdab8a61245a066", "unpack": "tar.gz" }] },
+      "source": "https://github.com/jackoalan/lzokay at commit db2df1fcbebc2ed06c10f727f72567d40f06a2be (22 October 2023), the latest; lzokay has no releases",
+      "license": "MIT",
+      "kind": "source"
+    },
+    {
+      "name": "lzo-oracle",
+      "generate": { "group": "generated", "from": "lzo-2.10-source", "with": ["lzokay-db2df1f-source"], "tool": "oracle", "sources": ["tools/lzo-oracle/oracle.cpp"] },
+      "source": "tools/lzo-oracle/oracle.cpp, built with the LZO 2.10 library sources and lzokay's lzokay.cpp",
+      "license": "MIT (the program and lzokay) and GPL-2.0-or-later (liblzo2)",
+      "kind": "tool"
+    },
+    {
       "name": "libdeflate-1.26-source",
       "fetch": { "group": "generated", "files": [{ "url": "https://github.com/ebiggers/libdeflate/releases/download/v1.26/libdeflate-1.26.tar.gz", "sha256": "125856d4656e0feab660f94842f835923410c9281fedbcee64598c918da42b5a", "unpack": "tar.gz" }] },
       "source": "https://github.com/ebiggers/libdeflate/releases/tag/v1.26 (commit 75390569905da2f4aa03c5bc03e03c9d18b9b2d0)",

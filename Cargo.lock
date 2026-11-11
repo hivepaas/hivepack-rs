@@ -651,6 +651,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lzo-bench"
+version = "0.0.0"
+dependencies = [
+ "hivepack",
+]
+
+[[package]]
 name = "maybe-owned"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

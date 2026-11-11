@@ -81,6 +81,7 @@ jobs:
       - run: cargo check -p hivepack --lib --locked --no-default-features --features iso
       - run: cargo check -p hivepack --lib --locked --no-default-features --features lz4
       - run: cargo check -p hivepack --lib --locked --no-default-features --features lz4,lz4-unsafe-fast
+      - run: cargo check -p hivepack --lib --locked --no-default-features --features lzo
       - run: cargo check -p hivepack --lib --locked --no-default-features --features open
       - run: cargo check -p hivepack --lib --locked --no-default-features --features tar
       - run: cargo check -p hivepack --lib --locked --no-default-features --features udf
@@ -752,6 +753,20 @@ jobs:
               pathlib.Path(f"fuzz/corpus/xz_encode/r{i}").write_bytes(bytes([mode]) + i.to_bytes(8, "little") + data)
           PY
       - run: cargo fuzz run --target x86_64-unknown-linux-gnu xz_encode -- -max_total_time=${FUZZ_SECONDS:-90} -rss_limit_mb=4096
+      # The blocks of testdata/oracle/lzo.txt, behind four bytes of sizes.
+      - name: Seed the lzo corpus
+        run: |
+          mkdir -p fuzz/corpus/lzo
+          python3 - <<'PY'
+          import pathlib
+          lines = pathlib.Path("testdata/oracle/lzo.txt").read_text().splitlines()
+          for i, line in enumerate(l for l in lines if l.startswith("decompress ")):
+              words = line.split("\t")[0].split(" ")
+              size = int(words[1]) % (256 << 10)
+              data = b"" if words[2] == "-" else bytes.fromhex(words[2])
+              pathlib.Path(f"fuzz/corpus/lzo/r{i}").write_bytes(size.to_bytes(3, "little") + bytes([i % 256]) + data)
+          PY
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu lzo -- -max_total_time=${FUZZ_SECONDS:-60}
       # On main, the formats fuzzed again as packwing builds hivepack: their
       # zstd, lz4 and deflate through the unsafe-fast code, on the corpora
       # the runs above grew.

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/hivepack", "tools/7z-bench", "tools/age-bench", "tools/bzip2-bench", "tools/deflate-bench", "tools/lz4-bench", "tools/rar-bench", "tools/tar-bench", "tools/xz-bench", "tools/ziptool", "tools/zip-bench", "tools/zstd-bench"]
+members = ["crates/hivepack", "tools/7z-bench", "tools/age-bench", "tools/bzip2-bench", "tools/deflate-bench", "tools/lz4-bench", "tools/lzo-bench", "tools/rar-bench", "tools/tar-bench", "tools/xz-bench", "tools/ziptool", "tools/zip-bench", "tools/zstd-bench"]
 
 [workspace.package]
 edition = "2024"
