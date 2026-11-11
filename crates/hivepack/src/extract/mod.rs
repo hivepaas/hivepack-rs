@@ -64,8 +64,8 @@
 //! payloads among them) and [`extract_xar`] XAR archives (macOS packages,
 //! their payloads expanded) the same way; [`extract_iso`] ISO 9660 images
 //! reading them twice: once to check, once to write; [`extract_udf`] UDF
-//! volumes and [`extract_7z`] 7z archives, checked first, as ZIP archives
-//! are.
+//! volumes, [`extract_squashfs`] SquashFS images (snaps, AppImages) and
+//! [`extract_7z`] 7z archives, checked first, as ZIP archives are.
 //!
 //! With the feature `rar`, off by default as it takes UnRAR's license,
 //! `extract_rar` extracts RAR archives the same way, reading them twice.
@@ -93,6 +93,7 @@ mod progress;
 mod rar;
 mod sevenz;
 mod sink;
+mod squashfs;
 mod tar;
 mod udf;
 mod unicode;
@@ -117,6 +118,7 @@ pub use progress::{Cancel, Progress, ProgressFn};
 pub use rar::{extract_rar, extract_rar_to};
 pub use sevenz::{extract_7z, extract_7z_to};
 pub use sink::{Entry, Sink};
+pub use squashfs::{extract_squashfs, extract_squashfs_to};
 pub use tar::{extract_tar, extract_tar_to, remove_stale};
 pub use udf::{extract_udf, extract_udf_to};
 /// The version of Unicode names are compared with: major, minor, update.

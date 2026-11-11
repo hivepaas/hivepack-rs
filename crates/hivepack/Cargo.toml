@@ -368,6 +368,11 @@ path = "tests/extract_tar_threads.rs"
 required-features = ["extract", "tar", "cpio"]
 
 [[test]]
+name = "extract_squashfs"
+path = "tests/extract_squashfs.rs"
+required-features = ["extract", "squashfs", "xz", "zip"]
+
+[[test]]
 name = "extract_udf"
 path = "tests/extract_udf.rs"
 required-features = ["crypto", "extract", "udf", "xz", "zip"]
