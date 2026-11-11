@@ -64,7 +64,12 @@ fn entries(image: &[u8]) -> Vec<(Vec<u8>, u64, char, Vec<u8>)> {
 /// Extracts `image` with links as files and, on Unix, inside, entries
 /// refused left out, and checks every entry against what the port reads.
 fn extracts_as_read(name: &str, image: &[u8]) {
-    let choices: &[Links] = if cfg!(unix) {
+    extracts_as_read_with(name, image, cfg!(unix));
+}
+
+/// [`extracts_as_read`], with links inside only if `inside`.
+fn extracts_as_read_with(name: &str, image: &[u8], inside: bool) {
+    let choices: &[Links] = if inside {
         &[Links::AsFile, Links::Inside]
     } else {
         &[Links::AsFile]
@@ -165,9 +170,11 @@ fn large_images_extract_as_read() {
     }
     // Every inode type, block sizes, holes, a tree 120 deep, 2,000 entries
     // in a directory, UTF-8 and long names.
+    // Links inside on Linux only: the full tree has a link of 4,000 bytes,
+    // and macOS makes none longer than 1,023 (ENAMETOOLONG).
     for name in ["gzip", "xz", "zstd-b4k", "no-sparse"] {
         let image = std::fs::read(images.join(format!("{name}.sqfs"))).unwrap();
-        extracts_as_read(name, &image);
+        extracts_as_read_with(name, &image, cfg!(target_os = "linux"));
     }
     let real = cache.join("squashfs-real/KeeWeb-1.18.7.linux.snap");
     if real.exists() {
