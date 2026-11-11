@@ -284,11 +284,13 @@ fn xz_encoder(budget: &Budget, preset: u32, wanted: u32) -> Result<(xz::Stream, 
 }
 
 /// What each thread of `zip::Archive::set_threads` takes: up to 32 MiB of
-/// entries compressed ahead, waiting to be written, and its compressor:
-/// Deflate's, 512 KiB at most (bzip2's 7 MiB, LZMA's and XZ's 94 MiB at
-/// preset 6; libdeflate's, with its blocks, 7.7 MiB at levels 2 to 9 and
-/// up to 34 MiB at 10 to 12, `Archive::set_deflate_library`). ZIP's threads
-/// take no limit: the threads are all it is told.
+/// entries compressed ahead, waiting to be written (an entry in libdeflate's
+/// blocks counted a block at a time, from when each is given until it is
+/// written), and its compressor: Deflate's, 512 KiB at most (bzip2's 7 MiB,
+/// LZMA's and XZ's 94 MiB at preset 6; libdeflate's, with its blocks,
+/// 7.7 MiB at levels 2 to 9 and up to 34 MiB at 10 to 12,
+/// `Archive::set_deflate_library`). ZIP's threads take no limit: the
+/// threads are all it is told.
 fn zip_threads<R>(archive: &mut zip::Archive<R>, budget: &Budget, wanted: u32) -> Held {
     let (threads, held) =
         budget.hold_threads(wanted, |n| u64::from(n) * ((32 << 20) + (512 << 10)));

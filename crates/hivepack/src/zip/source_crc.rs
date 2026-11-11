@@ -118,22 +118,7 @@ impl Crc {
     /// lower source says (`ZIP_ER_DATA_LENGTH`).
     pub(crate) fn stat(&self, st: &mut Stat<'_>) -> Result<()> {
         if self.crc_complete {
-            if st.valid & stat::SIZE != 0 && st.size != self.size {
-                return Err(Error::new(ErrorCode::DataLength, 0));
-            }
-            // TODO in libzip: Set comp_size, comp_method,
-            // encryption_method? After all, this only works for
-            // uncompressed data.
-            st.size = self.size;
-            st.crc = self.crc;
-            st.comp_size = self.size;
-            st.comp_method = crate::zip::zip::cm::STORE;
-            st.encryption_method = crate::zip::zip::em::NONE;
-            st.valid |= stat::SIZE
-                | stat::CRC
-                | stat::COMP_SIZE
-                | stat::COMP_METHOD
-                | stat::ENCRYPTION_METHOD;
+            stat_complete(st, self.size, self.crc)?;
         }
         Ok(())
     }
@@ -167,4 +152,25 @@ impl Crc {
         }
         Ok(())
     }
+}
+
+/// The stat once the CRC of data of `size` bytes is complete, `crc`, on the
+/// lower source's: what [`Crc::stat`] gives then. Not in libzip, where it is
+/// in `ZIP_SOURCE_STAT`: also what the data of blocks compressed in threads
+/// gives (`close_threads.rs`).
+pub(crate) fn stat_complete(st: &mut Stat<'_>, size: u64, crc: u32) -> Result<()> {
+    if st.valid & stat::SIZE != 0 && st.size != size {
+        return Err(Error::new(ErrorCode::DataLength, 0));
+    }
+    // TODO in libzip: Set comp_size, comp_method,
+    // encryption_method? After all, this only works for
+    // uncompressed data.
+    st.size = size;
+    st.crc = crc;
+    st.comp_size = size;
+    st.comp_method = crate::zip::zip::cm::STORE;
+    st.encryption_method = crate::zip::zip::em::NONE;
+    st.valid |=
+        stat::SIZE | stat::CRC | stat::COMP_SIZE | stat::COMP_METHOD | stat::ENCRYPTION_METHOD;
+    Ok(())
 }

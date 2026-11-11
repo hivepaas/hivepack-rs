@@ -15,27 +15,44 @@
 //! of those layers ([`Precompressed`]): everything it writes, and every
 //! error, is what it would have been with the layers there.
 //!
+//! An entry deflated by libdeflate's compressor in blocks
+//! ([`Archive::set_deflate_library`] and [`Archive::set_deflate_in_blocks`]),
+//! of more than one block, is given to the threads a block at a time
+//! instead ([`compress_block`]): each thread reads its block as the layers
+//! read it with one thread, compresses it as `DeflateMt` does, alone, and
+//! takes its CRC-32. The thread writing waits for all of an entry's blocks,
+//! then joins them, and their CRC-32s, into what the CRC and compressing
+//! layers give with one thread ([`Joined`]), which stands for them as what a
+//! thread read does; the encrypting layer, if there is one, stays where it
+//! is written. If a block's data does not read as its source's stat says,
+//! failing, ending before it or going on after it, the entry is compressed
+//! where it is written, as one thread compresses it, its blocks one after
+//! the other: what it writes, and its error, are that thread's.
+//!
 //! Encrypting draws random bytes when it starts, a salt for WinZip AES and
 //! 11 bytes of header for ZipCrypto, and with one thread each entry draws
 //! them as it is written, one after the other. With more, the thread writing
 //! draws them ahead, in the same order and as many: before an entry is given
 //! to a thread to encrypt, those of every entry before it are drawn, and
 //! those of the entries the threads do not encrypt (too large for them, not
-//! compressed, or not taken) are kept for them, to be taken in place of
-//! drawing when each is written ([`Drawn`]). What each entry draws is told
-//! before the archive is written ([`Draw`]), but for one written again from
-//! an entry of the archive: none is drawn past one of those until it is
-//! written, and drawing itself then, it keeps the order; the entries given
-//! to threads meanwhile are encrypted on the thread writing. Nothing else
-//! draws. If writing fails, the entries after the one that failed may have
-//! drawn theirs, which one thread would not have: never in another order.
+//! compressed, in blocks, or not taken) are kept for them, to be taken in
+//! place of drawing when each is written ([`Drawn`]). What each entry draws
+//! is told before the archive is written ([`Draw`]), but for one written
+//! again from an entry of the archive: none is drawn past one of those
+//! until it is written, and drawing itself then, it keeps the order; the
+//! entries given to threads meanwhile are encrypted on the thread writing.
+//! Nothing else draws. If writing fails, the entries after the one that
+//! failed may have drawn theirs, which one thread would not have: never in
+//! another order.
 //!
 //! What waits to be written is bounded: an entry is charged the most its
 //! data can come to, encrypted, from when it is given to a thread until it
 //! is written, and no more is given while that would pass
-//! [`MEMORY_PER_THREAD`] for each thread. An entry that could take more than
-//! all of it is compressed by the thread writing, as with one thread, while
-//! the others go on with the entries after it.
+//! [`MEMORY_PER_THREAD`] for each thread. An entry in blocks is charged the
+//! most each block can come to, from when the block is given until the
+//! entry is written. An entry that could take more than all of it is
+//! compressed by the thread writing, as with one thread, while the others
+//! go on with the entries after it.
 
 use std::collections::VecDeque;
 use std::io;
@@ -43,10 +60,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::crypto::system_random;
-use crate::deflate::Library;
+use crate::deflate::{Compressor, Library, crc32, crc32_combine, libdeflate_block};
 use crate::threads::Threads;
 use crate::workers::Workers;
-use crate::zip::algorithm_deflate::Deflating;
+use crate::zip::algorithm_deflate::{self, Deflating};
 use crate::zip::close::{needs, pkware_time, settle_methods};
 use crate::zip::dirent::{Dirent, DosTime, cm_actual};
 use crate::zip::error::{Error, ErrorCode, Result};
@@ -55,8 +72,8 @@ use crate::zip::hash::c_string;
 use crate::zip::open::Archive;
 use crate::zip::random::{RandomSource, secure_random};
 use crate::zip::source::ReadAt;
-use crate::zip::source_compress::{Compress, maximum_compressed_size};
-use crate::zip::source_crc::Crc;
+use crate::zip::source_compress::{self, Compress, maximum_compressed_size, stat_compressed};
+use crate::zip::source_crc::{Crc, stat_complete};
 use crate::zip::source_data::{DataSource, FileAttributes};
 use crate::zip::source_stack::{Base, Layer, WriteStack};
 use crate::zip::zip::{Stat, cm, em, stat};
@@ -80,6 +97,8 @@ thread_local! {
     static TAKEN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// How many of those a thread encrypted.
     static ENCRYPTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How many of those were blocks compressed in threads, joined.
+    static JOINED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// What may wait to be written, for each thread.
@@ -131,11 +150,15 @@ impl<R> Archive<R> {
     /// 0.05% smaller. An entry the threads of [`set_threads`] would compress
     /// one each, and that could take more than 32 MiB, is compressed where
     /// it is written, its blocks in all of them: one large file is deflated
-    /// on every core, where it was on one. The archive is the same, byte for
-    /// byte, whatever the threads. Not for torrentzip, whose streams are
-    /// zlib's.
+    /// on every core, where it was on one. With libdeflate's compressor
+    /// ([`set_deflate_library`]), whose blocks take no dictionary, an entry
+    /// of more than one block is given to the threads a block at a time
+    /// instead, as long as all its blocks fit what they may hold. The
+    /// archive is the same, byte for byte, whatever the threads. Not for
+    /// torrentzip, whose streams are zlib's.
     ///
     /// [`set_threads`]: Archive::set_threads
+    /// [`set_deflate_library`]: Archive::set_deflate_library
     pub fn set_deflate_in_blocks(&mut self, blocks: bool) {
         self.deflate_blocks = blocks;
     }
@@ -155,10 +178,11 @@ impl<R> Archive<R> {
     /// into one deflate stream that every ZIP reader reads
     /// ([`DeflateMt`](crate::deflate::DeflateMt) with
     /// [`Library::Libdeflate`]): in the threads of [`set_threads`] if
-    /// [`set_deflate_in_blocks`] is on, as zlib's blocks are, else in the
-    /// thread that compresses the entry. The blocks are of 1, 2 or 4 MiB,
-    /// the largest that still cuts the entry into 32 or more, as the size
-    /// its source tells before it is read says, 1 MiB if it tells none
+    /// [`set_deflate_in_blocks`] is on, each block of an entry in any of
+    /// them, else in the thread that compresses the entry. The blocks are
+    /// of 1, 2 or 4 MiB, the largest that still cuts the entry into 32 or
+    /// more, as the size its source tells before it is read says, 1 MiB if
+    /// it tells none
     /// ([`libdeflate_block_size`](crate::deflate::libdeflate_block_size));
     /// an entry no larger than its block is one call. They depend on the
     /// size alone, never on the threads or the machine, so the archive is
@@ -241,6 +265,16 @@ impl Key {
             && self.library == other.library
             && self.block_size == other.block_size
     }
+
+    /// How the thread deflates it: in blocks one after the other, if it
+    /// does.
+    fn deflating(&self) -> Deflating {
+        Deflating {
+            blocks: self.blocks.then_some(Threads::One),
+            library: self.library,
+            block_size: self.block_size,
+        }
+    }
 }
 
 /// The header the encrypting layer gives before the data, in the first read:
@@ -267,16 +301,27 @@ fn encryption_overhead(encryption_method: u16) -> Option<u64> {
 }
 
 /// What the stat and attributes under the encrypting layer said.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Shown {
     pub(crate) stat: Result<Stat<'static>>,
     pub(crate) attributes: Result<FileAttributes>,
 }
 
 /// What a thread made of an entry's data: what reading the layers gave,
-/// read again in the same order.
+/// read again in the same order, or its blocks joined.
 pub(crate) struct Precompressed {
     key: Key,
+    data: Data,
+}
+
+/// What stands for the layers.
+enum Data {
+    Read(Read),
+    Joined(Joined),
+}
+
+/// What reading the layers gave in a thread.
+struct Read {
     /// what opening the layers gave
     open: Result<()>,
     data: Vec<u8>,
@@ -289,6 +334,109 @@ pub(crate) struct Precompressed {
     shown: Vec<(u64, Shown)>,
     /// the reads made of the top of the layers
     reads: u64,
+}
+
+/// An entry's blocks, each compressed by a thread ([`compress_block`]),
+/// joined: the stream the compressing layer gives with one thread, and what
+/// the CRC and compressing layers say as it is read.
+///
+/// With one thread, the compressing layer reads the data in pieces of
+/// [`source_compress::BUFSIZE`] as its stream needs them, compresses a
+/// block once a byte past it is read, and reads its stream out before it
+/// reads more. The CRC is complete with the piece the data ends in. Where
+/// the last block is a piece or more, that piece is read once the stream of
+/// every block before the last is read out; where it is shorter, it is the
+/// last block's first piece, read once the stream of every block before
+/// the last but one is. A read that takes the stream past that point reads
+/// the end of the data, and the one that takes its last byte ends the
+/// stream.
+struct Joined {
+    blocks: Vec<Vec<u8>>,
+    /// the block read next, and how much of it is read
+    block: usize,
+    in_block: usize,
+    /// how much of the stream is read
+    position: u64,
+    /// the data's size and CRC-32
+    size: u64,
+    crc: u32,
+    /// how much of the stream is read before the end of the data is
+    crc_after: u64,
+    /// the stream's size
+    len: u64,
+    /// the compressing layer's attributes
+    attributes: FileAttributes,
+}
+
+impl Joined {
+    /// The blocks `made` of data cut as `blocks` says, more than one, in
+    /// order; `attributes` are the compressing layer's.
+    fn new(blocks: Blocks, made: Vec<Block>, attributes: FileAttributes) -> Joined {
+        let mut crc = 0;
+        for (k, block) in made.iter().enumerate() {
+            crc = crc32_combine(crc, block.crc, blocks.len(k as u64) as i64);
+        }
+        // The blocks whose stream is read out before the end of the data.
+        let count = made.len();
+        let last = blocks.len(count as u64 - 1);
+        let before = if last < source_compress::BUFSIZE {
+            count.saturating_sub(2)
+        } else {
+            count - 1
+        };
+        let stream = |blocks: &[Block]| blocks.iter().map(|b| b.bytes.len() as u64).sum();
+        Joined {
+            crc_after: stream(&made[..before]),
+            len: stream(&made),
+            blocks: made.into_iter().map(|block| block.bytes).collect(),
+            block: 0,
+            in_block: 0,
+            position: 0,
+            size: blocks.size,
+            crc,
+            attributes,
+        }
+    }
+
+    fn read(&mut self, buf: &mut [u8]) -> usize {
+        let mut n = 0;
+        while n < buf.len() {
+            let Some(block) = self.blocks.get(self.block) else {
+                break;
+            };
+            let rest = &block[self.in_block..];
+            if rest.is_empty() {
+                self.block += 1;
+                self.in_block = 0;
+                continue;
+            }
+            let m = rest.len().min(buf.len() - n);
+            buf[n..n + m].copy_from_slice(&rest[..m]);
+            n += m;
+            self.in_block += m;
+        }
+        self.position += n as u64;
+        n
+    }
+
+    /// What the stat and attributes under the encrypting layer say, on
+    /// those of `source`, the data.
+    fn shown(&self, source: &dyn DataSource, method: u16) -> Shown {
+        let stat = source.stat().and_then(|mut st| {
+            if self.position > self.crc_after {
+                stat_complete(&mut st, self.size, self.crc)?;
+            }
+            let ended = self.position >= self.len;
+            stat_compressed(&mut st, ended.then_some((method, self.len)));
+            Ok(st)
+        });
+        let attributes = source.file_attributes().map(|lower| {
+            let mut attributes = self.attributes;
+            attributes.merge_lower(&lower);
+            attributes
+        });
+        Shown { stat, attributes }
+    }
 }
 
 impl Precompressed {
@@ -344,7 +492,9 @@ impl Precompressed {
         self.key.encryption.is_some()
     }
 
-    /// `ZIP_SOURCE_OPEN`.
+    /// `ZIP_SOURCE_OPEN`. For blocks joined, what opening the layers does
+    /// with one thread: the compressing layer asks for the stat and
+    /// attributes of the data.
     pub(crate) fn open(&mut self) -> Result<()> {
         #[cfg(test)]
         {
@@ -352,34 +502,63 @@ impl Precompressed {
             if self.encrypted() {
                 ENCRYPTED.with(|n| n.set(n.get() + 1));
             }
+            if matches!(self.data, Data::Joined(_)) {
+                JOINED.with(|n| n.set(n.get() + 1));
+            }
         }
-        self.position = 0;
-        self.reads = 0;
-        self.open
+        match &mut self.data {
+            Data::Read(read) => {
+                read.position = 0;
+                read.reads = 0;
+                read.open
+            }
+            Data::Joined(joined) => {
+                joined.block = 0;
+                joined.in_block = 0;
+                joined.position = 0;
+                let source = &self.key.source;
+                source.stat()?;
+                source.file_attributes()?;
+                Ok(())
+            }
+        }
     }
 
     /// Counts a read of the top of the layers.
     pub(crate) fn count_read(&mut self) {
-        self.reads += 1;
+        if let Data::Read(read) = &mut self.data {
+            read.reads += 1;
+        }
     }
 
     /// `ZIP_SOURCE_READ`: the data, then its end.
     pub(crate) fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        let rest = &self.data[self.position..];
+        let read = match &mut self.data {
+            Data::Read(read) => read,
+            Data::Joined(joined) => return Ok(joined.read(buf)),
+        };
+        let rest = &read.data[read.position..];
         if rest.is_empty() {
-            return self.end.map(|()| 0);
+            return read.end.map(|()| 0);
         }
         let n = rest.len().min(buf.len());
         buf[..n].copy_from_slice(&rest[..n]);
-        self.position += n;
+        read.position += n;
         Ok(n)
     }
 
     /// What the stat and attributes said after the reads made so far.
     pub(crate) fn shown(&self) -> Shown {
-        let at = self.shown.partition_point(|(read, _)| *read <= self.reads);
-        // The first is from before any read.
-        self.shown[at.saturating_sub(1)].1
+        match &self.data {
+            Data::Read(read) => {
+                let at = read
+                    .shown
+                    .partition_point(|(reads, _)| *reads <= read.reads);
+                // The first is from before any read.
+                read.shown[at.saturating_sub(1)].1
+            }
+            Data::Joined(joined) => joined.shown(&*self.key.source, cm_actual(self.key.method)),
+        }
     }
 }
 
@@ -426,21 +605,104 @@ impl Drawn {
 pub(crate) struct Taken {
     pub(crate) made: Option<Box<Precompressed>>,
     pub(crate) drawn: Option<Drawn>,
+    /// Its blocks did not read as its source's stat says: it is compressed
+    /// where it is written as one thread compresses it, its blocks one
+    /// after the other ([`Deflating::alone`]), so that what is written, and
+    /// the error, are that thread's.
+    pub(crate) alone: bool,
 }
 
-/// An entry for a thread to compress, and encrypt.
-struct Job {
-    key: Key,
-    /// the most the data can come to: more, and the thread gives up
-    most: u64,
-    stop: Arc<AtomicBool>,
+/// How an entry's data is cut into libdeflate's blocks, each compressed by a
+/// thread: as `DeflateMt` cuts it with one thread, by the size its source
+/// tells.
+#[derive(Clone, Copy, Debug)]
+struct Blocks {
+    /// the data's size
+    size: u64,
+    /// the input of each block, whole pieces the compressing layer reads
+    block: usize,
+    /// libdeflate's level
+    level: i32,
 }
 
-/// What [`compress`] gives: none if it gave up.
-type Made = Option<Box<Precompressed>>;
+impl Blocks {
+    fn count(&self) -> u64 {
+        self.size.div_ceil(self.block as u64)
+    }
 
-fn lost() -> Made {
-    None
+    /// The input of block `k`.
+    fn len(&self, k: u64) -> usize {
+        (self.size - k * self.block as u64).min(self.block as u64) as usize
+    }
+
+    /// The most block `k` can come to: libdeflate's bound for a part.
+    fn most(&self, k: u64) -> u64 {
+        Compressor::part_bound(self.len(k)) as u64
+    }
+
+    /// The most all the blocks can come to.
+    fn total(&self) -> u64 {
+        let full = self.size / self.block as u64;
+        let mut most = full.saturating_mul(self.most(0));
+        if !self.size.is_multiple_of(self.block as u64) {
+            most = most.saturating_add(self.most(full));
+        }
+        most
+    }
+}
+
+/// A block compressed, and the CRC-32 of its input.
+struct Block {
+    bytes: Vec<u8>,
+    crc: u32,
+}
+
+/// What a thread does: an entry, through the layers, or a block of one.
+enum Job {
+    Entry {
+        key: Key,
+        /// the most the data can come to: more, and the thread gives up
+        most: u64,
+        stop: Arc<AtomicBool>,
+    },
+    Block {
+        source: Arc<dyn DataSource>,
+        blocks: Blocks,
+        /// which block
+        k: u64,
+        stop: Arc<AtomicBool>,
+    },
+}
+
+/// What a thread gives: none if it gave up.
+enum Done {
+    Entry(Option<Box<Precompressed>>),
+    Block(Option<Block>),
+    /// The thread failed.
+    Lost,
+}
+
+fn lost() -> Done {
+    Done::Lost
+}
+
+/// What a thread keeps from one job to the next: the input of a block, read
+/// into it.
+#[derive(Default)]
+struct Worker {
+    input: Vec<u8>,
+}
+
+fn work(worker: &mut Worker, job: Job) -> Done {
+    match job {
+        Job::Entry { key, most, stop } => Done::Entry(compress(key, most, &stop)),
+        Job::Block {
+            source,
+            blocks,
+            k,
+            stop,
+        } => Done::Block(compress_block(worker, &*source, blocks, k, &stop)),
+    }
 }
 
 /// What the layers under the encrypting one say.
@@ -474,18 +736,12 @@ fn encrypt_layer(encryption: &Encryption) -> Option<Layer<Encrypt>> {
     Some(Layer::new(encrypt))
 }
 
-/// Reads the job's source through the layers `add_data` stacks, as it reads
-/// them, and keeps what they give. Gives up, for the entry to be compressed
-/// where it is written, if a layer cannot be made, the data comes to more
-/// than it could, or the archive is no longer written.
-fn compress(_: &mut (), job: Job) -> Made {
-    let Job { key, most, stop } = job;
-    let deflating = Deflating {
-        blocks: key.blocks.then_some(Threads::One),
-        library: key.library,
-        block_size: key.block_size,
-    };
-    let mut compress = Compress::new(key.method, key.level, deflating).ok()?;
+/// Reads the source of `key` through the layers `add_data` stacks, as it
+/// reads them, and keeps what they give. Gives up, for the entry to be
+/// compressed where it is written, if a layer cannot be made, the data
+/// comes to more than `most`, or the archive is no longer written (`stop`).
+fn compress(key: Key, most: u64, stop: &AtomicBool) -> Option<Box<Precompressed>> {
+    let mut compress = Compress::new(key.method, key.level, key.deflating()).ok()?;
     if key.keep_compressing {
         compress.keep_compressing();
     }
@@ -551,13 +807,75 @@ fn compress(_: &mut (), job: Job) -> Made {
     let _ = stack.close();
     Some(Box::new(Precompressed {
         key,
-        open,
-        data,
-        position: 0,
-        end,
-        shown: shows,
-        reads: 0,
+        data: Data::Read(Read {
+            open,
+            data,
+            position: 0,
+            end,
+            shown: shows,
+            reads: 0,
+        }),
     }))
+}
+
+/// Block `k` of `source`'s data cut as `blocks` says, read as the layers
+/// read it with one thread and compressed as `DeflateMt` compresses it,
+/// with the CRC-32 of its input. Gives up if the data does not read as the
+/// stat says there, failing, ending or going on, which the thread writing
+/// finds again, or if the archive is no longer written (`stop`).
+fn compress_block(
+    worker: &mut Worker,
+    source: &dyn DataSource,
+    blocks: Blocks,
+    k: u64,
+    stop: &AtomicBool,
+) -> Option<Block> {
+    const PIECE: usize = source_compress::BUFSIZE;
+    let len = blocks.len(k);
+    let last = k + 1 == blocks.count();
+    // The compressing layer reads the data in pieces from its start, each
+    // until it is full, the data ends or a read fails: a block is whole
+    // pieces, and the last is read to the piece the data ends in, the one
+    // after it if it ends with a piece.
+    let room = if last { (len / PIECE + 1) * PIECE } else { len };
+    if worker.input.len() < room {
+        worker.input.resize(room, 0);
+    }
+    let start = k * blocks.block as u64;
+    let mut read = 0;
+    let mut ended = false;
+    for piece in worker.input[..room].chunks_mut(PIECE) {
+        if stop.load(Ordering::Relaxed) {
+            return None;
+        }
+        let mut filled = 0;
+        while filled < piece.len() {
+            let at = start + (read + filled) as u64;
+            let n = source.read_at(at, &mut piece[filled..]).ok()?;
+            if n == 0 {
+                ended = true;
+                break;
+            }
+            if n > piece.len() - filled {
+                return None;
+            }
+            filled += n;
+        }
+        read += filled;
+        if ended {
+            break;
+        }
+    }
+    // Every block but the last has data after it; the last ends with it.
+    if read != len || ended != last || stop.load(Ordering::Relaxed) {
+        return None;
+    }
+    let input = &worker.input[..len];
+    let bytes = libdeflate_block(blocks.level, input, last).ok()?;
+    Some(Block {
+        bytes,
+        crc: crc32(0, input),
+    })
 }
 
 /// The random bytes an entry draws when it is written, to encrypt it.
@@ -585,12 +903,15 @@ struct PlannedJob {
     /// how a thread can encrypt it, given its random bytes: the method, the
     /// password and the time ZipCrypto's header ends with
     encrypt: Option<(u16, Password, Option<DosTime>)>,
+    /// its blocks, each given to a thread, if it is in libdeflate's blocks
+    /// and more than one: then it is encrypted where it is written
+    blocks: Option<Blocks>,
 }
 
 /// The entries given to threads, and those to give, in the order they are
 /// written, and the random bytes drawn for them.
 pub(crate) struct Ahead {
-    workers: Workers<(), Job, Made>,
+    workers: Workers<Worker, Job, Done>,
     random: Option<RandomSource>,
     /// the entries written, in order
     entries: Vec<Planned>,
@@ -599,15 +920,20 @@ pub(crate) struct Ahead {
     next_give: usize,
     next_write: usize,
     next_draw: usize,
+    /// the next block to give of the entry `next_give` is at, if it is in
+    /// blocks
+    next_block: u64,
     /// a draw failed: no more are drawn ahead
     failed: bool,
     /// the bytes drawn for entries not yet written, in order
     drawn: VecDeque<(usize, Drawn)>,
-    /// entries given, with what each is charged
+    /// the jobs given, the entry of each and what it is charged
     given: VecDeque<(usize, u64)>,
-    /// what the entries given are charged
+    /// what the jobs given are charged
     held: u64,
     budget: u64,
+    /// what the entry in blocks being written is charged, until it is
+    writing: u64,
     stop: Arc<AtomicBool>,
 }
 
@@ -638,7 +964,8 @@ impl Ahead {
     }
 
     /// Gives threads the entries planned, in order, while they fit, each
-    /// to be encrypted there if its random bytes can be drawn.
+    /// to be encrypted there if its random bytes can be drawn; an entry in
+    /// blocks a block at a time.
     fn give(&mut self) {
         while let Some(entry) = self.entries.get(self.next_give) {
             let at = self.next_give;
@@ -647,6 +974,14 @@ impl Ahead {
                 self.next_give += 1;
                 continue;
             };
+            if let Some(blocks) = job.blocks {
+                let source = Arc::clone(&job.key.source);
+                if !self.give_blocks(i, &source, blocks) {
+                    break;
+                }
+                self.next_give += 1;
+                continue;
+            }
             let cost = job.most + ENTRY_COST;
             if self.held + cost > self.budget {
                 break;
@@ -664,6 +999,7 @@ impl Ahead {
                 mut key,
                 most,
                 encrypt,
+                ..
             }) = self.entries[at].job.take()
             else {
                 break;
@@ -682,7 +1018,7 @@ impl Ahead {
             self.next_give += 1;
             self.held += cost;
             self.given.push_back((i, cost));
-            self.workers.give(Job {
+            self.workers.give(Job::Entry {
                 key,
                 most,
                 stop: Arc::clone(&self.stop),
@@ -690,10 +1026,36 @@ impl Ahead {
         }
     }
 
+    /// Gives threads the blocks of entry `i` not yet given, in order, while
+    /// they fit: whether all are given.
+    fn give_blocks(&mut self, i: usize, source: &Arc<dyn DataSource>, blocks: Blocks) -> bool {
+        while self.next_block < blocks.count() {
+            let k = self.next_block;
+            // What is kept of the entry is charged with its first block.
+            let cost = blocks.most(k) + if k == 0 { ENTRY_COST } else { 0 };
+            if self.held + cost > self.budget {
+                return false;
+            }
+            self.next_block += 1;
+            self.held += cost;
+            self.given.push_back((i, cost));
+            self.workers.give(Job::Block {
+                source: Arc::clone(source),
+                blocks,
+                k,
+                stop: Arc::clone(&self.stop),
+            });
+        }
+        self.next_block = 0;
+        true
+    }
+
     /// What threads made of entry `i`, the next written, if it was given
     /// one, waited for, and the random bytes drawn for it. The entries
     /// after it are given as they fit.
     pub(crate) fn take(&mut self, i: usize) -> Taken {
+        // The entry in blocks taken before is written.
+        self.held -= std::mem::take(&mut self.writing);
         let at = self.next_write;
         if self.entries.get(at).is_none_or(|entry| entry.i != i) {
             return Taken::default();
@@ -703,21 +1065,72 @@ impl Ahead {
         self.next_draw = self.next_draw.max(at);
         self.draw_to(at);
         self.give();
-        let made = match self.given.front() {
-            Some(&(j, cost)) if j == i => {
-                self.given.pop_front();
-                let made = self.workers.take().flatten();
-                self.held -= cost;
-                made
-            }
-            _ => None,
+        let blocks = self.entries[at].job.as_ref().and_then(|job| job.blocks);
+        let (made, alone) = match blocks {
+            Some(blocks) => self.take_blocks(at, blocks),
+            None => match self.given.front() {
+                Some(&(j, cost)) if j == i => {
+                    self.given.pop_front();
+                    let made = match self.workers.take() {
+                        Some(Done::Entry(made)) => made,
+                        _ => None,
+                    };
+                    self.held -= cost;
+                    (made, false)
+                }
+                _ => (None, false),
+            },
         };
         let drawn = match self.drawn.front() {
             Some(&(j, _)) if j == i => self.drawn.pop_front().map(|(_, drawn)| drawn),
             _ => None,
         };
         self.give();
-        Taken { made, drawn }
+        Taken { made, drawn, alone }
+    }
+
+    /// The blocks of the `at`th entry, the next written, waited for, the
+    /// rest of them given, and joined: none if a block's data did not read
+    /// as its stat says, and then it is to be compressed alone. They stay
+    /// charged until it is written.
+    fn take_blocks(&mut self, at: usize, blocks: Blocks) -> (Option<Box<Precompressed>>, bool) {
+        let i = self.entries[at].i;
+        let mut made = Vec::with_capacity(blocks.count() as usize);
+        let mut read = true;
+        loop {
+            match self.given.front() {
+                Some(&(j, cost)) if j == i => {
+                    self.given.pop_front();
+                    self.writing += cost;
+                    match self.workers.take() {
+                        Some(Done::Block(Some(block))) => made.push(block),
+                        _ => read = false,
+                    }
+                }
+                // The rest fit, as all its blocks do and nothing else is
+                // held but them.
+                _ if self.next_give == at => {
+                    let given = self.given.len();
+                    self.give();
+                    if self.given.len() == given {
+                        self.next_give += 1;
+                        self.next_block = 0;
+                        read = false;
+                    }
+                }
+                _ => break,
+            }
+        }
+        let key = match self.entries[at].job.take() {
+            Some(job) if read && made.len() as u64 == blocks.count() => job.key,
+            _ => return (None, true),
+        };
+        let attributes = match Compress::new(key.method, key.level, key.deflating()) {
+            Ok(compress) => compress.file_attributes(),
+            Err(_) => return (None, true),
+        };
+        let data = Data::Joined(Joined::new(blocks, made, attributes));
+        (Some(Box::new(Precompressed { key, data })), false)
     }
 }
 
@@ -745,14 +1158,19 @@ impl<R: ReadAt> Archive<R> {
             .iter()
             .map(|&i| {
                 let mut planned = self.plan(i, stream);
-                if planned.job.as_ref().is_some_and(|job| {
-                    job.most + ENTRY_COST > budget
-                        // Deflated in blocks where it is written, in all
-                        // the threads.
-                        || (job.key.blocks
-                            && cm_actual(job.key.method) == cm::DEFLATE
-                            && job.most > memory_per_thread())
-                }) {
+                let large = planned.job.as_ref().is_some_and(|job| match job.blocks {
+                    // All its blocks wait for the last.
+                    Some(blocks) => blocks.total() + ENTRY_COST > budget,
+                    None => {
+                        job.most + ENTRY_COST > budget
+                            // Deflated in blocks where it is written, in all
+                            // the threads.
+                            || (job.key.blocks
+                                && cm_actual(job.key.method) == cm::DEFLATE
+                                && job.most > memory_per_thread())
+                    }
+                });
+                if large {
                     planned.job = None;
                 }
                 planned
@@ -762,17 +1180,19 @@ impl<R: ReadAt> Archive<R> {
             return None;
         }
         Some(Ahead {
-            workers: Workers::new(threads, "zip-compress", compress, lost),
+            workers: Workers::new(threads, "zip-compress", work, lost),
             random: self.random.clone(),
             entries,
             next_give: 0,
             next_write: 0,
             next_draw: 0,
+            next_block: 0,
             failed: false,
             drawn: VecDeque::new(),
             given: VecDeque::new(),
             held: 0,
             budget,
+            writing: 0,
             stop: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -853,6 +1273,18 @@ impl<R: ReadAt> Archive<R> {
                 },
                 _ => None,
             };
+            let block = deflating.libdeflate_block_size();
+            let blocks = (method == cm::DEFLATE
+                && deflating.blocks.is_some()
+                && deflating.library == Library::Libdeflate
+                && block > 0
+                && block.is_multiple_of(source_compress::BUFSIZE)
+                && st.size > block as u64)
+                .then(|| Blocks {
+                    size: st.size,
+                    block,
+                    level: algorithm_deflate::level(de.compression_level, deflating.library),
+                });
             let key = Key {
                 source: Arc::clone(source),
                 method: de.comp_method,
@@ -862,9 +1294,14 @@ impl<R: ReadAt> Archive<R> {
                 encryption: None,
                 blocks: deflating.blocks.is_some(),
                 library: deflating.library,
-                block_size: deflating.libdeflate_block_size(),
+                block_size: block,
             };
-            Some(PlannedJob { key, most, encrypt })
+            Some(PlannedJob {
+                key,
+                most,
+                encrypt,
+                blocks,
+            })
         })();
         Planned { i, draw, job }
     }
@@ -1016,15 +1453,16 @@ mod tests {
     }
 
     /// With libdeflate's compressor, entries are compressed in the threads
-    /// ahead, and taken, and the archive is the same; in blocks too, but
-    /// for those larger than a thread holds, compressed where they are
-    /// written.
+    /// ahead, and taken, and the archive is the same; in blocks, those of
+    /// more than one a block in each thread, joined, but for those larger
+    /// than all the threads hold, compressed where they are written.
     #[test]
     fn libdeflate_in_threads() {
         let sizes = [0, 1, 70_000, 3 << 20, 20_000, (1 << 20) + 1, 5];
-        let write = |threads: Threads, blocks: bool| {
-            TEST_MEMORY.with(|m| m.set(Some(2 << 20)));
+        let write = |threads: Threads, blocks: bool, memory: u64| {
+            TEST_MEMORY.with(|m| m.set(Some(memory)));
             TAKEN.with(|taken| taken.set(0));
+            JOINED.with(|n| n.set(0));
             let mut archive = Archive::open(&[][..], OpenFlags(0)).unwrap();
             archive.set_threads(threads);
             archive.set_deflate_library(Library::Libdeflate);
@@ -1044,18 +1482,28 @@ mod tests {
             let mut out = Cursor::new(Vec::new());
             archive.close_to(&mut out).unwrap();
             TEST_MEMORY.with(|m| m.set(None));
-            (out.into_inner(), TAKEN.with(std::cell::Cell::get))
+            (
+                out.into_inner(),
+                TAKEN.with(std::cell::Cell::get),
+                JOINED.with(std::cell::Cell::get),
+            )
         };
-        let (one, taken) = write(Threads::One, false);
+        let (one, taken, _) = write(Threads::One, false, 2 << 20);
         assert_eq!(taken, 0);
         let two = Threads::Exactly(NonZeroU32::new(2).unwrap());
-        for blocks in [false, true] {
-            let (got, taken) = write(two, blocks);
-            assert!(got == one, "in blocks {blocks}: bytes differ");
-            // In blocks, the one of 3 MiB, more than the 2 MiB of a thread,
-            // is compressed where it is written, in both threads.
-            let large = usize::from(blocks);
-            assert_eq!(taken, sizes.len() - large, "in blocks {blocks}");
+        for (blocks, memory, large, joined) in [
+            (false, 2 << 20, 0, 0),
+            // The two of more than 1 MiB, in blocks.
+            (true, 2 << 20, 0, 2),
+            // The one of 3 MiB, more than the 2 MiB of both threads, is
+            // compressed where it is written, in both.
+            (true, 1 << 20, 1, 1),
+        ] {
+            let what = format!("in blocks {blocks}, {memory}");
+            let got = write(two, blocks, memory);
+            assert!(got.0 == one, "{what}: bytes differ");
+            assert_eq!(got.1, sizes.len() - large, "{what}");
+            assert_eq!(got.2, joined, "{what}");
         }
     }
 
@@ -1085,17 +1533,19 @@ mod tests {
                 library: Library::Zlib,
                 block_size: 0,
             },
-            open: Ok(()),
-            data: b"abc".to_vec(),
-            position: 0,
-            end: Ok(()),
-            shown: vec![(0, show(0)), (2, show(2)), (5, show(5))],
-            reads: 0,
+            data: Data::Read(Read {
+                open: Ok(()),
+                data: b"abc".to_vec(),
+                position: 0,
+                end: Ok(()),
+                shown: vec![(0, show(0)), (2, show(2)), (5, show(5))],
+                reads: 0,
+            }),
         };
         let size = |made: &Precompressed| made.shown().stat.unwrap().size;
         assert_eq!(size(&made), 0);
         for (reads, want) in [(1, 0), (2, 2), (3, 2), (4, 2), (5, 5), (9, 5)] {
-            while made.reads < reads {
+            while matches!(&made.data, Data::Read(read) if read.reads < reads) {
                 made.count_read();
             }
             assert_eq!(size(&made), want, "{reads}");
@@ -1104,5 +1554,385 @@ mod tests {
         assert_eq!(made.read(&mut buf), Ok(2));
         assert_eq!(made.read(&mut buf), Ok(1));
         assert_eq!(made.read(&mut buf), Ok(0));
+    }
+
+    /// Bytes that do not compress.
+    fn noise(seed: u64, n: usize) -> Vec<u8> {
+        let mut x = seed.wrapping_mul(0x2545_f491_4f6c_dd1d) | 1;
+        (0..n)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x as u8
+            })
+            .collect()
+    }
+
+    /// A source whose stat tells `said` bytes, whatever its data, and that
+    /// fails once `fail_at` bytes are read, what comes before first.
+    struct Odd {
+        data: Arc<[u8]>,
+        said: u64,
+        fail_at: Option<u64>,
+    }
+
+    impl Odd {
+        fn new(data: Vec<u8>) -> Odd {
+            Odd {
+                said: data.len() as u64,
+                data: data.into(),
+                fail_at: None,
+            }
+        }
+    }
+
+    impl DataSource for Odd {
+        fn stat(&self) -> Result<Stat<'static>> {
+            Ok(Stat {
+                valid: stat::SIZE | stat::MTIME,
+                size: self.said,
+                mtime: 1_700_000_000,
+                ..Stat::default()
+            })
+        }
+
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize> {
+            if let Some(at) = self.fail_at
+                && offset + buf.len() as u64 > at
+            {
+                if offset < at {
+                    let n = (at - offset) as usize;
+                    buf[..n].copy_from_slice(&self.data[offset as usize..at as usize]);
+                    return Ok(n);
+                }
+                return Err(Error::new(ErrorCode::Read, 5));
+            }
+            let rest = self.data.get(offset as usize..).unwrap_or(&[]);
+            let n = rest.len().min(buf.len());
+            buf[..n].copy_from_slice(&rest[..n]);
+            Ok(n)
+        }
+    }
+
+    /// libdeflate's blocks of `unit` bytes at least for what this thread
+    /// does in `f`.
+    fn with_unit<T>(unit: usize, f: impl FnOnce() -> T) -> T {
+        crate::deflate::TEST_UNIT.with(|u| u.set(Some(unit)));
+        let out = f();
+        crate::deflate::TEST_UNIT.with(|u| u.set(None));
+        out
+    }
+
+    /// What the layers give, read with reads of `sizes` (the last again
+    /// and again): after each read, its bytes, and the stat and attributes.
+    fn read_through(
+        stack: &mut WriteStack<'_, [u8]>,
+        sizes: &[usize],
+    ) -> Vec<(Result<Vec<u8>>, Shown)> {
+        let shown = |stack: &WriteStack<'_, [u8]>| Shown {
+            stat: stack.stat(),
+            attributes: stack.file_attributes(),
+        };
+        let mut got = vec![(stack.open().map(|()| Vec::new()), shown(stack))];
+        let mut buf = vec![0; sizes.iter().copied().max().unwrap()];
+        let mut ends = 0;
+        for k in 0.. {
+            let want = sizes[k.min(sizes.len() - 1)];
+            let read = stack.read(&mut buf[..want]);
+            if !matches!(read, Ok(n) if n > 0) {
+                ends += 1;
+            }
+            got.push((read.map(|n| buf[..n].to_vec()), shown(stack)));
+            if ends == 3 {
+                break;
+            }
+        }
+        got
+    }
+
+    /// An entry's blocks, compressed in threads and joined, read as the CRC
+    /// and compressing layers read with one thread: the same bytes in each
+    /// read, and the same stat and attributes after it, whatever the reads,
+    /// for data that ends with a block, a piece, or within one, and blocks
+    /// of each size.
+    #[test]
+    fn joined_reads_as_the_layers() {
+        const UNIT: usize = 16 << 10;
+        const PIECE: usize = source_compress::BUFSIZE;
+        let reads: [&[usize]; 6] = [
+            &[BUFSIZE],
+            &[BUFSIZE - 28, BUFSIZE],
+            &[BUFSIZE - 12, BUFSIZE],
+            &[1000],
+            &[100_000],
+            &[1, 8191, 3, 65_536, 77, 20_000],
+        ];
+        let mut cases = Vec::new();
+        for n in [
+            UNIT + 1,
+            UNIT + 100,
+            UNIT + PIECE - 1,
+            UNIT + PIECE,
+            UNIT + PIECE + 1,
+            2 * UNIT - 1,
+            2 * UNIT,
+            2 * UNIT + 1,
+            2 * UNIT + PIECE - 1,
+            3 * UNIT + 5,
+            5 * UNIT + 12_345,
+            // Blocks of 32 and 64 KiB.
+            (1 << 20) - 1,
+            1 << 20,
+            (2 << 20) - 1,
+            2 << 20,
+            (2 << 20) + PIECE - 1,
+        ] {
+            cases.push((text(n as u64, n), 1));
+        }
+        cases.push((noise(1, UNIT + 100), 1));
+        cases.push((noise(2, 3 * UNIT + PIECE), 6));
+        cases.push((text(3, 2 * UNIT + 9), 12));
+        cases.push((text(4, 5 * UNIT + PIECE), 12));
+        with_unit(UNIT, || {
+            for (data, level) in cases {
+                let n = data.len();
+                let source: Arc<dyn DataSource> = Arc::new(BufferSource::with_mtime(data, 7));
+                let deflating = Deflating {
+                    blocks: Some(Threads::One),
+                    library: Library::Libdeflate,
+                    block_size: 0,
+                }
+                .with_size(Some(n as u64));
+                let block = deflating.libdeflate_block_size();
+                let blocks = Blocks {
+                    size: n as u64,
+                    block,
+                    level: algorithm_deflate::level(level, Library::Libdeflate),
+                };
+                let method = i32::from(cm::DEFLATE);
+                let key = || Key {
+                    source: Arc::clone(&source),
+                    method,
+                    level,
+                    first_read: BUFSIZE,
+                    keep_compressing: false,
+                    encryption: None,
+                    blocks: true,
+                    library: Library::Libdeflate,
+                    block_size: block,
+                };
+                for sizes in reads {
+                    let what = format!("{n} bytes, blocks of {block}, level {level}, {sizes:?}");
+                    let mut layers: WriteStack<'_, [u8]> = WriteStack {
+                        base: Base::data(Arc::clone(&source)),
+                        decrypt: None,
+                        decompress: None,
+                        crc: Some(Layer::new(Crc::new(false))),
+                        compress: Some(Layer::new(
+                            Compress::new(method, level, deflating).unwrap(),
+                        )),
+                        precompressed: None,
+                        encrypt: None,
+                    };
+                    let want = read_through(&mut layers, sizes);
+                    let mut worker = Worker::default();
+                    let stop = AtomicBool::new(false);
+                    let made: Vec<Block> = (0..blocks.count())
+                        .map(|k| compress_block(&mut worker, &*source, blocks, k, &stop).unwrap())
+                        .collect();
+                    let attributes = Compress::new(method, level, deflating)
+                        .unwrap()
+                        .file_attributes();
+                    let joined = Precompressed {
+                        key: key(),
+                        data: Data::Joined(Joined::new(blocks, made, attributes)),
+                    };
+                    let mut stack: WriteStack<'_, [u8]> = WriteStack {
+                        base: Base::data(Arc::clone(&source)),
+                        decrypt: None,
+                        decompress: None,
+                        crc: None,
+                        compress: None,
+                        precompressed: Some(Layer::new(joined)),
+                        encrypt: None,
+                    };
+                    let got = read_through(&mut stack, sizes);
+                    assert_eq!(got.len(), want.len(), "{what}");
+                    for (k, (got, want)) in got.iter().zip(&want).enumerate() {
+                        assert!(got == want, "{what}: read {k}");
+                    }
+                }
+            }
+        });
+    }
+
+    /// Entries in libdeflate's blocks, of no bytes to many blocks and
+    /// across the sizes the blocks grow at, compressed a block in each
+    /// thread and joined, among others, encrypted too: the same archive as
+    /// one thread's, to a file and to a stream; those larger than the
+    /// threads hold are compressed where they are written.
+    #[test]
+    fn libdeflate_blocks_joined() {
+        const UNIT: usize = 16 << 10;
+        let mut entries: Vec<(usize, u32, u16)> = vec![
+            (0, 12, em::NONE),
+            (1, 1, em::NONE),
+            (UNIT - 1, 1, em::NONE),
+            (UNIT, 6, em::NONE),
+            (UNIT + 1, 1, em::NONE),
+            (2 * UNIT + 8191, 12, em::NONE),
+            (5 * UNIT + 3, 9, em::AES_256),
+            (3 * UNIT, 1, em::TRAD_PKWARE),
+            ((1 << 20) - 1, 1, em::NONE),
+            (1 << 20, 1, em::AES_128),
+            ((2 << 20) + 5, 1, em::NONE),
+            (1_200_000, 1, em::NONE),
+        ];
+        entries.extend((0..30).map(|i| (20_000 + i * 7_919, [1, 6, 10][i % 3] as u32, em::NONE)));
+        let write = |threads: Threads, stream: bool| {
+            TEST_MEMORY.with(|m| m.set(Some(512 << 10)));
+            TAKEN.with(|taken| taken.set(0));
+            JOINED.with(|n| n.set(0));
+            let mut archive = Archive::open(&[][..], OpenFlags(0)).unwrap();
+            archive.set_threads(threads);
+            archive.set_deflate_library(Library::Libdeflate);
+            archive.set_deflate_in_blocks(true);
+            let next = Arc::new(std::sync::atomic::AtomicU8::new(0));
+            archive.set_random_source(Some(Arc::new(move |buf: &mut [u8]| {
+                buf.fill(next.fetch_add(1, Ordering::Relaxed));
+                Ok(())
+            })));
+            for (i, &(n, level, encryption)) in entries.iter().enumerate() {
+                let data = if i % 5 == 4 {
+                    noise(i as u64, n)
+                } else {
+                    text(i as u64, n)
+                };
+                archive
+                    .file_add(
+                        format!("{i}").as_bytes(),
+                        BufferSource::with_mtime(data, 1_700_000_000),
+                        Flags::NONE,
+                    )
+                    .unwrap();
+                archive
+                    .set_file_compression(i as u64, i32::from(cm::DEFLATE), level)
+                    .unwrap();
+                if encryption != em::NONE {
+                    archive
+                        .file_set_encryption(i as u64, encryption, Some(b"pw"))
+                        .unwrap();
+                }
+            }
+            let mut out = Cursor::new(Vec::new());
+            with_unit(UNIT, || {
+                if stream {
+                    archive.close_to_stream(&mut out).unwrap();
+                } else {
+                    archive.close_to(&mut out).unwrap();
+                }
+            });
+            TEST_MEMORY.with(|m| m.set(None));
+            (
+                out.into_inner(),
+                TAKEN.with(std::cell::Cell::get),
+                JOINED.with(std::cell::Cell::get),
+            )
+        };
+        let blocked = entries.iter().filter(|e| e.0 > UNIT).count();
+        // Those more than the threads hold: no other comes near.
+        let large = |threads: Threads| {
+            let budget = u64::from(threads.count()) * (512 << 10);
+            with_unit(UNIT, || {
+                entries
+                    .iter()
+                    .filter(|e| {
+                        let most =
+                            maximum_compressed_size(cm::DEFLATE, e.0 as u64, Library::Libdeflate);
+                        most.unwrap() + ENTRY_COST > budget
+                    })
+                    .count()
+            })
+        };
+        for stream in [false, true] {
+            let (one, taken, _) = write(Threads::One, stream);
+            assert_eq!(taken, 0);
+            for threads in [2, 3, 8, 0] {
+                let threads = Threads::of(threads);
+                let got = write(threads, stream);
+                let what = format!("{threads:?}, stream {stream}");
+                assert!(got.0 == one, "{what}: bytes differ");
+                let large = large(threads);
+                assert!(threads.count() > 2 || large >= 3, "{what}");
+                assert_eq!(got.1, entries.len() - large, "{what}");
+                assert_eq!(got.2, blocked - large, "{what}");
+            }
+        }
+    }
+
+    /// Entries in blocks whose data does not read as their stat says, which
+    /// fails, ends before it or goes on after it, at the start of a block,
+    /// within one, and in the last: the same error as one thread's, after
+    /// the same bytes, to a file and to a stream.
+    #[test]
+    fn libdeflate_blocks_that_do_not_read() {
+        const UNIT: usize = 16 << 10;
+        let n = 4 * UNIT + 5000;
+        let mut odd = Vec::new();
+        for at in [0, 1, UNIT - 1, UNIT, UNIT + 1, 3 * UNIT, 4 * UNIT, n - 1] {
+            odd.push((n as u64, Some(at as u64)));
+        }
+        for said in [
+            n - 1,
+            n + 1,
+            n - 5000,
+            n + 8192,
+            4 * UNIT,
+            3 * UNIT + 1,
+            5 * UNIT,
+        ] {
+            odd.push((said as u64, None));
+        }
+        for (said, fail_at) in odd {
+            let write = |threads: Threads, stream: bool| {
+                let mut archive = Archive::open(&[][..], OpenFlags(0)).unwrap();
+                archive.set_threads(threads);
+                archive.set_deflate_library(Library::Libdeflate);
+                archive.set_deflate_in_blocks(true);
+                for i in 0..6u64 {
+                    let mut source = Odd::new(text(i, n));
+                    if i == 2 {
+                        source.said = said;
+                        source.fail_at = fail_at;
+                    }
+                    archive
+                        .file_add(format!("{i}").as_bytes(), source, Flags::NONE)
+                        .unwrap();
+                    archive
+                        .set_file_compression(i, i32::from(cm::DEFLATE), 1)
+                        .unwrap();
+                }
+                let mut out = Cursor::new(Vec::new());
+                let closed = with_unit(UNIT, || {
+                    if stream {
+                        archive.close_to_stream(&mut out).map(|_| ())
+                    } else {
+                        archive.close_to(&mut out).map(|_| ())
+                    }
+                });
+                (out.into_inner(), closed)
+            };
+            for stream in [false, true] {
+                let one = write(Threads::One, stream);
+                assert!(one.1.is_err(), "{said}, {fail_at:?}");
+                for threads in [2, 8, 0] {
+                    let got = write(Threads::of(threads), stream);
+                    let what = format!("{said}, {fail_at:?}, {threads} threads, {stream}");
+                    assert_eq!(got.1, one.1, "{what}");
+                    assert!(got.0 == one.0, "{what}: bytes differ");
+                }
+            }
+        }
     }
 }

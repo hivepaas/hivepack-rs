@@ -472,7 +472,8 @@ fn torrentzip_compare_names(a: &Option<Vec<u8>>, b: &Option<Vec<u8>>) -> Orderin
 /// `close_threads.rs`), stands for the data and the layers that compute the
 /// CRC and compress it, and encrypt it if it was encrypted there, if it was
 /// made for the entry as it is written here; `taken.drawn`, the random bytes
-/// drawn for it ahead, are what encrypting it takes in place of `random`'s.
+/// drawn for it ahead, are what encrypting it takes in place of `random`'s;
+/// with `taken.alone`, it is deflated as with one thread.
 #[allow(clippy::too_many_arguments)]
 fn add_data<R: ReadAt + ?Sized, W: Write + Seek>(
     src: Base<'_, R>,
@@ -563,7 +564,8 @@ fn add_data<R: ReadAt + ?Sized, W: Write + Seek>(
     }
 
     let password = de.password.as_deref().or(default_password);
-    let Taken { made, drawn } = taken;
+    let Taken { made, drawn, alone } = taken;
+    let deflating = if alone { deflating.alone() } else { deflating };
     let precompressed = made.filter(|made| {
         let encrypting = needs_encrypt.then(|| Encrypting {
             method: de.encryption_method,

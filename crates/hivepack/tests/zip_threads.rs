@@ -134,11 +134,12 @@ impl Write for Pipe {
 }
 
 /// A source over bytes that fails once `fail_at` bytes are read, or that
-/// does not tell its size.
+/// does not tell its size, or tells another (`said`).
 struct Odd {
     data: Arc<[u8]>,
     fail_at: Option<u64>,
     sized: bool,
+    said: Option<u64>,
     reads: Arc<AtomicUsize>,
 }
 
@@ -148,6 +149,17 @@ impl Odd {
             data: data.into(),
             fail_at: Some(at),
             sized: true,
+            said: None,
+            reads: Arc::default(),
+        }
+    }
+
+    fn saying(data: Vec<u8>, said: u64) -> Odd {
+        Odd {
+            data: data.into(),
+            fail_at: None,
+            sized: true,
+            said: Some(said),
             reads: Arc::default(),
         }
     }
@@ -157,6 +169,7 @@ impl Odd {
             data: data.into(),
             fail_at: None,
             sized: false,
+            said: None,
             reads: Arc::default(),
         }
     }
@@ -169,7 +182,7 @@ impl DataSource for Odd {
         st.mtime = 1_700_000_000;
         if self.sized {
             st.valid |= stat::SIZE;
-            st.size = self.data.len() as u64;
+            st.size = self.said.unwrap_or(self.data.len() as u64);
         }
         Ok(st)
     }
@@ -236,6 +249,8 @@ enum SourceKind {
     Buffer,
     Unsized,
     FailingAt(u64),
+    /// Its stat tells this size, which is not its data's.
+    Says(u64),
 }
 
 fn spec(name: impl Into<String>, data: Vec<u8>, method: Option<(i32, u32)>) -> Spec {
@@ -292,6 +307,11 @@ fn add<R: hivepack::zip::ReadAt>(archive: &mut Archive<R>, specs: &[Spec]) {
             SourceKind::FailingAt(at) => archive.file_add(
                 s.name.as_bytes(),
                 Odd::failing(s.data.to_vec(), at),
+                Flags::NONE,
+            ),
+            SourceKind::Says(said) => archive.file_add(
+                s.name.as_bytes(),
+                Odd::saying(s.data.to_vec(), said),
                 Flags::NONE,
             ),
         }
@@ -1154,10 +1174,15 @@ fn deflate_in_blocks() {
 /// The raw stream libdeflate's blocks of 1 MiB make of `data` at `level`,
 /// compressed one by one: every block but the last a part, then the last.
 fn libdeflate_blocks(data: &[u8], level: u32) -> Vec<u8> {
-    use hivepack::deflate::{Compressor, LIBDEFLATE_BLOCK_SIZE};
+    libdeflate_blocks_of(data, level, hivepack::deflate::LIBDEFLATE_BLOCK_SIZE)
+}
+
+/// As [`libdeflate_blocks`], in blocks of `block` bytes.
+fn libdeflate_blocks_of(data: &[u8], level: u32, block: usize) -> Vec<u8> {
+    use hivepack::deflate::Compressor;
     let mut compressor = Compressor::new(level as i32).unwrap();
     let mut stream = Vec::new();
-    let mut blocks: Vec<&[u8]> = data.chunks(LIBDEFLATE_BLOCK_SIZE).collect();
+    let mut blocks: Vec<&[u8]> = data.chunks(block).collect();
     let last = blocks.pop().unwrap_or(&[]);
     for block in blocks {
         let mut out = vec![0; compressor.deflate_compress_part_bound(block.len())];
@@ -1323,4 +1348,147 @@ fn deflate_with_libdeflate() {
         write(Library::Libdeflate).0 == write(Library::Zlib).0,
         "torrentzip with libdeflate"
     );
+}
+
+/// `n` bytes of text, a piece of [`text`] again and again: made faster.
+fn tiled(seed: u64, n: usize) -> Vec<u8> {
+    let piece = text(seed, (1 << 20) + 4093);
+    let mut out = Vec::with_capacity(n);
+    while out.len() < n {
+        let take = piece.len().min(n - out.len());
+        out.extend_from_slice(&piece[..take]);
+    }
+    out
+}
+
+/// Entries deflated by libdeflate in blocks, of more than one, given to
+/// the threads a block at a time and joined: about 1 MiB, several blocks,
+/// past 32 MiB and across 64 and 128 MiB where the blocks grow, among small
+/// ones, encrypted too. The archive is the same whatever the threads, to a
+/// file and to a stream, each entry the blocks one by one; those larger
+/// than two threads hold are compressed where they are written then.
+#[test]
+fn libdeflate_blocks_in_threads() {
+    use hivepack::deflate::{Library, libdeflate_block_size};
+    const MIB: usize = 1 << 20;
+    let mut specs = Vec::new();
+    for (i, (n, level)) in [
+        (0, 1),
+        (1, 12),
+        (MIB - 1, 1),
+        (MIB, 6),
+        (MIB + 1, 12),
+        (2 * MIB, 1),
+        (3 * MIB + 77, 9),
+        (20 * MIB + 3, 1),
+        (40 * MIB, 1),
+        (64 * MIB + 5, 1),
+        (128 * MIB + 1, 1),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        specs.push(spec(format!("f{i}"), tiled(i as u64, n), deflate(level)));
+    }
+    for i in 0..40u64 {
+        let n = 30_000 + 50_000 * i as usize;
+        specs.push(spec(
+            format!("s{i}"),
+            text(i, n),
+            deflate([1, 6, 10][i as usize % 3]),
+        ));
+    }
+    specs.push(spec("aes", tiled(90, 5 * MIB + 3), deflate(6)).encrypted(em::AES_256));
+    specs.push(spec("zipcrypto", tiled(91, 3 * MIB), deflate(1)).encrypted(em::TRAD_PKWARE));
+    let mut timed = spec("zipcrypto, timed", tiled(92, 2 * MIB + 1), deflate(1));
+    timed.mtime = Some(1_600_000_000);
+    specs.push(timed.encrypted(em::TRAD_PKWARE));
+    let write = |threads: Threads, stream: bool| {
+        let mut a = archive(&specs, threads);
+        a.set_deflate_library(Library::Libdeflate);
+        a.set_deflate_in_blocks(true);
+        if stream {
+            streamed(&mut a)
+        } else {
+            seekable(&mut a)
+        }
+    };
+    let one = write(Threads::One, false);
+    let one_stream = write(Threads::One, true);
+    assert!(one.1.is_ok() && one_stream.1.is_ok());
+    for threads in many() {
+        let seek = write(threads, false);
+        assert!(seek.1 == one.1, "{threads:?}");
+        assert!(seek.0 == one.0, "{threads:?}: bytes differ");
+        let stream = write(threads, true);
+        assert!(stream.1 == one_stream.1, "{threads:?}, stream");
+        assert!(
+            stream.0 == one_stream.0,
+            "{threads:?}, stream: bytes differ"
+        );
+    }
+    for (i, s) in specs.iter().enumerate() {
+        if s.encryption.is_some() || s.data.is_empty() {
+            continue;
+        }
+        let level = s.method.unwrap().1;
+        let block = libdeflate_block_size(Some(s.data.len() as u64));
+        assert!(
+            compressed(&one.0, i as u64) == libdeflate_blocks_of(&s.data, level, block),
+            "{}",
+            s.name
+        );
+    }
+    reads_back(&one.0, &specs);
+    reads_back(&one_stream.0, &specs);
+}
+
+/// Entries in libdeflate's blocks whose data does not read as their stat
+/// says, failing at a block or within one, or of another size than it
+/// tells, among others given to the threads a block at a time: the same
+/// error as one thread's, after the same bytes, to a file and to a stream.
+#[test]
+fn libdeflate_blocks_that_do_not_read() {
+    use hivepack::deflate::Library;
+    const MIB: u64 = 1 << 20;
+    let n = 3 * MIB + 5000;
+    let odd = [
+        SourceKind::FailingAt(0),
+        SourceKind::FailingAt(MIB),
+        SourceKind::FailingAt(MIB + 1),
+        SourceKind::FailingAt(3 * MIB),
+        SourceKind::Says(n - 1),
+        SourceKind::Says(n + 1),
+        SourceKind::Says(3 * MIB),
+        SourceKind::Says(4 * MIB),
+    ];
+    for (k, &kind) in odd.iter().enumerate() {
+        for encryption in [None, Some(em::AES_128)] {
+            let mut specs: Vec<Spec> = (0..8u64)
+                .map(|i| spec(format!("f{i}"), tiled(i, n as usize), deflate(1)))
+                .collect();
+            specs[3].source = kind;
+            specs[3].encryption = encryption;
+            let write = |threads: Threads, stream: bool| {
+                let mut a = archive(&specs, threads);
+                a.set_deflate_library(Library::Libdeflate);
+                a.set_deflate_in_blocks(true);
+                if stream {
+                    streamed(&mut a)
+                } else {
+                    seekable(&mut a)
+                }
+            };
+            for stream in [false, true] {
+                let one = write(Threads::One, stream);
+                assert!(one.1.is_err(), "{k}");
+                for threads in many() {
+                    let got = write(threads, stream);
+                    let what = format!("{k}, {encryption:?}, {threads:?}, stream {stream}");
+                    assert!(got.1 == one.1, "{what}: {:?}", got.1);
+                    assert!(got.0 == one.0, "{what}: bytes differ");
+                }
+            }
+        }
+    }
 }
