@@ -1,0 +1,8 @@
+# mksquashfs small <image> <arguments>, from tools/squashfs-images/make.py small
+gzip.sqfs -noappend -quiet -no-progress -processors 1 -mkfs-time 1700000000 -force-uid 0 -force-gid 0 -pseudo-override -pf pseudo -xattrs-exclude . -comp gzip -b 4K
+lzma.sqfs -noappend -quiet -no-progress -processors 1 -mkfs-time 1700000000 -force-uid 0 -force-gid 0 -pseudo-override -pf pseudo -xattrs-exclude . -comp lzma -b 4K
+lzo.sqfs -noappend -quiet -no-progress -processors 1 -mkfs-time 1700000000 -force-uid 0 -force-gid 0 -pseudo-override -pf pseudo -xattrs-exclude . -comp lzo -b 4K
+xz.sqfs -noappend -quiet -no-progress -processors 1 -mkfs-time 1700000000 -force-uid 0 -force-gid 0 -pseudo-override -pf pseudo -xattrs-exclude . -comp xz -b 4K
+lz4.sqfs -noappend -quiet -no-progress -processors 1 -mkfs-time 1700000000 -force-uid 0 -force-gid 0 -pseudo-override -pf pseudo -xattrs-exclude . -comp lz4 -b 4K
+zstd.sqfs -noappend -quiet -no-progress -processors 1 -mkfs-time 1700000000 -force-uid 0 -force-gid 0 -pseudo-override -pf pseudo -xattrs-exclude . -comp zstd -b 4K
+uncompressed.sqfs -noappend -quiet -no-progress -processors 1 -mkfs-time 1700000000 -force-uid 0 -force-gid 0 -pseudo-override -pf pseudo -xattrs-exclude . -comp gzip -b 4K -noI -noD -noF -noX

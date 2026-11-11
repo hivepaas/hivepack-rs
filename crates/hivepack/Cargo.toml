@@ -518,6 +518,11 @@ path = "tests/tar_writer.rs"
 required-features = ["bzip2", "crypto", "tar"]
 
 [[test]]
+name = "squashfs_oracle"
+path = "tests/squashfs_oracle.rs"
+required-features = ["squashfs"]
+
+[[test]]
 name = "udf_crafted"
 path = "tests/udf_crafted.rs"
 required-features = ["crypto", "udf", "xz"]
