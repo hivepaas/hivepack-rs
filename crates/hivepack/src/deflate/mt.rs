@@ -53,10 +53,29 @@ pub const LIBDEFLATE_BLOCKS: u64 = 32;
 /// size gave.
 pub fn libdeflate_block_size(size: Option<u64>) -> usize {
     let size = size.unwrap_or(0);
-    [4 << 20, 2 << 20]
+    let unit = libdeflate_unit();
+    [4 * unit, 2 * unit]
         .into_iter()
         .find(|&block: &usize| size >= LIBDEFLATE_BLOCKS * block as u64)
-        .unwrap_or(LIBDEFLATE_BLOCK_SIZE)
+        .unwrap_or(unit)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// [`LIBDEFLATE_BLOCK_SIZE`] for [`libdeflate_block_size`] on this
+    /// thread, smaller for a test: the blocks, and the sizes they grow at, as
+    /// many times smaller.
+    pub(crate) static TEST_UNIT: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The smallest of [`libdeflate_block_size`]'s blocks.
+fn libdeflate_unit() -> usize {
+    #[cfg(test)]
+    if let Some(unit) = TEST_UNIT.with(std::cell::Cell::get) {
+        return unit;
+    }
+    LIBDEFLATE_BLOCK_SIZE
 }
 
 /// The largest input of a block.
@@ -345,23 +364,33 @@ fn compress_block(kept: &mut Kept, job: Job) -> Result<Block> {
     })
 }
 
-/// `job`'s block, compressed alone by libdeflate's compressor: the last
-/// with [`Compressor::deflate_compress`], every other with
-/// [`Compressor::deflate_compress_part`], which ends it with a sync marker.
+/// `job`'s block, compressed alone by libdeflate's compressor.
 fn compress_libdeflate(kept: &mut Kept, job: Job) -> Result<Block> {
+    let input = &job.data[job.dict..];
+    Ok(Block {
+        bytes: libdeflate_compress(kept, job.level, input, job.end)?,
+        crc: crc32(0, input),
+        size: input.len(),
+    })
+}
+
+/// `input`, one block, compressed by libdeflate's compressor at `level`, the
+/// one `kept` holds if it is at that level: the last with
+/// [`Compressor::deflate_compress`], every other with
+/// [`Compressor::deflate_compress_part`], which ends it with a sync marker.
+fn libdeflate_compress(kept: &mut Kept, level: i32, input: &[u8], end: End) -> Result<Vec<u8>> {
     let compressor = match &mut kept.libdeflate {
-        Some(compressor) if compressor.compression_level() as i32 == job.level => compressor,
+        Some(compressor) if compressor.compression_level() as i32 == level => compressor,
         slot => {
-            let made = match spare(job.level) {
+            let made = match spare(level) {
                 Some(compressor) => compressor,
-                None => Compressor::new(job.level).ok_or_else(Error::stream)?,
+                None => Compressor::new(level).ok_or_else(Error::stream)?,
             };
             slot.insert(made)
         }
     };
-    let input = &job.data[job.dict..];
     let mut bytes = vec![0; Compressor::part_bound(input.len())];
-    let size = match job.end {
+    let size = match end {
         End::Last => compressor.deflate_compress(input, &mut bytes),
         End::Byte | End::Full => compressor.deflate_compress_part(input, &mut bytes),
     };
@@ -370,11 +399,18 @@ fn compress_libdeflate(kept: &mut Kept, job: Job) -> Result<Block> {
         return Err(Error::new(ErrorCode::Stream, Some("a block did not fit")));
     }
     bytes.truncate(size);
-    Ok(Block {
-        bytes,
-        crc: crc32(0, input),
-        size: input.len(),
-    })
+    Ok(bytes)
+}
+
+/// One of the blocks a [`DeflateMt`] with [`Library::Libdeflate`] at
+/// `level` makes, compressed on this thread as it compresses it: `input`,
+/// the last block of the stream if `last`, else a part. The compressor is
+/// the thread's spare, kept for the next ([`SPARE`]). Not in libdeflate:
+/// what the ZIP writer's threads compress, each a block of an entry.
+#[cfg_attr(not(feature = "zip"), allow(dead_code))]
+pub(crate) fn libdeflate_block(level: i32, input: &[u8], last: bool) -> Result<Vec<u8>> {
+    let end = if last { End::Last } else { End::Full };
+    libdeflate_compress(&mut Kept::default(), level, input, end)
 }
 
 /// [`Deflate::deflate`] with `flush`, until it leaves room in `out`, which

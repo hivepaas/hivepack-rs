@@ -85,6 +85,10 @@ pub use infback9::{Back9, BackIn, BackOut, InflateBack9};
 pub use inflate::{GzHeader, InBuffer, Inflate, OutBuffer};
 pub use inflate9::Inflate9;
 pub use libdeflate::{Compressor, LIBDEFLATE_VERSION};
+#[cfg(all(test, feature = "zip"))]
+pub(crate) use mt::TEST_UNIT;
+#[cfg(feature = "zip")]
+pub(crate) use mt::libdeflate_block;
 pub use mt::{
     BLOCK_SIZE, DeflateMt, LIBDEFLATE_BLOCK_SIZE, LIBDEFLATE_BLOCKS, Library, MtOptions,
     libdeflate_block_size,

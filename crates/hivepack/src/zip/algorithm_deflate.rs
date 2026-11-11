@@ -98,6 +98,15 @@ impl Deflating {
         }
     }
 
+    /// How data is deflated on the thread writing it alone, as with one
+    /// thread: in blocks still if it is, one after the other.
+    pub(crate) fn alone(self) -> Deflating {
+        Deflating {
+            blocks: self.blocks.map(|_| Threads::One),
+            ..self
+        }
+    }
+
     /// How data at `compression_flags` is deflated: as libzip deflates
     /// torrentzip's, one zlib stream, whatever the archive says.
     pub(crate) fn for_flags(self, compression_flags: u32) -> Deflating {
@@ -105,6 +114,20 @@ impl Deflating {
             return Deflating::default();
         }
         self
+    }
+}
+
+/// The level deflate compresses at with `library`'s compressor, from
+/// `compression_flags`: 1 to 9, 1 to 12 with libdeflate's, else 9.
+pub(crate) fn level(compression_flags: u32, library: Library) -> i32 {
+    let most = match library {
+        Library::Zlib => Z_BEST_COMPRESSION as u32,
+        Library::Libdeflate => LIBDEFLATE_BEST_COMPRESSION,
+    };
+    if (1..=most).contains(&compression_flags) {
+        compression_flags as i32
+    } else {
+        Z_BEST_COMPRESSION
     }
 }
 
@@ -137,17 +160,9 @@ impl DeflateCompress {
     /// for zlib, always in blocks.
     pub(crate) fn new(compression_flags: u32, deflating: Deflating) -> DeflateCompress {
         let deflating = deflating.for_flags(compression_flags);
-        let most = match deflating.library {
-            Library::Zlib => Z_BEST_COMPRESSION as u32,
-            Library::Libdeflate => LIBDEFLATE_BEST_COMPRESSION,
-        };
         DeflateCompress {
             deflating,
-            level: if (1..=most).contains(&compression_flags) {
-                compression_flags as i32
-            } else {
-                Z_BEST_COMPRESSION
-            },
+            level: level(compression_flags, deflating.library),
             mem_level: if compression_flags == TORRENTZIP_COMPRESSION_FLAGS {
                 TORRENTZIP_MEM_LEVEL
             } else {

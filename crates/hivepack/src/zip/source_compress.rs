@@ -17,8 +17,8 @@ use crate::zip::source_data::{
 };
 use crate::zip::zip::{Stat, cm, stat};
 
-/// `BUFSIZE`.
-const BUFSIZE: usize = 8192;
+/// `BUFSIZE`: also what the compressing layer reads at once.
+pub(crate) const BUFSIZE: usize = 8192;
 
 /// The most compressed data a [`Decompress`] reads at once, where libzip
 /// reads [`BUFSIZE`]: each piece costs a call of the decompressor, which
@@ -427,6 +427,21 @@ impl Decompress {
     }
 }
 
+/// The stat of the compressing layer on the lower source's: the method and
+/// the size of the data once its stream `ended`, else neither. Not in
+/// libzip, where it is in `ZIP_SOURCE_STAT`: also what the data of blocks
+/// compressed in threads gives (`close_threads.rs`).
+pub(crate) fn stat_compressed(st: &mut Stat<'_>, ended: Option<(u16, u64)>) {
+    match ended {
+        Some((method, size)) => {
+            st.comp_method = method;
+            st.comp_size = size;
+            st.valid |= stat::COMP_SIZE | stat::COMP_METHOD;
+        }
+        None => st.valid &= !(stat::COMP_SIZE | stat::COMP_METHOD),
+    }
+}
+
 /// `struct context`, for compressing.
 pub(crate) struct Compress {
     pub(crate) error: Error,
@@ -509,17 +524,12 @@ impl Compress {
     /// `ZIP_SOURCE_STAT`, on the lower source's stat: the method and the
     /// compressed size once the stream ended, stored if it was.
     pub(crate) fn stat(&self, st: &mut Stat<'_>) {
-        if self.end_of_stream {
-            st.comp_method = if self.is_stored {
-                cm::STORE
-            } else {
-                cm_actual(self.method)
-            };
-            st.comp_size = self.size;
-            st.valid |= stat::COMP_SIZE | stat::COMP_METHOD;
+        let method = if self.is_stored {
+            cm::STORE
         } else {
-            st.valid &= !(stat::COMP_SIZE | stat::COMP_METHOD);
-        }
+            cm_actual(self.method)
+        };
+        stat_compressed(st, self.end_of_stream.then_some((method, self.size)));
     }
 
     /// `ZIP_SOURCE_GET_FILE_ATTRIBUTES`: the general purpose bits of the
