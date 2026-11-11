@@ -326,6 +326,20 @@
       "kind": "source"
     },
     {
+      "name": "lzokay-db2df1f-source",
+      "fetch": { "group": "generated", "files": [{ "url": "https://github.com/jackoalan/lzokay/archive/db2df1fcbebc2ed06c10f727f72567d40f06a2be.tar.gz", "sha256": "e5314402b590e656474c0087af1f9d6fac727cb7718011791cdab8a61245a066", "unpack": "tar.gz" }] },
+      "source": "https://github.com/jackoalan/lzokay at commit db2df1fcbebc2ed06c10f727f72567d40f06a2be (22 October 2023), the latest; lzokay has no releases",
+      "license": "MIT",
+      "kind": "source"
+    },
+    {
+      "name": "lzo-oracle",
+      "generate": { "group": "generated", "from": "lzo-2.10-source", "with": ["lzokay-db2df1f-source"], "tool": "oracle", "sources": ["tools/lzo-oracle/oracle.cpp"] },
+      "source": "tools/lzo-oracle/oracle.cpp, built with the LZO 2.10 library sources and lzokay's lzokay.cpp",
+      "license": "MIT (the program and lzokay) and GPL-2.0-or-later (liblzo2)",
+      "kind": "tool"
+    },
+    {
       "name": "libdeflate-1.26-source",
       "fetch": { "group": "generated", "files": [{ "url": "https://github.com/ebiggers/libdeflate/releases/download/v1.26/libdeflate-1.26.tar.gz", "sha256": "125856d4656e0feab660f94842f835923410c9281fedbcee64598c918da42b5a", "unpack": "tar.gz" }] },
       "source": "https://github.com/ebiggers/libdeflate/releases/tag/v1.26 (commit 75390569905da2f4aa03c5bc03e03c9d18b9b2d0)",
@@ -590,6 +604,27 @@
       "source": "https://github.com/keeweb/keeweb/releases/tag/v1.18.7 (KeeWeb's snap, a SquashFS image) and https://github.com/AppImage/appimagetool/releases/tag/1.9.1 (appimagetool's type-2 AppImage, an ELF program with a SquashFS image after it)",
       "license": "MIT (KeeWeb, appimagetool), and the licenses of what each packs",
       "kind": "archives"
+    },
+    {
+      "name": "libarchive-ar",
+      "generate": { "group": "core", "from": "libarchive-3.8.10-source", "tool": "uudecode", "glob": "libarchive-3.8.10/libarchive/test/test_read_format_ar.ar.uu" },
+      "source": "libarchive 3.8.10's ar test archive (libarchive/test/test_read_format_ar.ar.uu), decoded",
+      "license": "BSD-2-Clause",
+      "kind": "archives"
+    },
+    {
+      "name": "debian-packages",
+      "fetch": { "group": "core", "files": [{ "url": "https://snapshot.debian.org/archive/debian/20230601T000000Z/pool/main/h/hello/hello_2.10-3_amd64.deb", "sha256": "2e6e2f1a0007dc43bc91c273fd36e91e40a4f1c2765a03eca68b70a42103878a" }, { "url": "https://snapshot.debian.org/archive/debian/20100101T000000Z/pool/main/h/hello/hello_2.4-3_i386.deb", "sha256": "4f6a7313b92ab354da7fbd94b832b44993bc889914c724ad1dc0fa5077d700b0" }] },
+      "source": "GNU hello's Debian packages from snapshot.debian.org: 2.10-3 for amd64 (control.tar.xz and data.tar.xz, as dpkg-deb writes them since Debian 9) and 2.4-3 for i386 (control.tar.gz and data.tar.gz, from 2009)",
+      "license": "GPL-3.0-or-later (GNU hello)",
+      "kind": "archives"
+    },
+    {
+      "name": "ar-oracle",
+      "generate": { "group": "generated", "from": "libarchive-3.8.10-source", "tool": "oracle", "sources": ["tools/ar-oracle/oracle.c", "tools/ar-oracle/config.h"] },
+      "source": "tools/ar-oracle/oracle.c, built with the libarchive 3.8.10 sources",
+      "license": "MIT (the program) and BSD-2-Clause (libarchive)",
+      "kind": "tool"
     },
     {
       "name": "decodecorpus",

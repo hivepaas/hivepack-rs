@@ -40,7 +40,7 @@ features = ["full", "memory"]
 # Every format but RAR, whose code is under UnRAR's license: see LICENSE.md.
 default = ["full"]
 
-full = ["age", "appimage", "bzip2", "cpio", "crypto", "deflate", "extract", "iso", "lz4", "open", "sevenz", "sign", "squashfs", "tar", "udf", "xar", "xz", "zip", "zstd"]
+full = ["age", "appimage", "ar", "bzip2", "cpio", "crypto", "deflate", "extract", "iso", "lz4", "lzo", "open", "sevenz", "sign", "squashfs", "tar", "udf", "xar", "xz", "zip", "zstd"]
 
 # How much memory the program may still take, and a budget to choose threads
 # under it. Not a format, and so not in `full`: it calls the system through
@@ -60,6 +60,8 @@ xz-unsafe-fast = []
 age = ["crypto"]
 
 appimage = ["squashfs"]
+
+ar = []
 
 bzip2 = []
 
@@ -92,7 +94,9 @@ iso = ["deflate"]
 
 lz4 = []
 
-open = ["age", "bzip2", "cpio", "deflate", "lz4", "xz", "zstd"]
+lzo = []
+
+open = ["age", "ar", "bzip2", "cpio", "deflate", "lz4", "xz", "zstd"]
 
 rar = ["crypto", "deflate"]
 
@@ -228,6 +232,11 @@ required-features = ["bzip2"]
 name = "bzip2_threads"
 path = "tests/bzip2_threads.rs"
 required-features = ["bzip2", "open"]
+
+[[test]]
+name = "ar_oracle"
+path = "tests/ar_oracle.rs"
+required-features = ["ar"]
 
 [[test]]
 name = "cpio_oracle"
@@ -428,6 +437,11 @@ required-features = ["lz4"]
 name = "lz4_unchecked"
 path = "tests/lz4_unchecked.rs"
 required-features = ["lz4"]
+
+[[test]]
+name = "lzo_oracle"
+path = "tests/lzo_oracle.rs"
+required-features = ["lzo"]
 
 [[test]]
 name = "memory_available"

@@ -13,6 +13,7 @@ The crate's own code is under the MIT license ([LICENSE](LICENSE)). Each port ke
 | `extract` | MIT AND Unicode-3.0 | [LICENSE](LICENSE), [src/extract/LICENSE-UNICODE](src/extract/LICENSE-UNICODE) |
 | `iso` | BSD-2-Clause | [src/iso/LICENSE](src/iso/LICENSE) |
 | `lz4` | BSD-2-Clause | [src/lz4/LICENSE](src/lz4/LICENSE) |
+| `lzo` | MIT | [src/lzo/LICENSE](src/lzo/LICENSE) |
 | `open` | MIT | [src/open/LICENSE](src/open/LICENSE) |
 | `rar` | **UnRAR**, which is not an open source license: it may not be used to develop a RAR-compatible archiver or to re-create RAR's compression | [src/rar/LICENSE](src/rar/LICENSE) |
 | `sevenz` | MIT | [src/sevenz/LICENSE](src/sevenz/LICENSE) |

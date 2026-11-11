@@ -219,9 +219,10 @@ where
             let mut head = Vec::with_capacity(HEAD_LEN);
             (&mut reader).take(HEAD_LEN as u64).read_to_end(&mut head)?;
             let mut detected = detect(&head, name);
-            // An RPM package's payload has no name to tell `.lzma` by.
+            // An RPM package's payload has no name to tell `.lzma` by, and
+            // a Debian package's `data.tar.lzma` none that is the file's.
             if detected == Detected::Container(Container::Data)
-                && layers.last() == Some(&Layer::Rpm)
+                && matches!(layers.last(), Some(Layer::Rpm | Layer::Deb))
                 && is_lzma_alone(&head)
             {
                 detected = Detected::Layer(Layer::Lzma);
