@@ -32,6 +32,29 @@ pub struct Blocklist {
     pub input_size: u32,
 }
 
+/// Not in squashfuse: a place a file's data is read from, where it is in the
+/// image and the header it is read with ([`Sqfs::check_data_with`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DataPlace {
+    /// A data block, through the data cache.
+    Block { pos: u64, hdr: u32 },
+    /// A fragment block, through the fragment cache.
+    Fragment { pos: u64, hdr: u32 },
+}
+
+/// Not in squashfuse: what [`Sqfs::sqfs_blockidx_check`] finds of a file's
+/// block index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BlockIndex {
+    /// It is never made: the file has too few blocks.
+    None,
+    /// Its key, and its entries, each leading where the block sizes do.
+    Regular(u64, Vec<BlockidxEntry>),
+    /// An entry a read goes on from leads elsewhere, or is missing, or the
+    /// index does not read.
+    Irregular,
+}
+
 impl<R: Read + Seek> Sqfs<R> {
     /// `sqfs_frag_entry`: entry `idx` of the fragment table.
     pub fn sqfs_frag_entry(&mut self, idx: u32) -> Result<FragmentEntry> {
@@ -173,6 +196,18 @@ impl<R: Read + Seek> Sqfs<R> {
     /// its fragment's entry read and within the image too. What does not
     /// decompress is only found when it is read.
     pub fn check_data(&mut self, inode: &Inode) -> Result<()> {
+        self.check_data_with(inode, &mut |_| {})
+    }
+
+    /// Not in squashfuse: [`Sqfs::check_data`], telling `each` every place
+    /// the file's data is read from as `sqfs_read_range` goes through it
+    /// from its start, in order: each block but its holes, then its
+    /// fragment's block.
+    pub fn check_data_with(
+        &mut self,
+        inode: &Inode,
+        each: &mut dyn FnMut(DataPlace),
+    ) -> Result<()> {
         if !s_isreg(inode.base.mode) {
             return Err(err("not a regular file"));
         }
@@ -184,14 +219,78 @@ impl<R: Read + Seek> Sqfs<R> {
             if bl.input_size != 0 && !within(bl.block, u64::from(bl.input_size)) {
                 return Err(err("a block is past the end of the image"));
             }
+            if bl.input_size != 0 {
+                each(DataPlace::Block {
+                    pos: bl.block,
+                    hdr: bl.header,
+                });
+            }
         }
         if inode.xtra.reg_frag_idx() != SQUASHFS_INVALID_FRAG {
             let frag = self.sqfs_frag_entry(inode.xtra.reg_frag_idx())?;
             if !within(frag.start_block, u64::from(sqfs_data_header(frag.size).1)) {
                 return Err(err("a fragment is past the end of the image"));
             }
+            each(DataPlace::Fragment {
+                pos: frag.start_block,
+                hdr: frag.size,
+            });
         }
         Ok(())
+    }
+
+    /// Not in squashfuse: the block index `sqfs_read_range` makes of a file
+    /// and keeps, if it ever does, with the key it keeps it by, and whether
+    /// each of its entries that a read goes on from leads where going
+    /// through the file's block sizes from its start does: in an image
+    /// mksquashfs makes, each does; in a damaged one whose metadata blocks
+    /// are not the usual size, an entry may lead elsewhere, or be missing
+    /// and zeros.
+    pub fn sqfs_blockidx_check(&mut self, inode: &Inode) -> BlockIndex {
+        let count = self.sqfs_blocklist_count(inode);
+        let md_size = count.wrapping_mul(BLOCKLIST_ENTRY);
+        // sqfs_blockidx_indexable.
+        if md_size < SQUASHFS_METADATA_SIZE as u64 {
+            return BlockIndex::None;
+        }
+        let Ok(index) = self.sqfs_blockidx_add(inode) else {
+            return BlockIndex::Irregular;
+        };
+        let offset = inode.next.offset as u64;
+        // The last metadata block a read goes to: that of the block after
+        // the last, where the fragment is.
+        let last = offset.wrapping_add(md_size) / SQUASHFS_METADATA_SIZE as u64;
+        let mut bl = self.sqfs_blocklist_init(inode);
+        let mut gone = 0u64;
+        for metablock in 1..=last {
+            // As sqfs_blockidx_blocklist skips.
+            let skipped = (metablock.wrapping_mul(SQUASHFS_METADATA_SIZE as u64) / BLOCKLIST_ENTRY)
+                .wrapping_sub(offset / BLOCKLIST_ENTRY);
+            if skipped >= count {
+                // Nothing left but the fragment: the entry is not read.
+                if skipped == count {
+                    continue;
+                }
+                return BlockIndex::Irregular;
+            }
+            while gone < skipped {
+                if self.sqfs_blocklist_next(&mut bl).is_err() {
+                    return BlockIndex::Irregular;
+                }
+                gone += 1;
+            }
+            let Some(entry) = index.get((metablock - 1) as usize) else {
+                return BlockIndex::Irregular;
+            };
+            let md_block = u64::from(entry.md_block).wrapping_add(self.sb.inode_table_start) as i64;
+            if entry.data_block != bl.block.wrapping_add(u64::from(bl.input_size))
+                || md_block != bl.cur.block
+                || bl.cur.offset != inode.next.offset % BLOCKLIST_ENTRY as usize
+            {
+                return BlockIndex::Irregular;
+            }
+        }
+        BlockIndex::Regular(u64::from(inode.base.inode_number.wrapping_add(1)), index)
     }
 
     /// `sqfs_blockidx_add`: the block index of a file, where it goes on at

@@ -56,7 +56,7 @@ pub struct MdCursor {
 
 /// `sqfs_blockidx_entry`: where a file goes on, at the start of one of the
 /// metadata blocks that hold its block sizes.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BlockidxEntry {
     /// A data block where the file continues.
     pub data_block: u64,
@@ -87,6 +87,27 @@ pub(crate) struct Sqfs<R> {
     contexts: Contexts,
     pub xattr_info: XattrIdTable,
     pub xattr_table: Table,
+    /// Not in squashfuse: data blocks decoded ahead by other threads.
+    ahead: AheadSlot,
+}
+
+/// Not in squashfuse: where a data block decoded ahead, by another thread,
+/// is taken from when the data cache does not have it, before it is read
+/// here (see [`Sqfs::set_ahead`]).
+pub(crate) trait DataAhead {
+    /// The data block at `pos`, of header `hdr`, as
+    /// [`Sqfs::sqfs_data_block_read`] reads it, if it was decoded ahead.
+    fn take(&mut self, pos: i64, hdr: u32) -> Option<Result<Block>>;
+}
+
+/// [`DataAhead`], if any: none as squashfuse reads.
+#[derive(Default)]
+struct AheadSlot(Option<Box<dyn DataAhead + Send>>);
+
+impl std::fmt::Debug for AheadSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() { "Some(..)" } else { "None" })
+    }
 }
 
 /// Which data cache: `fs->data_cache` or `fs->frag_cache`.
@@ -157,6 +178,7 @@ impl<R: Read + Seek> Sqfs<R> {
             contexts: Contexts::default(),
             xattr_info: XattrIdTable::default(),
             xattr_table: Table::default(),
+            ahead: AheadSlot::default(),
         };
         let sb = match fs.sqfs_pread(SUPER_BLOCK_SIZE as u64, 0, "no superblock") {
             Ok(bytes) => {
@@ -257,6 +279,48 @@ impl<R: Read + Seek> Sqfs<R> {
         self.reader
     }
 
+    /// Not in squashfuse: the reader, to read from elsewhere; where it is
+    /// is not known after.
+    pub fn reader_mut(&mut self) -> &mut R {
+        self.at = None;
+        &mut self.reader
+    }
+
+    /// Not in squashfuse: the image opened again over `reader`, which holds
+    /// the same bytes, as `sqfs_init` opened it here, without reading it
+    /// again: its superblock and tables, with caches of its own, empty, for
+    /// another thread to read it with.
+    pub fn with_reader<S>(&self, reader: S) -> Sqfs<S> {
+        Sqfs {
+            reader,
+            size: self.size,
+            at: None,
+            offset: self.offset,
+            sb: self.sb,
+            id_table: self.id_table.clone(),
+            frag_table: self.frag_table.clone(),
+            export_table: self.export_table.clone(),
+            md_cache: Cache::new(SQUASHFS_CACHED_BLKS),
+            data_cache: Cache::new(DATA_CACHED_BLKS),
+            frag_cache: Cache::new(FRAG_CACHED_BLKS),
+            blockidx: Cache::new(SQUASHFS_META_SLOTS),
+            decompressor: self.decompressor,
+            contexts: Contexts::default(),
+            xattr_info: self.xattr_info,
+            xattr_table: self.xattr_table.clone(),
+            ahead: AheadSlot::default(),
+        }
+    }
+
+    /// Not in squashfuse: where the data blocks that the data cache does not
+    /// have are taken from, if they were decoded ahead, before they are read;
+    /// `None` to read them all here, as squashfuse does. A block decoded ahead
+    /// is what [`Sqfs::sqfs_data_block_read`] reads, so what is read is the
+    /// same.
+    pub fn set_ahead(&mut self, ahead: Option<Box<dyn DataAhead + Send>>) {
+        self.ahead = AheadSlot(ahead);
+    }
+
     /// `sqfs_block_read`: `size` bytes at `pos`, decompressed into at most
     /// `outsize` if `compressed`.
     ///
@@ -320,6 +384,10 @@ impl<R: Read + Seek> Sqfs<R> {
 
     /// `sqfs_data_cache`: the data block at `pos`, of header `hdr`,
     /// through a cache keyed by `pos` alone.
+    ///
+    /// Differs from squashfuse: a data block the cache does not have is
+    /// taken from [`Sqfs::set_ahead`]'s blocks decoded ahead, if it is there,
+    /// before it is read; it is the same.
     pub fn sqfs_data_cache(&mut self, which: DataCache, pos: i64, hdr: u32) -> Result<Block> {
         let cache = match which {
             DataCache::Data => &mut self.data_cache,
@@ -329,7 +397,14 @@ impl<R: Read + Seek> Sqfs<R> {
         if let Some(block) = cache.valid(slot) {
             return Ok(block.clone());
         }
-        let block = self.sqfs_data_block_read(pos, hdr)?;
+        let ahead = match (which, &mut self.ahead.0) {
+            (DataCache::Data, Some(ahead)) => ahead.take(pos, hdr),
+            _ => None,
+        };
+        let block = match ahead {
+            Some(block) => block?,
+            None => self.sqfs_data_block_read(pos, hdr)?,
+        };
         let cache = match which {
             DataCache::Data => &mut self.data_cache,
             DataCache::Frag => &mut self.frag_cache,
