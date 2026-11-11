@@ -1,7 +1,7 @@
 [package]
 name = "hivepack-fuzz"
 version = "0.0.0"
-description = "Fuzzers that compare hivepack::zstd with libzstd, hivepack::deflate with zlib, hivepack::bzip2 with libbzip2, hivepack::lz4 with liblz4, and hivepack::xz with liblzma, and that feed hivepack::zip, hivepack::extract, hivepack::age, hivepack::tar, hivepack::iso, hivepack::cpio, hivepack::open, hivepack::sevenz, hivepack::udf and hivepack::xar any input"
+description = "Fuzzers that compare hivepack::zstd with libzstd, hivepack::deflate with zlib, hivepack::bzip2 with libbzip2, hivepack::lz4 with liblz4, and hivepack::xz with liblzma, and that feed hivepack::lzo, hivepack::zip, hivepack::extract, hivepack::age, hivepack::tar, hivepack::iso, hivepack::cpio, hivepack::open, hivepack::sevenz, hivepack::udf and hivepack::xar any input"
 publish = false
 license = "MIT"
 edition = "2024"
@@ -185,6 +185,13 @@ bench = false
 [[bin]]
 name = "lz4"
 path = "fuzz_targets/lz4.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lzo"
+path = "fuzz_targets/lzo.rs"
 test = false
 doc = false
 bench = false
