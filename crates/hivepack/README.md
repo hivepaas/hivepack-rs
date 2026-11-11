@@ -13,7 +13,7 @@ hivepack = "0.10"                                                           # ev
 |---|---|
 | `zip`, `tar`, `sevenz` | ZIP, tar and 7z archives |
 | `rar` | RAR, reading only (feature off by default, under UnRAR's license) |
-| `iso`, `udf`, `squashfs`, `cpio`, `xar` | ISO 9660 images, UDF volumes, SquashFS images (snaps), cpio and RPM payloads, XAR (`.pkg`, `.xip`), reading |
+| `iso`, `udf`, `squashfs`, `appimage`, `cpio`, `xar` | ISO 9660 images, UDF volumes, SquashFS images (snaps) and AppImages, cpio and RPM payloads, XAR (`.pkg`, `.xip`), reading |
 | `deflate`, `bzip2`, `lz4`, `xz`, `zstd` | Deflate, zlib, gzip, bzip2, LZ4, XZ, LZMA, Zstandard |
 | `age`, `sign` | age encryption, and whole-file signatures with SSH Ed25519 and hybrid ML-DSA-65 keys |
 | `open` | Files through their layers: `.tar.zst.age` opens as the tar archive |

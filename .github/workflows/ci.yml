@@ -84,6 +84,7 @@ jobs:
       - run: cargo check -p hivepack --lib --locked --no-default-features --features lzo
       - run: cargo check -p hivepack --lib --locked --no-default-features --features open
       - run: cargo check -p hivepack --lib --locked --no-default-features --features squashfs
+      - run: cargo check -p hivepack --lib --locked --no-default-features --features appimage
       - run: cargo check -p hivepack --lib --locked --no-default-features --features tar
       - run: cargo check -p hivepack --lib --locked --no-default-features --features udf
       - run: cargo check -p hivepack --lib --locked --no-default-features --features xar

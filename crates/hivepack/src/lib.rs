@@ -11,6 +11,7 @@
 //! | Module | Feature | What it is |
 //! |---|---|---|
 //! | [`age`] | `age` | age encryption (decrypt, encrypt, keys) |
+//! | [`appimage`] | `appimage` | AppImages: where the program ends, and the image after it |
 //! | [`ar`] | `ar` | ar archives and Debian packages (`.deb`) |
 //! | [`bzip2`] | `bzip2` | bzip2 (libbzip2 1.0.8) |
 //! | [`cpio`] | `cpio` | cpio archives and RPM payloads |
@@ -43,6 +44,8 @@ extern crate self as hivepack;
 
 #[cfg(feature = "age")]
 pub mod age;
+#[cfg(feature = "appimage")]
+pub mod appimage;
 #[cfg(feature = "ar")]
 pub mod ar;
 #[cfg(feature = "bzip2")]

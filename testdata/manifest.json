@@ -571,6 +571,13 @@
       "kind": "source"
     },
     {
+      "name": "type2-runtime-20251108-source",
+      "fetch": { "group": "generated", "files": [{ "url": "https://github.com/AppImage/type2-runtime/archive/refs/tags/20251108.tar.gz", "sha256": "4c4f6df4647c9f01f871d7edd3716d8aeeffda9d22ffbebe3fccd95a6ab52c95", "unpack": "tar.gz" }] },
+      "source": "https://github.com/AppImage/type2-runtime/releases/tag/20251108 (commit dd6cebedcbddde9c82f89b011e8e1d40b6e43868): the runtime.c whose appimage_get_elf_size hivepack::appimage ports, kept to compare with new releases",
+      "license": "MIT",
+      "kind": "source"
+    },
+    {
       "name": "mksquashfs",
       "generate": { "group": "generated", "from": "squashfs-tools-4.6.1-source", "with": ["zlib-1.3.2-source", "xz-5.8.4-source", "lz4-1.10.0-source", "zstd-1.5.7-source", "lzo-2.10-source"], "tool": "mksquashfs", "sources": ["tools/squashfs-images/devices.h"] },
       "source": "squashfs-tools 4.6.1's mksquashfs, built from the release's sources as its Makefile lists them, with gzip, LZMA, XZ, LZO, LZ4 and zstd from the zlib 1.3.2, XZ Utils 5.8.4, LZO 2.10, lz4 1.10.0 and zstd 1.5.7 sources. Only a tool: nothing is linked with it",
