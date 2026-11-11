@@ -9,7 +9,7 @@ Bytes 8 to 10 of the ELF header, padding in `e_ident`, are `AI` and the type, 1 
 
 ## The source
 
-`elf_size` is a port of `appimage_get_elf_size`, `read_elf32` and `read_elf64` of `src/runtime/runtime.c` of [AppImage's type 2 runtime](https://github.com/AppImage/type2-runtime), release 20251108 (commit `dd6cebedcbddde9c82f89b011e8e1d40b6e43868`), under the MIT license, which `hivepack::appimage::UPSTREAM_VERSION` names. The rest of the runtime mounts the image with squashfuse, which [squashfs.md](squashfs.md) ports.
+`elf_size` is a port of `appimage_get_elf_size`, `read_elf32` and `read_elf64` of `src/runtime/runtime.c` of [AppImage's type 2 runtime](https://github.com/AppImage/type2-runtime), release 20251108 (commit `dd6cebedcbddde9c82f89b011e8e1d40b6e43868`), under the MIT license, which `hivepack::appimage::UPSTREAM_VERSION` names; its sources are the `type2-runtime-20251108-source` set of `scripts/testdata.py`, mirrored in hivepaas/hivepack-upstream. A new release's `runtime.c` is compared with it, and what changed in these three functions ported. The rest of the runtime mounts the image with squashfuse, which [squashfs.md](squashfs.md) ports.
 
 The runtime reads `e_ident`: its byte order (`EI_DATA`, little or big endian, else an error) and its class (`EI_CLASS`, 32 or 64 bits, else an error). Then the ELF header of that class, its `e_shoff`, `e_shentsize` and `e_shnum` in that byte order, and the last section header, at `e_shoff + e_shentsize × (e_shnum − 1)`. The program ends at the end of the section header table or of the last section (`sh_offset + sh_size`), whichever is later: a program's sections are before its section headers, but a section can be put after them. The ELF magic itself is not checked: telling one is `appimage_type`'s.
 
