@@ -403,6 +403,17 @@ LIBARCHIVE_CPIO_SOURCES = [
 ]
 
 
+# libarchive: the ar reader and writers, what they call, and the memory and
+# callback inputs and outputs tools/ar-oracle uses.
+LIBARCHIVE_AR_SOURCES = [
+    "archive_acl.c", "archive_check_magic.c", "archive_entry.c", "archive_entry_sparse.c",
+    "archive_entry_xattr.c", "archive_options.c", "archive_read.c", "archive_read_open_memory.c",
+    "archive_read_set_options.c", "archive_read_support_format_ar.c", "archive_string.c",
+    "archive_string_sprintf.c", "archive_util.c", "archive_virtual.c", "archive_write.c",
+    "archive_write_add_filter_none.c", "archive_write_set_format_ar.c",
+]
+
+
 # libarchive: the reader and writer of XAR archives, what they call (the
 # checksums of archive_digest.c among them), and the memory and callback
 # inputs and outputs the oracle uses.
@@ -586,7 +597,8 @@ def build_oracle(source: Path, sources: list, included: list, folder: Path, extr
     tools/iso-oracle is built with libarchive's LIBARCHIVE_SOURCES, its
     archive_string.c without the Unicode normalization (libarchive_string),
     its own config.h, and zlib's (the `extra` set); tools/cpio-oracle, told
-    by its folder, with LIBARCHIVE_CPIO_SOURCES and its own config.h;
+    by its folder, with LIBARCHIVE_CPIO_SOURCES and its own config.h, and
+    tools/ar-oracle so with LIBARCHIVE_AR_SOURCES;
     tools/xar-oracle, told by its folder too, with XAR_LIBARCHIVE_SOURCES,
     the same archive_string.c, and libxml2's, zlib's, libbzip2's,
     liblzma's and nettle's (build_xar_oracle).
@@ -655,8 +667,9 @@ def build_oracle(source: Path, sources: list, included: list, folder: Path, extr
     if libarchive is not None and Path(sources[0]).parent.name == "xar-oracle":
         build_xar_oracle(libarchive, sources, folder, extra, compiler)
         return
-    if libarchive is not None and folder.name == "cpio-oracle":
-        files += [str(libarchive / name) for name in LIBARCHIVE_CPIO_SOURCES]
+    if libarchive is not None and folder.name in ("cpio-oracle", "ar-oracle"):
+        files += [str(libarchive / name) for name in
+                  (LIBARCHIVE_CPIO_SOURCES if folder.name == "cpio-oracle" else LIBARCHIVE_AR_SOURCES)]
         config = ROOT / Path(sources[0]).parent
         subprocess.run([compiler, "-O2", "-w", "-DHAVE_CONFIG_H", f"-I{config}", f"-I{libarchive}",
                         *files, "-o", str(folder / "oracle")], check=True)

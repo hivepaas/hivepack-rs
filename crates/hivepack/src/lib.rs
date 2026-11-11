@@ -11,6 +11,7 @@
 //! | Module | Feature | What it is |
 //! |---|---|---|
 //! | [`age`] | `age` | age encryption (decrypt, encrypt, keys) |
+//! | [`ar`] | `ar` | ar archives and Debian packages (`.deb`) |
 //! | [`bzip2`] | `bzip2` | bzip2 (libbzip2 1.0.8) |
 //! | [`cpio`] | `cpio` | cpio archives and RPM payloads |
 //! | [`crypto`] | `crypto` | the cryptography of the formats, behind one interface |
@@ -41,6 +42,8 @@ extern crate self as hivepack;
 
 #[cfg(feature = "age")]
 pub mod age;
+#[cfg(feature = "ar")]
+pub mod ar;
 #[cfg(feature = "bzip2")]
 pub mod bzip2;
 #[cfg(all(
