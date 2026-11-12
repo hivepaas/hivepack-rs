@@ -2,7 +2,7 @@
 
 bzip2 compression and decompression in safe Rust, ported from the official library, [libbzip2](https://sourceware.org/bzip2/) 1.0.8.
 
-> **Status:** compression gives libbzip2's output, byte for byte, at every block size and work factor, whatever pieces the input and output come in, and decompression libbzip2's results, call by call, in its fast and small modes, randomised blocks included. Both run at about libbzip2's speed on x86-64 (Silesia). This crate is not on crates.io.
+> **Status:** compression gives libbzip2's output, byte for byte, at every block size and work factor, whatever pieces the input and output come in, and decompression libbzip2's results, call by call, in its fast and small modes, randomised blocks included. Both run at about libbzip2's speed on x86-64 (Silesia).
 
 ```rust
 use hivepack::bzip2::{Action, Compress, Decompress, InBuffer, OutBuffer, Status};

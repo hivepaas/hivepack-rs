@@ -2,7 +2,7 @@
 
 Deflate, zlib and gzip compression and decompression in safe Rust, ported from the official library, [zlib](https://zlib.net) 1.3.2.
 
-> **Status:** compression gives zlib's output, byte for byte, at every level, strategy, memory level and flush, and decompression zlib's results and messages, raw or with the zlib and gzip wrappers, with dictionaries and gzip headers. It decodes Deflate64 too, ZIP's method 9, as zlib's `contrib/infback9` does, whole or a piece at a time. All run at about zlib's speed on x86-64 (Silesia). This crate is not on crates.io.
+> **Status:** compression gives zlib's output, byte for byte, at every level, strategy, memory level and flush, and decompression zlib's results and messages, raw or with the zlib and gzip wrappers, with dictionaries and gzip headers. It decodes Deflate64 too, ZIP's method 9, as zlib's `contrib/infback9` does, whole or a piece at a time. All run at about zlib's speed on x86-64 (Silesia).
 
 ```rust
 use hivepack::deflate::{Flush, InBuffer, Inflate, OutBuffer, Status};

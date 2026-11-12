@@ -2,7 +2,7 @@
 
 Reading UDF volumes (DVD, Blu-ray and disk images) in safe Rust, ported from NetBSD's UDF file system.
 
-> **Status:** reads UDF 1.02 to 2.60 as NetBSD mounts it: physical, sparable, virtual (VAT) and metadata partitions, blocks of 512 to 4096 bytes, file entries and extended ones, every allocation descriptor and allocation extents, strategy 4096, hidden and deleted entries, names in OSTA compressed Unicode, symbolic links, devices, permissions, owners and times. What it reads is the same as Linux's udf file system on 36 images mkudffs, genisoimage and its tests make, and hundreds of damaged ones do not make it panic. Writing is not ported. This crate is not on crates.io.
+> **Status:** reads UDF 1.02 to 2.60 as NetBSD mounts it: physical, sparable, virtual (VAT) and metadata partitions, blocks of 512 to 4096 bytes, file entries and extended ones, every allocation descriptor and allocation extents, strategy 4096, hidden and deleted entries, names in OSTA compressed Unicode, symbolic links, devices, permissions, owners and times. What it reads is the same as Linux's udf file system on 36 images mkudffs, genisoimage and its tests make, and hundreds of damaged ones do not make it panic. Writing is not ported.
 
 ```rust
 let mut udf = hivepack::udf::Udf::open(std::fs::File::open("disc.iso")?)?;

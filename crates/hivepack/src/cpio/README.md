@@ -2,7 +2,7 @@
 
 Reading cpio archives in safe Rust, ported from libarchive 3.8.10's reader, and the payload of RPM packages, from its RPM filter.
 
-> **Status:** reads every cpio format libarchive reads: odc (POSIX.1), newc and crc (SVR4, as Linux's initramfs and RPM packages have it), afio's large ASCII headers, and the old binary format in either byte order, with symbolic and hard links, devices, and the search for the next header after garbage. Every header, warning, byte of data and error is the same as libarchive's, on libarchive's own test archives, archives its writers make, archives the tests make with what they do not, and tens of thousands of damaged ones. Takes the lead and headers off RPM packages as libarchive's filter does. Writing is not ported. This crate is not on crates.io.
+> **Status:** reads every cpio format libarchive reads: odc (POSIX.1), newc and crc (SVR4, as Linux's initramfs and RPM packages have it), afio's large ASCII headers, and the old binary format in either byte order, with symbolic and hard links, devices, and the search for the next header after garbage. Every header, warning, byte of data and error is the same as libarchive's, on libarchive's own test archives, archives its writers make, archives the tests make with what they do not, and tens of thousands of damaged ones. Takes the lead and headers off RPM packages as libarchive's filter does. Writing is not ported.
 
 ```rust
 use std::io::Read;

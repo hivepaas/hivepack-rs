@@ -2,7 +2,7 @@
 
 Reading XAR archives (macOS's `.pkg` installers, `.xip` files) in safe Rust, ported from libarchive 3.8.10's reader, with the parts of libxml2 2.15.4 it reads the table of contents with.
 
-> **Status:** reads every file of an archive: paths (base64 names too), types, permissions, owners, times, inodes, devices, hard and symbolic links, BSD and Linux file flags, extended attributes, and data stored, or compressed with gzip, bzip2, lzma or xz, with its MD5, SHA-1, SHA-256 or SHA-512 checksums checked, as the table of contents's own. Every header, warning, byte of data and error is the same as libarchive's, on libarchive's test archives, archives its writer makes, archives of macOS's `xar` and `pkgbuild`, archives the tests make with what neither does, and tens of thousands of damaged ones. Writing is not ported. This crate is not on crates.io.
+> **Status:** reads every file of an archive: paths (base64 names too), types, permissions, owners, times, inodes, devices, hard and symbolic links, BSD and Linux file flags, extended attributes, and data stored, or compressed with gzip, bzip2, lzma or xz, with its MD5, SHA-1, SHA-256 or SHA-512 checksums checked, as the table of contents's own. Every header, warning, byte of data and error is the same as libarchive's, on libarchive's test archives, archives its writer makes, archives of macOS's `xar` and `pkgbuild`, archives the tests make with what neither does, and tens of thousands of damaged ones. Writing is not ported.
 
 ```rust
 use std::io::Read;

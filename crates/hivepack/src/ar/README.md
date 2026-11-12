@@ -2,7 +2,7 @@
 
 Reading ar archives in safe Rust, ported from libarchive 3.8.10's reader: Debian packages (`.deb`), and static libraries.
 
-> **Status:** reads what libarchive's ar reader reads: GNU and SVR4's archives, with their symbol tables passed over and long names in a filename table, and BSD's, with long names before the data. Every header, byte of data and error is the same as libarchive's, on its test archive, archives its writers make, and thousands of archives the tests make with what they do not, as they are and damaged. Writing is not ported. This crate is not on crates.io.
+> **Status:** reads what libarchive's ar reader reads: GNU and SVR4's archives, with their symbol tables passed over and long names in a filename table, and BSD's, with long names before the data. Every header, byte of data and error is the same as libarchive's, on its test archive, archives its writers make, and thousands of archives the tests make with what they do not, as they are and damaged. Writing is not ported.
 
 ```rust
 use std::io::Read;

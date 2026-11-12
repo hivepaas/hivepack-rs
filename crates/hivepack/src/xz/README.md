@@ -2,7 +2,7 @@
 
 .xz and .lzma compression, and .xz, .lzma and .lz decompression, in safe Rust, ported from the official library, liblzma of [XZ Utils](https://tukaani.org/xz/) 5.8.4.
 
-> **Status:** the encoders of `.xz` and `.lzma` and of raw LZMA1 and LZMA2 write liblzma's output, byte for byte, call by call, with every preset, option and match finder and every flush, at about liblzma's speed. The decoders of `.xz`, `.lzma` and `.lz`, the automatic one, and raw LZMA1 and LZMA2 give liblzma's results, call by call, with its memory limits and flags; they run at 1.23–1.69× liblzma's speed where liblzma is C, and at 0.89–1.03× on x86-64, where liblzma's range decoder is assembly (Silesia). The delta and BCJ filters (x86, PowerPC, IA-64, ARM, ARM-Thumb, ARM64, SPARC, RISC-V) are in both, and the `.xz` encoder and decoder run in threads too. This crate is not on crates.io.
+> **Status:** the encoders of `.xz` and `.lzma` and of raw LZMA1 and LZMA2 write liblzma's output, byte for byte, call by call, with every preset, option and match finder and every flush, at about liblzma's speed. The decoders of `.xz`, `.lzma` and `.lz`, the automatic one, and raw LZMA1 and LZMA2 give liblzma's results, call by call, with its memory limits and flags; they run at 1.23–1.69× liblzma's speed where liblzma is C, and at 0.89–1.03× on x86-64, where liblzma's range decoder is assembly (Silesia). The delta and BCJ filters (x86, PowerPC, IA-64, ARM, ARM-Thumb, ARM64, SPARC, RISC-V) are in both, and the `.xz` encoder and decoder run in threads too.
 
 ```rust
 use hivepack::xz::{Action, InBuffer, OutBuffer, Status, Stream};

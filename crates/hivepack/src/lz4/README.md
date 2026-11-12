@@ -2,7 +2,7 @@
 
 LZ4 compression and decompression in safe Rust, ported from the official library, [liblz4](https://github.com/lz4/lz4) 1.10.0.
 
-> **Status:** compresses blocks and frames with liblz4's output, byte for byte, at every acceleration and level, with dictionaries, call by call as `LZ4F_compressUpdate` does; decodes blocks with liblz4's results, the error position included, and the same bytes written in the output, past what is decoded too; decodes frames call by call as `LZ4F_decompress` does, with the same hints, bytes read and written, and errors; writes `.lz4` files as liblz4's file functions do, and reads them as `lz4 -d` does. This crate is not on crates.io.
+> **Status:** compresses blocks and frames with liblz4's output, byte for byte, at every acceleration and level, with dictionaries, call by call as `LZ4F_compressUpdate` does; decodes blocks with liblz4's results, the error position included, and the same bytes written in the output, past what is decoded too; decodes frames call by call as `LZ4F_decompress` does, with the same hints, bytes read and written, and errors; writes `.lz4` files as liblz4's file functions do, and reads them as `lz4 -d` does.
 
 ```rust
 use std::io::{Read, Write};

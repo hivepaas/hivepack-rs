@@ -2,7 +2,7 @@
 
 AppImages in safe Rust: where the program at the start of an AppImage ends, ported from AppImage's type 2 runtime, and the image after it.
 
-> **Status:** finds the end of 32-bit and 64-bit ELF programs of either byte order, as the type 2 runtime 20251108's `appimage_get_elf_size` finds it, and opens a type 2 AppImage's SquashFS image there with `hivepack::squashfs`; a type 1 AppImage is an ISO 9660 image, which `hivepack::iso` reads. Checked with appimagetool 1.9.1's AppImage, read as squashfuse reads it, with AppImages made of the SquashFS and ISO 9660 test images, ELF programs that are not AppImages, and damaged headers. This crate is not on crates.io.
+> **Status:** finds the end of 32-bit and 64-bit ELF programs of either byte order, as the type 2 runtime 20251108's `appimage_get_elf_size` finds it, and opens a type 2 AppImage's SquashFS image there with `hivepack::squashfs`; a type 1 AppImage is an ISO 9660 image, which `hivepack::iso` reads. Checked with appimagetool 1.9.1's AppImage, read as squashfuse reads it, with AppImages made of the SquashFS and ISO 9660 test images, ELF programs that are not AppImages, and damaged headers.
 
 ```rust
 use hivepack::appimage::{AppImageType, appimage_type, open_squashfs};

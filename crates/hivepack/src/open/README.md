@@ -2,7 +2,7 @@
 
 Opening what hivepack reads through the layers around it, in safe Rust: age encryption, zstd, xz, lzip, .lzma, LZ4, gzip, bzip2 or pbzx compression, RPM packages' lead and headers, and Debian packages' ar archive around their `data.tar`, found by their first bytes and taken off one after the other, until what is under them is a tar, ZIP, 7z, cpio or XAR archive, an ISO 9660 image, a UDF volume, a SquashFS image, an AppImage, or plain data.
 
-> **Status:** opens `backup.tar.zst.age`, `logs.tar.gz`, `notes.txt.xz` and any stack of these layers, up to a limit, with hivepack's own ports of each library. A file reads as its tools read it: zstd and LZ4 frames and skippable frames, gzip members, bzip2 streams, xz streams and lzip members one after the other, and zeros after gzip and bzip2; pbzx, the layer of macOS packages' payloads, as Apple's `pkgutil` reads it. Files that age encrypts open with a passphrase, asked for once however often the file is opened, or with X25519 or SSH keys. This crate is not on crates.io.
+> **Status:** opens `backup.tar.zst.age`, `logs.tar.gz`, `notes.txt.xz` and any stack of these layers, up to a limit, with hivepack's own ports of each library. A file reads as its tools read it: zstd and LZ4 frames and skippable frames, gzip members, bzip2 streams, xz streams and lzip members one after the other, and zeros after gzip and bzip2; pbzx, the layer of macOS packages' payloads, as Apple's `pkgutil` reads it. Files that age encrypts open with a passphrase, asked for once however often the file is opened, or with X25519 or SSH keys.
 
 ```rust
 use std::sync::Arc;

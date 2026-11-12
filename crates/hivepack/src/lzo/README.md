@@ -2,7 +2,7 @@
 
 LZO1X decompression in safe Rust, ported from [lzokay](https://github.com/jackoalan/lzokay)'s decompressor (commit `db2df1f`; lzokay has no releases), with the results of liblzo2 2.10's `lzo1x_decompress_safe`: the decoder SquashFS calls on each block of an image made with `-comp lzo`.
 
-> **Status:** decodes LZO1X blocks with liblzo2's results: the same bytes on every stream liblzo2's compressors make (`lzo1x_1` and its forms, `lzo1x_999` at every level), and on damaged ones the same error, with the same bytes left in the output and nothing written past them. Decompression only, of raw blocks: no compression, no `.lzo` files. 1.48× liblzo2's speed on average on `lzo1x_1`'s blocks of the Silesia corpus, and 1.32× on `lzo1x_999`'s (0.97× at worst). This crate is not on crates.io.
+> **Status:** decodes LZO1X blocks with liblzo2's results: the same bytes on every stream liblzo2's compressors make (`lzo1x_1` and its forms, `lzo1x_999` at every level), and on damaged ones the same error, with the same bytes left in the output and nothing written past them. Decompression only, of raw blocks: no compression, no `.lzo` files. 1.48× liblzo2's speed on average on `lzo1x_1`'s blocks of the Silesia corpus, and 1.32× on `lzo1x_999`'s (0.97× at worst).
 
 ```rust
 // "hello" six times, between commas, as lzo1x_999_compress makes it.
