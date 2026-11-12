@@ -50,12 +50,14 @@ Each port is timed against the library it comes from, on the same data, and ever
 | Crate | Against | Where it is ahead or even | Where it is behind |
 |---|---|---|---|
 | [`hivepack::bzip2`](crates/hivepack/src/bzip2#speed) | libbzip2 1.0.8 | compression 1.05×, decompression 1.01× | |
-| [`hivepack::deflate`](crates/hivepack/src/deflate#speed) | zlib 1.3.2 | compression 0.99×, decompression 1.29–1.61× | |
+| [`hivepack::deflate`](crates/hivepack/src/deflate#speed) | zlib 1.3.2, libdeflate 1.26's compressor | compression 0.99×, decompression 1.29–1.61×; libdeflate's level 12 1.03–1.05× | libdeflate's levels 1 to 9 0.87–0.93× |
 | [`hivepack::xz`](crates/hivepack/src/xz#speed) | liblzma 5.8.4 | compression 1.02×, decompression 1.44× against its C | decompression 0.94× against its x86-64 assembly |
+| [`hivepack::lzo`](crates/hivepack/src/lzo#speed) | liblzo2 2.10's `lzo1x_decompress_safe` | decompression 1.48× of `lzo1x_1`'s blocks (1.11–1.63×), 1.32× of `lzo1x_999`'s (0.97–1.53×) | |
 | [`hivepack::lz4`](crates/hivepack/src/lz4#speed) | liblz4 1.10.0 | decoding 0.96× with `unsafe-fast`, compression 0.95× at level 1 | decoding 0.75× without it, high compression 0.74–0.98× |
 | [`hivepack::zstd`](crates/hivepack/src/zstd#speed) | libzstd 1.5.7 | level 19 0.96× | decompression 0.78× (0.82× with `unsafe-fast`), levels 1 and 3 0.85×, levels 9 and 12 0.45–0.56× (0.54–0.71×) |
 | [`hivepack::zip`](crates/hivepack/src/zip#speed) | libzip 1.12.1 | stored data 1.25–1.44×, Deflate 1.53×, compression 0.96–1.05×, WinZip AES 1.74–2.93×, finding entries 1.00–3.39×, editing many entries 1.49–1.81× | opening 200,000 entries 0.71×, LZMA and XZ 0.92–0.95× |
 | [`hivepack::sevenz`](crates/hivepack/src/sevenz#speed) | LZMA SDK 26.05, 7-Zip | LZMA and LZMA2 1.34–1.48× against C, Deflate 1.84×, AES-256 behind a compressor 1.38–1.44× | PPMd 0.84–0.91×, BZip2 0.61×, AES-256 with Copy 0.63× |
+| [`hivepack::squashfs`](docs/squashfs.md#speed) | squashfuse 0.6.5; squashfs-tools 4.6.1's `unsquashfs` for extracting | reading gzip 1.52×, LZO 1.45×, xz 0.96× | reading a snap (xz) 0.94×, LZMA 0.93×, zstd 0.78–0.82×, nothing compressed 0.76×, LZ4 0.73×; extracting a snap on 32 threads 0.68× `unsquashfs -p 32` |
 | [`hivepack::tar`](crates/hivepack/src/tar#speed) | Go 1.27.2's `archive/tar` | going through entries 1.48–2.61×, reading data 1.02–2.00×, seeking past data 2.05×, writing entries 2.03–3.11×, big entries 1.05× | |
 | [`hivepack::age`](crates/hivepack/src/age#speed) | age v1.3.2, in Go | X25519 2.23–2.35×, scrypt 1.02–1.28×, a big file in ASCII armor 1.29× | a big file's payload 0.40× |
 | [`hivepack::rar`](crates/hivepack/src/rar#speed) | UnRAR 7.3.2 | RAR 4 and RAR 5 without a password, 0.83–1.53× over three machines, RAR 5 with a password 1.28–1.74× | PPMd 0.74–0.93×, RAR 4 with a password 0.87–1.08× |
@@ -64,9 +66,10 @@ Each port is timed against the library it comes from, on the same data, and ever
 
 - `hivepack::zip`, `hivepack::sevenz`, `hivepack::tar` and `hivepack::age`: AMD Ryzen 9 9950X (16 cores, x86-64), 45 GiB of memory, Ubuntu 26.04 with Linux 7.0 and the `powersave` governor, rustc 1.99.1 in the workspace's release profile; the libraries built with GCC 15.2.
 - Each of them also on GitHub's runners, Linux x86-64, Windows x86-64 and macOS arm64, with and without `unsafe-fast` where a crate has it, last on November 10, 2026: see their READMEs. `hivepack::rar` only there, on `testdata/rar`. `.github/workflows/bench.yml` runs each format on those three.
-- `hivepack::bzip2`, `hivepack::deflate`, `hivepack::lz4`, `hivepack::xz` and `hivepack::zstd`: an AMD Ryzen 9 9950X (x86-64, Linux).
+- `hivepack::bzip2`, `hivepack::deflate`, `hivepack::lz4`, `hivepack::lzo`, `hivepack::xz` and `hivepack::zstd`: an AMD Ryzen 9 9950X (x86-64, Linux).
+- `hivepack::squashfs`: the same machine, on KeeWeb 1.18.7's snap, appimagetool 1.9.1's AppImage and trees mksquashfs made with each compressor, read file by file against squashfuse, and extracted into tmpfs against `unsquashfs`, both built from their releases with the same compressors.
 
-These are snapshots of one machine or two, on the Silesia corpus: run the tools to see your own. How a reference is built matters: liblzma and libzstd have x86-64 assembly, and the usual builds of 7-Zip and of libzip's crypto libraries go further than the ones timed here, as each README says. `hivepack::iso`, `hivepack::udf`, `hivepack::rar`, `hivepack::open` and `hivepack::extract` have no such comparison yet.
+These are snapshots of one machine or two, on the Silesia corpus but for SquashFS: run the tools to see your own. How a reference is built matters: liblzma and libzstd have x86-64 assembly, and the usual builds of 7-Zip and of libzip's crypto libraries go further than the ones timed here, as each README says. `hivepack::ar`, `hivepack::appimage`, `hivepack::iso`, `hivepack::udf`, `hivepack::open` and `hivepack::extract` (but for SquashFS, above) have no such comparison yet.
 
 ## 🧪 Tests
 
@@ -75,14 +78,14 @@ python3 scripts/testdata.py fetch    # the test files too big to commit (16 MB)
 cargo test --workspace
 ```
 
-The test files come from zstd itself and from other zstd implementations (Go, Java, Rust), with their licenses. [testdata/README.md](testdata/README.md) lists them.
+The test files come from the libraries the ports follow (zstd, libarchive, 7-Zip, UnRAR and the others), from other implementations (zstd's in Go, Java and Rust, rarfile, junrar), and from files as they are published (Debian packages, a snap, an AppImage), each with its license. Others are made by the oracles in `tools/`, built from the pinned releases. [testdata/README.md](testdata/README.md) lists them.
 
 ## 🦀 Rust versions
 
 - **Oldest supported: 1.89**, `rust-version` in `Cargo.toml`, which CI checks.
   It is a promise to the crates' users: raised only when the code needs
-  something newer, never to a Rust less than a year old, and, once the crates
-  are published, in a minor release with a line in its notes.
+  something newer, never to a Rust less than a year old, and in a minor
+  release with a line in its notes.
 - **Development:** `rust-toolchain.toml` pins the stable Rust that formats,
   lints, documents and tests, so a new Rust never turns CI red on its own. It
   is raised by hand every second Rust release (about every twelve weeks), once
