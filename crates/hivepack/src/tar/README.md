@@ -2,7 +2,7 @@
 
 Reading and writing tar archives in safe Rust, ported from Go's `archive/tar` (Go 1.27.2).
 
-> **Status:** reads V7, USTAR, PAX, GNU and STAR archives: PAX records and GNU long names merged into their entries, global PAX headers, and sparse files in GNU's formats 0.0, 0.1, 1.0 and the old one, their holes read as zeros. Every header, byte of data and error is the same as Go's, on Go's own test archives, archives Go's writer makes, and thousands of damaged ones. Writes USTAR, PAX and GNU, choosing the first that can hold each header unless it names one: every byte and error the same as Go's, over thousands of scripts of calls, with wrong headers and failing outputs among them. It writes no sparse files, as Go does not. This crate is not on crates.io.
+> **Status:** reads V7, USTAR, PAX, GNU and STAR archives: PAX records and GNU long names merged into their entries, global PAX headers, and sparse files in GNU's formats 0.0, 0.1, 1.0 and the old one, their holes read as zeros. Every header, byte of data and error is the same as Go's, on Go's own test archives, archives Go's writer makes, and thousands of damaged ones. Writes USTAR, PAX and GNU, choosing the first that can hold each header unless it names one: every byte and error the same as Go's, over thousands of scripts of calls, with wrong headers and failing outputs among them. It writes no sparse files, as Go does not.
 
 ```rust
 use std::io::Read;

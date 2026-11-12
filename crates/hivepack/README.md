@@ -4,9 +4,9 @@ Read and write archives and compressed files in Rust: one crate for many formats
 
 ```toml
 [dependencies]
-hivepack = "0.10"                                                           # every format but RAR
-# hivepack = { version = "0.10", default-features = false, features = ["zip", "zstd"] }  # only these
-# hivepack = { version = "0.10", features = ["rar"] }                       # RAR too, under UnRAR's license
+hivepack = "0.11"                                                           # every format but RAR
+# hivepack = { version = "0.11", default-features = false, features = ["zip", "zstd"] }  # only these
+# hivepack = { version = "0.11", features = ["rar"] }                       # RAR too, under UnRAR's license
 ```
 
 | Module | Reads and writes |

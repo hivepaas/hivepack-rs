@@ -2,7 +2,7 @@
 
 Reading ISO 9660 images (`.iso`) in safe Rust, ported from libarchive 3.8.10's reader.
 
-> **Status:** reads ISO 9660 at every level, with Rock Ridge (POSIX names, permissions, owners, times, symbolic and hard links, devices, deep directories moved to `rr_moved`, continuation areas), Joliet (Unicode names, when there is no Rock Ridge), files in several extents, and files compressed with zisofs. Every header, warning, byte of data and error is the same as libarchive's, on libarchive's own test images, images libarchive's writer makes, images the tests make with what it does not, and tens of thousands of damaged ones. UDF and writing are not ported. This crate is not on crates.io.
+> **Status:** reads ISO 9660 at every level, with Rock Ridge (POSIX names, permissions, owners, times, symbolic and hard links, devices, deep directories moved to `rr_moved`, continuation areas), Joliet (Unicode names, when there is no Rock Ridge), files in several extents, and files compressed with zisofs. Every header, warning, byte of data and error is the same as libarchive's, on libarchive's own test images, images libarchive's writer makes, images the tests make with what it does not, and tens of thousands of damaged ones. UDF and writing are not ported.
 
 ```rust
 use std::io::Read;
