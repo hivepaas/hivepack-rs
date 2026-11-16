@@ -20,6 +20,7 @@
 //! | [`extract`] | `extract` | extracting archives to disk, safe by default |
 //! | [`image`] | `image` | disk images: the disk (raw, VHD, QCOW2, VHDX, VMDK), and its partitions (MBR, GPT) |
 //! | [`fat`] | `fat` | FAT12, FAT16 and FAT32 file systems, with VFAT long names, reading |
+//! | [`ext`] | `ext` | ext2, ext3 and ext4 file systems, reading |
 //! | [`iso`] | `iso` | ISO 9660 images |
 //! | [`lz4`] | `lz4` | LZ4 (liblz4 1.10.0) |
 //! | [`lzo`] | `lzo` | LZO1X blocks, decompression (lzokay; liblzo2 2.10's results) |
@@ -67,6 +68,8 @@ pub mod cpio;
 pub mod crypto;
 #[cfg(feature = "deflate")]
 pub mod deflate;
+#[cfg(feature = "ext")]
+pub mod ext;
 #[cfg(feature = "extract")]
 pub mod extract;
 #[cfg(feature = "fat")]

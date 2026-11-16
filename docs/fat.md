@@ -1,6 +1,6 @@
 # FAT: the file system in the partition
 
-`hivepack::fat` reads FAT12, FAT16 and FAT32, with the long names VFAT added, read-only. It is the second layer of [issue #225](https://github.com/hivepaas/hivepack-rs/issues/225): a container holds a disk, the disk's table names partitions ([`hivepack::image`](../crates/hivepack/src/image)), and a partition holds a file system. This is the smallest file system with real reach — the boot partition of a Raspberry Pi's card, an EFI system partition, a camera's card, a USB stick anything will mount.
+`hivepack::fat` reads FAT12, FAT16 and FAT32, with the long names VFAT added, read-only. It is the second layer of [issue #225](https://github.com/hivepaas/hivepack-rs/issues/225), [`ext`](ext.md) being the third: a container holds a disk, the disk's table names partitions ([`hivepack::image`](../crates/hivepack/src/image)), and a partition holds a file system. This is the smallest file system with real reach — the boot partition of a Raspberry Pi's card, an EFI system partition, a camera's card, a USB stick anything will mount.
 
 **It is not a port.** The layout is Microsoft's published *FAT32 File System Specification*, which gives FAT12 and FAT16 with it, and the long names are what that specification and VFAT's own published description say. There is no library to port anyway: Linux's own reader is GPL-2.0, and nothing here needed it. The repository's MIT license covers the module.
 
