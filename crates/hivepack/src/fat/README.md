@@ -2,7 +2,7 @@
 
 Reading FAT file systems in safe Rust, read-only: FAT12, FAT16 and FAT32, with the long names VFAT added.
 
-> **Status:** reads the directories and files of a FAT file system on a [`Disk`](../image) — a partition of a card or of a disk image, or a file that holds one as it is — with the 8.3 names MS-DOS had, the long names Windows writes in front of them, the times each record carries, and the chain of clusters a file's data lies in. Checked against the file systems `qemu-img`'s `vvfat` writes out of a folder and those `mkfs.fat` writes, and against file systems built byte by byte, each of which `fsck.fat` is run over. Writing is not here and is not planned; ext2/3/4 and NTFS come next, in [issue #225](https://github.com/hivepaas/hivepack-rs/issues/225).
+> **Status:** reads the directories and files of a FAT file system on a [`Disk`](../image) — a partition of a card or of a disk image, or a file that holds one as it is — with the 8.3 names MS-DOS had, the long names Windows writes in front of them, the times each record carries, and the chain of clusters a file's data lies in. Checked against the file systems `qemu-img`'s `vvfat` writes out of a folder and those `mkfs.fat` writes, and against file systems built byte by byte, each of which `fsck.fat` is run over. Writing is not here and is not planned. [`hivepack::ext`](../ext) reads ext2, ext3 and ext4, and NTFS is what is left of [issue #225](https://github.com/hivepaas/hivepack-rs/issues/225).
 
 ```rust
 use std::io::Read;

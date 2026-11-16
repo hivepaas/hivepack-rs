@@ -11,6 +11,7 @@ The crate's own code is under the MIT license ([LICENSE](LICENSE)). Each port ke
 | `crypto` | MIT | [src/crypto/LICENSE](src/crypto/LICENSE) |
 | `deflate` | Zlib AND MIT (libdeflate's compressor, `deflate::Compressor`) | [src/deflate/LICENSE](src/deflate/LICENSE), [src/deflate/libdeflate/LICENSE](src/deflate/libdeflate/LICENSE) |
 | `extract` | MIT AND Unicode-3.0 | [LICENSE](LICENSE), [src/extract/LICENSE-UNICODE](src/extract/LICENSE-UNICODE) |
+| `ext` | MIT, the crate's own: nothing is ported, as the layout is the kernel's own documentation and e2fsprogs' | [LICENSE](LICENSE) |
 | `fat` | MIT, the crate's own: nothing is ported, as the layout is Microsoft's published specification | [LICENSE](LICENSE) |
 | `image` | MIT, the crate's own: nothing is ported. A partition table has no library behind it, and the containers are written from their published specifications rather than from QEMU's GPL-2.0 drivers | [LICENSE](LICENSE) |
 | `iso` | BSD-2-Clause | [src/iso/LICENSE](src/iso/LICENSE) |
