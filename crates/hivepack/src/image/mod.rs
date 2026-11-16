@@ -8,10 +8,11 @@
 //! which is what the file system in it is read from.
 //!
 //! A raw image (`.img`, `.bin`, a `dd` of a card) is a disk as it is, and a
-//! `std::fs::File` is one. The containers that keep a disk in less room than
-//! it is long — VHD, VHDX, QCOW2, VMDK — present one too, and are not read
-//! yet; nor is any of the file systems a partition holds. What is here is
-//! what they all stand on.
+//! `std::fs::File` is one. A container keeps a disk in less room than it is
+//! long, and presents one: [`Vhd`] reads the disk of a VHD image (`.vhd`,
+//! QEMU's `vpc`), so the partitions of one are read as any disk's are.
+//! VHDX, QCOW2 and VMDK are not read yet, nor is any of the file systems a
+//! partition holds.
 //!
 //! Nothing in this module is a port. A master boot record's layout is the
 //! one every system has agreed on since MS-DOS, and a GUID partition
@@ -40,10 +41,12 @@ mod error;
 mod gpt;
 mod mbr;
 mod partition;
+mod vhd;
 
 pub use disk::{Disk, Part};
 pub use error::Error;
 pub use partition::{Kind, Partition, Table};
+pub use vhd::Vhd;
 
 /// The sector sizes a table's numbers are counted in: what every disk has
 /// had, and what a disk that gave up 512-byte sectors has.
