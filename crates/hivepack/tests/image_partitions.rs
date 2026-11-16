@@ -334,17 +334,26 @@ fn a_partition_is_read_as_a_disk_of_its_own() {
     );
 }
 
-/// What util-linux's `sfdisk` writes, where it is installed: the tables
+/// util-linux's `sfdisk`, if it is installed **and** can be run: a process
+/// cannot be started everywhere these tests run — CI's 32-bit container
+/// answers `ENOSYS` to `spawn` — and a test that needs a tool says so and
+/// passes rather than failing for the want of one.
+fn sfdisk() -> Option<PathBuf> {
+    let path = ["/usr/sbin/sfdisk", "/sbin/sfdisk", "/usr/bin/sfdisk"]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|p| p.exists())?;
+    Command::new(&path).arg("--version").output().ok()?;
+    Some(path)
+}
+
+/// What util-linux's `sfdisk` writes, where it can be run: the tables
 /// hivepack reads are the tables the system's own tool makes, not only the
 /// ones these tests build.
 #[test]
 fn the_tables_util_linux_writes_are_read_as_it_names_them() {
-    let Some(sfdisk) = ["/usr/sbin/sfdisk", "/sbin/sfdisk", "/usr/bin/sfdisk"]
-        .into_iter()
-        .map(PathBuf::from)
-        .find(|p| p.exists())
-    else {
-        eprintln!("sfdisk is not installed: the tables it writes are not checked");
+    let Some(sfdisk) = sfdisk() else {
+        eprintln!("sfdisk cannot be run here: the tables it writes are not checked");
         return;
     };
     let folder = std::env::temp_dir().join(format!("hivepack-image-{}", std::process::id()));

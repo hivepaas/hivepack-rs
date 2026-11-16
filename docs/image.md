@@ -30,7 +30,7 @@ What is **not** here yet, and the order it comes in, is in [issue #225](https://
 `crates/hivepack/tests/image_partitions.rs`.
 
 - **Tables built byte by byte**, with their CRC-32s computed as a tool computes them: a master boot record of two partitions; an extended partition holding two logical ones, numbered 5 and 6; a chain that leads back into itself; a GUID partition table whose names are UTF-16 and not all ASCII; a damaged primary header, where the copy at the end gives the same answer; both copies damaged; entries that fail their check; a partition past the end of the disk; a protective record with no table behind it; a GUID partition table counted in 4096-byte sectors; a master boot record read both as every tool reads one and in the sectors `partitions_in` is told, with the sector sizes no disk has refused; and files that have no table at all.
-- **Tables util-linux wrote**, where `sfdisk` is installed: the same two layouts, in a 16 MiB image, read back and compared with what was asked for — the partitions' places, sizes, types, names and bootable flags. Where it is not installed, the test says so and passes; the tables built by hand are what CI checks.
+- **Tables util-linux wrote**, where `sfdisk` is installed: the same two layouts, in a 16 MiB image, read back and compared with what was asked for — the partitions' places, sizes, types, names and bootable flags. Where it is not installed, or cannot be run at all — CI's 32-bit container answers `ENOSYS` to starting a process — the test says so and passes; the tables built by hand are what CI checks everywhere.
 
 ## What a reader should know
 
