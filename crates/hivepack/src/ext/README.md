@@ -32,6 +32,7 @@ A partition is read by giving it the partition: `Ext::open(Part::new(&disk, part
 - **`lookup_path("sub/file.txt")`** — by the bytes of each name. A symbolic link in the middle of a path is **not** followed.
 - **`file(&node)`** — the data, as `io::Read` and `io::Seek`. Blocks that follow one another are read in one go, and a hole reads as zeroes.
 - **`read_link(&node)`** — what a link points at, which is bytes.
+- **Data kept in an inode** (`mke2fs -O inline_data`) is read as any other: a small file's bytes and a small directory's records come out of the inode itself, through the same `file` and `read_dir`. `Node::is_inline` says when that is where they are.
 - **`xattrs(&node)`** and **`xattr(&node, name)`** — the extended attributes kept beside an inode, in the room left over in it and in a block of its own: a file's SELinux label, the capabilities a program is given, its access control lists. The name comes back whole, with the beginning the file system kept as a number put back on.
 - **`walk`** — every file and directory, each as a `Step` of a path, the record that named it and the inode behind it.
 

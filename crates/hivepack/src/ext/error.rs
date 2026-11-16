@@ -35,6 +35,10 @@ pub enum Error {
     /// A directory whose records run past the end of a block, or whose
     /// record says a length that would not move on.
     Records,
+    /// A file whose data is in the inode says it is longer than what is
+    /// there: the 60 bytes in the inode and the attribute the rest of it
+    /// is kept in do not add up to the length the inode gives.
+    Inline,
     /// The extended attributes of an inode cannot be read: a block with no
     /// signature of its own, an entry that runs past the room it is in, an
     /// entry of no name, or a value that is not where it says.
@@ -72,9 +76,6 @@ pub enum Unsupported {
     /// Blocks allocated in clusters of several, which every number in the
     /// file system is then counted in.
     BigAlloc,
-    /// A file whose data is in the inode itself, in the room extended
-    /// attributes are kept in.
-    InlineData,
     /// Compression, which no released Linux ever wrote.
     Compression,
     /// A feature the file system says it needs that is not known here at
@@ -89,7 +90,6 @@ impl fmt::Display for Unsupported {
             Unsupported::Encrypted => "to be decrypted",
             Unsupported::MetaGroups => "group descriptors spread over it",
             Unsupported::BigAlloc => "blocks counted in clusters",
-            Unsupported::InlineData => "data kept in the inode itself",
             Unsupported::Compression => "compression, which Linux never wrote",
             Unsupported::Feature => "a feature this does not know",
         })
@@ -108,6 +108,7 @@ impl fmt::Display for Error {
             }
             Error::ExtentTree => write!(f, "the extent tree cannot be walked"),
             Error::Records => write!(f, "a directory's records run past its blocks"),
+            Error::Inline => write!(f, "the data in the inode is shorter than the inode says"),
             Error::Xattrs => write!(f, "the extended attributes of an inode cannot be read"),
             Error::TooMany => write!(f, "a directory holds more than is read"),
             Error::TooDeep => write!(f, "directories inside directories past what is walked"),

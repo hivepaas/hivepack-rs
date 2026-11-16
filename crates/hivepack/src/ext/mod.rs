@@ -3,7 +3,8 @@
 //! [`Ext`] opens the file system on a [`Disk`] — a partition of a card or
 //! of a disk image, or a file that holds one as it is — and reads its
 //! directories, its inodes and its files: the block numbers ext2 had and
-//! the extents ext4 brought, files with holes, symbolic links, devices,
+//! the extents ext4 brought, files with holes, what a file system keeps in
+//! the inode itself, symbolic links, devices,
 //! what each inode says about owner, mode, links and times, the extended
 //! attributes kept beside it, and the whole tree. This is where most of what anyone wants out of a disk image is: a
 //! Raspberry Pi's root, WSL2's `ext4.vhdx`, a Linux machine's QCOW2.
@@ -65,6 +66,19 @@ pub const MAX_DEPTH: usize = 1024;
 /// How long a symbolic link's target may be: a block, which is as much
 /// room as the format gives one.
 const MOST_LINK: u64 = 64 << 10;
+
+/// How much of a file's data is kept in the inode itself, where it is kept
+/// there at all: the 60 bytes the block numbers would be in.
+const IN_INODE: u64 = 60;
+
+/// What a directory kept in its inode begins with: four bytes holding the
+/// inode of the directory it is in, which stand for its `..`. Its records
+/// begin after them, and its `.` is written nowhere at all.
+const INLINE_DOTDOT: usize = 4;
+
+/// The attribute a file system keeps a file's own data in, where the data
+/// is in the inode: it is not an attribute of the file.
+const INLINE_NAME: &[u8] = b"system.data";
 
 /// An ext2, ext3 or ext4 file system, read-only.
 ///
@@ -160,6 +174,21 @@ impl<D: Disk> Ext<D> {
     /// system reading them does. A value the file system gave an inode of
     /// its own is read from there.
     pub fn xattrs(&self, node: &Node) -> Result<Vec<Xattr>, Error> {
+        Ok(self
+            .all_xattrs(node)?
+            .into_iter()
+            // Where a file keeps its data in its own inode, the file system
+            // keeps it in an attribute. That is not an attribute of the
+            // file: giving it out would hand the data over twice, and
+            // whatever put the file back would write its own bytes beside
+            // it.
+            .filter(|one| !(node.is_inline() && one.name == INLINE_NAME))
+            .collect())
+    }
+
+    /// Every attribute as it lies on the disk, the one a file's own data
+    /// may be in included.
+    fn all_xattrs(&self, node: &Node) -> Result<Vec<Xattr>, Error> {
         let mut found = Vec::new();
         // In the inode, where it is long enough to have room left over and
         // says how much of itself was written.
@@ -240,6 +269,14 @@ impl<D: Disk> Ext<D> {
         if !node.is_dir() {
             return Err(Error::NotADirectory);
         }
+        if node.is_inline() {
+            // A directory in its own inode is one run of records, not
+            // blocks of them, and the first four bytes are the inode it is
+            // in rather than a record.
+            let held = self.inline(node)?;
+            let from = held.get(INLINE_DOTDOT..).ok_or(Error::Inline)?;
+            return dir::entries(from, from.len().max(1), self.sb.filetype);
+        }
         let raw = self.data(node, dir::MOST_ROOM)?;
         dir::entries(&raw, self.sb.block as usize, self.sb.filetype)
     }
@@ -277,11 +314,41 @@ impl<D: Disk> Ext<D> {
         if !node.is_file() {
             return Err(Error::NotAFile);
         }
+        self.reading(node)
+    }
+
+    /// A reader of whatever a node's data is, whether that is blocks of its
+    /// own or the inode itself.
+    fn reading<'a>(&'a self, node: &Node) -> Result<File<'a, D>, Error> {
         Ok(File {
             fs: self,
             node: node.clone(),
             at: 0,
+            held: if node.is_inline() {
+                Some(self.inline(node)?)
+            } else {
+                None
+            },
         })
+    }
+
+    /// The data a node keeps in its own inode: the 60 bytes where the block
+    /// numbers would be, and then the attribute the rest of it is in.
+    fn inline(&self, node: &Node) -> Result<Vec<u8>, Error> {
+        let mut held = node.map.to_vec();
+        if node.size > IN_INODE {
+            let rest = self
+                .all_xattrs(node)?
+                .into_iter()
+                .find(|one| one.name == INLINE_NAME)
+                .ok_or(Error::Inline)?;
+            held.extend_from_slice(&rest.value);
+        }
+        if (held.len() as u64) < node.size {
+            return Err(Error::Inline);
+        }
+        held.truncate(node.size as usize);
+        Ok(held)
     }
 
     /// What a symbolic link points at, which is bytes and not text: a
@@ -350,12 +417,7 @@ impl<D: Disk> Ext<D> {
             return Err(Error::TooMany);
         }
         let mut raw = vec![0u8; node.size as usize];
-        let mut reading = File {
-            fs: self,
-            node: node.clone(),
-            at: 0,
-        };
-        reading.read_exact(&mut raw)?;
+        self.reading(node)?.read_exact(&mut raw)?;
         Ok(raw)
     }
 }
@@ -367,6 +429,9 @@ pub struct File<'a, D> {
     fs: &'a Ext<D>,
     node: Node,
     at: u64,
+    /// The data, where the inode holds it itself: read once when the file
+    /// was opened, as it is no longer than an inode.
+    held: Option<Vec<u8>>,
 }
 
 impl<D: Disk> File<'_, D> {
@@ -389,6 +454,14 @@ impl<D: Disk> Read for File<'_, D> {
         let want = (buf.len() as u64).min(left);
         if want == 0 {
             return Ok(0);
+        }
+        // Data the inode holds itself: it is all here already.
+        if let Some(held) = &self.held {
+            let from = self.at as usize;
+            let take = want as usize;
+            buf[..take].copy_from_slice(held.get(from..from + take).ok_or(Error::Inline)?);
+            self.at += want;
+            return Ok(take);
         }
         let block = u64::from(self.fs.sb.block);
         let into = self.at % block;

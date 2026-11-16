@@ -98,12 +98,6 @@ impl Node {
             return Err(Error::NoSuchInode { ino });
         };
         let flags = le32(raw, 32);
-        // A file whose data is in the inode is refused by the superblock's
-        // own feature bit; this is the same thing said per file, which a
-        // file system that had the feature turned off again may still hold.
-        if flags & FLAG_INLINE_DATA != 0 {
-            return Err(Error::Needs(super::Unsupported::InlineData));
-        }
         // How much of the inode there is past the 128 bytes every one has,
         // which says which of the newer fields were written.
         let extra = if sb.inode_size > 128 {
@@ -183,6 +177,15 @@ impl Node {
     /// brought, rather than through the block numbers ext2 had.
     pub(crate) fn extents(&self) -> bool {
         self.flags & FLAG_EXTENTS != 0
+    }
+
+    /// Whether the data is in the inode itself rather than in blocks of its
+    /// own: the first 60 bytes where the block numbers would be, and the
+    /// rest in the room the extended attributes are kept in. A small file
+    /// and a small directory both fit, and then the file system gives them
+    /// no blocks at all.
+    pub fn is_inline(&self) -> bool {
+        self.flags & FLAG_INLINE_DATA != 0
     }
 
     /// The major and minor numbers of a device, which are kept where a

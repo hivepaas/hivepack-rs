@@ -187,9 +187,6 @@ impl Super {
         if incompat & INCOMPAT_META_BG != 0 {
             return Err(Error::Needs(Unsupported::MetaGroups));
         }
-        if incompat & INCOMPAT_INLINE_DATA != 0 {
-            return Err(Error::Needs(Unsupported::InlineData));
-        }
         // A journal of its own is not a file system at all: it is the
         // journal of another one, kept on a disk by itself.
         if incompat & INCOMPAT_JOURNAL_DEV != 0 {

@@ -426,7 +426,6 @@ fn what_is_refused_is_refused_as_mke2fs_writes_it() {
     };
     for (options, want) in [
         (vec!["-O", "bigalloc"], Unsupported::BigAlloc),
-        (vec!["-O", "inline_data"], Unsupported::InlineData),
         (
             vec!["-O", "meta_bg", "-O", "^resize_inode"],
             Unsupported::MetaGroups,
@@ -454,6 +453,92 @@ fn what_is_refused_is_refused_as_mke2fs_writes_it() {
             got.map(|_| "a file system").map_err(|e| e.to_string())
         );
     }
+}
+
+/// A file system that keeps what is small enough in the inode itself,
+/// which `mke2fs -O inline_data` writes: the 60 bytes where the block
+/// numbers would be, and the rest in the room the extended attributes are
+/// in. A small directory goes there too, where its records are one run
+/// rather than blocks of them and the four bytes in front of them are the
+/// inode it is in.
+///
+/// This has a tree of its own rather than joining the layouts above,
+/// because `mke2fs -O inline_data -d` does not write the tree it is given:
+/// a file with a hole at its end comes out shorter than the file that went
+/// in — 880640 bytes for one of 900000 — and `debugfs` says the same of
+/// the image, so it is the tool and not this reader. The same `mke2fs`
+/// without the feature writes the length the file has.
+#[test]
+#[cfg(unix)]
+fn what_is_small_enough_to_be_in_the_inode_is_read_from_it() {
+    let Some(mkfs) = tool("mkfs.ext4") else {
+        eprintln!("mkfs.ext4 cannot be run here: data in the inode is not checked against it");
+        return;
+    };
+    let s = Scratch::new("inline");
+    let from = s.0.join("tree");
+    std::fs::create_dir_all(from.join("sub")).unwrap();
+    // One that fits in the inode, one that needs the attribute as well,
+    // one far too long for either, and a folder.
+    let mid = "a file of about ninety bytes, which is more than the sixty an inode holds itself\n";
+    std::fs::write(from.join("tiny.txt"), b"tiny\n").unwrap();
+    std::fs::write(from.join("mid.txt"), mid).unwrap();
+    std::fs::write(from.join("big.bin"), pattern(5000, 11)).unwrap();
+    std::fs::write(from.join("sub/inside.txt"), b"in a folder\n").unwrap();
+    let image = s.0.join("fs.img");
+    std::fs::write(&image, vec![0u8; 16 << 20]).unwrap();
+    run(
+        &mkfs,
+        &[
+            "-q",
+            "-F",
+            "-b",
+            "1024",
+            "-I",
+            "256",
+            "-O",
+            "inline_data",
+            "-d",
+            from.to_str().unwrap(),
+            image.to_str().unwrap(),
+        ],
+    );
+    let raw = std::fs::read(&image).unwrap();
+    sound("inline", &raw);
+    let fs = Ext::open(&raw).unwrap();
+
+    for (path, bytes) in [
+        ("tiny.txt", b"tiny\n".to_vec()),
+        ("mid.txt", mid.as_bytes().to_vec()),
+        ("sub/inside.txt", b"in a folder\n".to_vec()),
+    ] {
+        let node = fs.lookup_path(path).unwrap().unwrap();
+        assert!(node.is_inline(), "/{path} is small enough for its inode");
+        assert_eq!(node.blocks, 0, "/{path} is given no blocks at all");
+        let mut read = Vec::new();
+        fs.file(&node).unwrap().read_to_end(&mut read).unwrap();
+        assert_eq!(read, bytes, "/{path}");
+        // The attribute the data is in is not an attribute of the file.
+        assert!(
+            fs.xattrs(&node).unwrap().is_empty(),
+            "/{path}: the data is not given out as an attribute of itself"
+        );
+    }
+
+    // The folder, whose records are in its inode as well.
+    let sub = fs.lookup_path("sub").unwrap().unwrap();
+    assert!(sub.is_inline(), "a small folder is in its inode too");
+    let inside = fs.read_dir(&sub).unwrap();
+    assert_eq!(inside.len(), 1, "neither . nor .. is a record of its own");
+    assert_eq!(inside[0].name, b"inside.txt");
+
+    // And one too long for an inode is in blocks, as it always was.
+    let big = fs.lookup_path("big.bin").unwrap().unwrap();
+    assert!(!big.is_inline());
+    assert!(big.blocks > 0);
+    let mut read = Vec::new();
+    fs.file(&big).unwrap().read_to_end(&mut read).unwrap();
+    assert_eq!(read, pattern(5000, 11));
 }
 
 /// A file system in a partition of a disk image, which is the three layers
@@ -677,6 +762,12 @@ struct Build {
     image: Vec<u8>,
     next_block: u32,
     next_ino: u32,
+    /// Whether anything in it keeps its data in its own inode, which the
+    /// file system has to say in its features before `e2fsck` allows it.
+    inline_used: bool,
+    /// How many directories it holds, which the group descriptor says and
+    /// `e2fsck` counts for itself.
+    dirs: u16,
 }
 
 /// What an inode is to say about itself.
@@ -701,6 +792,8 @@ impl Build {
             image: vec![0u8; (BLOCKS * BLOCK) as usize],
             next_block: first_data,
             next_ino: FIRST_INO + 1,
+            inline_used: false,
+            dirs: 0,
         }
     }
 
@@ -793,6 +886,7 @@ impl Build {
                 inline: None,
             },
         );
+        self.dirs += 1;
         ino
     }
 
@@ -936,6 +1030,60 @@ impl Build {
         (map, 1)
     }
 
+    /// A file whose data is in its own inode: the 60 bytes where the block
+    /// numbers would be, and the rest in the attribute the file system
+    /// keeps it in.
+    fn inline_file(&mut self, bytes: &[u8]) -> u32 {
+        let head = &bytes[..bytes.len().min(60)];
+        let ino = self.node(Which {
+            mode: 0o100_644,
+            size: bytes.len() as u64,
+            links: 1,
+            at: Vec::new(),
+            inline: Some(head.to_vec()),
+        });
+        self.says_inline(ino);
+        // Even one that fits says so with an attribute of no bytes, which
+        // is what `mke2fs` writes.
+        let rest = if bytes.len() > 60 {
+            &bytes[60..]
+        } else {
+            &[][..]
+        };
+        self.xattrs_in_inode(ino, &[(7, b"data", rest)]);
+        ino
+    }
+
+    /// A directory whose records are in its own inode: four bytes holding
+    /// the inode it is in, which stand for its `..`, and then the records.
+    /// Its `.` is written nowhere at all.
+    fn inline_dir(&mut self, ino: u32, parent: u32, entries: &[(&[u8], u32, u8)]) {
+        let mut map = vec![0u8; 60];
+        put32(&mut map, 0, parent);
+        map[4..].copy_from_slice(&dir_records(entries, 60 - 4));
+        let links = 2 + entries.iter().filter(|(_, _, kind)| *kind == 2).count() as u16;
+        self.write_node(
+            ino,
+            Which {
+                mode: 0o40_755,
+                size: 60,
+                links,
+                at: Vec::new(),
+                inline: Some(map),
+            },
+        );
+        self.says_inline(ino);
+        self.xattrs_in_inode(ino, &[(7, b"data", &[])]);
+        self.dirs += 1;
+    }
+
+    /// Says of an inode that its data is in itself.
+    fn says_inline(&mut self, ino: u32) {
+        self.inline_used = true;
+        let at = (5 * BLOCK + (ino - 1) * self.inode_size) as usize;
+        put32(&mut self.image, at + 32, 0x1000_0000);
+    }
+
     /// Extended attributes in the room left over in the inode, which is
     /// where the ones that fit go.
     ///
@@ -1036,9 +1184,7 @@ impl Build {
         put32(&mut group, 8, 5);
         put16(&mut group, 12, free_blocks as u16);
         put16(&mut group, 14, free_inodes as u16);
-        // How many directories are in it: the root, and every one made.
-        let dirs = 2 + 1;
-        put16(&mut group, 16, dirs);
+        put16(&mut group, 16, self.dirs);
         self.write(2, &group);
 
         let mut sb = vec![0u8; BLOCK as usize];
@@ -1069,7 +1215,11 @@ impl Build {
         // the block an inode points at for them rubbish, and will not
         // count it among the blocks the inode takes either.
         put32(&mut sb, 92, 0x8);
-        put32(&mut sb, 96, 0x2 | if self.extents { 0x40 } else { 0 });
+        put32(
+            &mut sb,
+            96,
+            0x2 | if self.extents { 0x40 } else { 0 } | if self.inline_used { 0x8000 } else { 0 },
+        );
         put32(&mut sb, 100, 0x1);
         for (i, byte) in (0u8..16).enumerate() {
             sb[104 + i] = byte | 0x40;
@@ -1086,19 +1236,23 @@ impl Build {
 /// One block of directory records, the last of them reaching to the end of
 /// the block as the format says it must.
 fn dir_block(entries: &[(&[u8], u32, u8)]) -> Vec<u8> {
-    let mut raw = vec![0u8; BLOCK as usize];
+    dir_records(entries, BLOCK as usize)
+}
+
+/// Directory records filling `room_for` bytes, the last of them reaching to
+/// the end of it as the format says it must: one block of a directory, or
+/// the room inside an inode that holds one.
+fn dir_records(entries: &[(&[u8], u32, u8)], room_for: usize) -> Vec<u8> {
+    let mut raw = vec![0u8; room_for];
     let mut at = 0usize;
     for (i, (name, ino, kind)) in entries.iter().enumerate() {
         let need = (8 + name.len()).next_multiple_of(4);
         let room = if i + 1 == entries.len() {
-            BLOCK as usize - at
+            room_for - at
         } else {
             need
         };
-        assert!(
-            at + need <= BLOCK as usize,
-            "more records than a block holds"
-        );
+        assert!(at + need <= room_for, "more records than there is room for");
         put32(&mut raw, at, *ino);
         put16(&mut raw, at + 4, room as u16);
         raw[at + 6] = name.len() as u8;
@@ -1272,21 +1426,42 @@ fn by_hand(inode_size: u32, extents: bool) -> (Vec<u8>, BTreeMap<Vec<u8>, Thing>
     build.dir(LOST_FOUND, 2, &[]);
     want.insert(b"lost+found".to_vec(), Thing::Dir);
 
-    build.dir(
-        2,
-        2,
-        &[
-            (b"lost+found", LOST_FOUND, 2),
-            (b"hello.txt", hello, 1),
-            (b"big.bin", big_ino, 1),
-            (b"holes.bin", holey, 1),
-            (b"pieces.bin", deep, 1),
-            (b"link", fast, 7),
-            (b"longlink", slow, 7),
-            (b"not\xffutf8.txt", odd, 1),
-            (b"sub", sub, 2),
-        ],
-    );
+    let mut root: Vec<(&[u8], u32, u8)> = vec![
+        (b"lost+found", LOST_FOUND, 2),
+        (b"hello.txt", hello, 1),
+        (b"big.bin", big_ino, 1),
+        (b"holes.bin", holey, 1),
+        (b"pieces.bin", deep, 1),
+        (b"link", fast, 7),
+        (b"longlink", slow, 7),
+        (b"not\xffutf8.txt", odd, 1),
+        (b"sub", sub, 2),
+    ];
+
+    // Things small enough to be in their own inodes, where the inode has
+    // room left over to put them in: one that fits in the 60 bytes the
+    // block numbers would take, one that needs the attribute as well, and
+    // a folder, whose records go there in one run.
+    if extents && inode_size > 128 {
+        let small = b"small enough for the inode\n".to_vec();
+        let tiny = build.inline_file(&small);
+        want.insert(b"tiny.txt".to_vec(), Thing::File(small));
+        let spread = pattern(90, 13);
+        let mid = build.inline_file(&spread);
+        want.insert(b"mid.bin".to_vec(), Thing::File(spread));
+        let held = b"in a folder in an inode\n".to_vec();
+        let in_folder = build.inline_file(&held);
+        let folder = build.next_ino;
+        build.next_ino += 1;
+        build.inline_dir(folder, 2, &[(b"in.txt", in_folder, 1)]);
+        want.insert(b"inline".to_vec(), Thing::Dir);
+        want.insert(b"inline/in.txt".to_vec(), Thing::File(held));
+        root.push((b"tiny.txt", tiny, 1));
+        root.push((b"mid.bin", mid, 1));
+        root.push((b"inline", folder, 2));
+    }
+
+    build.dir(2, 2, &root);
     (build.finish(), want)
 }
 
@@ -1370,6 +1545,21 @@ fn a_file_system_built_by_hand_reads_as_it_was_built() {
             "{what}: one by name"
         );
         assert!(fs.xattr(&big, "user.nothing").unwrap().is_none(), "{what}");
+
+        // What is kept in its own inode, where the inode has room: the
+        // whole tree above already compared their bytes, so what is left
+        // to say is that they are really kept there.
+        if extents && inode_size > 128 {
+            for path in ["tiny.txt", "mid.bin", "inline", "inline/in.txt"] {
+                let node = fs.lookup_path(path).unwrap().unwrap();
+                assert!(node.is_inline(), "{what}: /{path} is in its inode");
+                assert_eq!(node.blocks, 0, "{what}: /{path} is given no blocks");
+                assert!(
+                    fs.xattrs(&node).unwrap().is_empty(),
+                    "{what}: /{path} does not give its own data out as an attribute"
+                );
+            }
+        }
     }
 }
 
@@ -1546,7 +1736,6 @@ fn a_layout_the_format_does_not_have_is_refused() {
         (0x0001u32, Unsupported::Compression),
         (0x0004, Unsupported::Journal),
         (0x0010, Unsupported::MetaGroups),
-        (0x8000, Unsupported::InlineData),
         (0x1_0000, Unsupported::Encrypted),
         (0x80_0000, Unsupported::Feature),
     ] {
@@ -1558,6 +1747,11 @@ fn a_layout_the_format_does_not_have_is_refused() {
             got.map(|_| "a file system").map_err(|e| e.to_string())
         );
     }
+    // The bit that says a file system may keep small files in their
+    // inodes is no longer a reason to refuse it: it is read.
+    let incompat = 0x2u32 | 0x40 | 0x8000;
+    assert!(changed(96, &incompat.to_le_bytes()).is_ok());
+
     // Blocks counted in clusters, which is kept where a reader that only
     // reads is told it may read what it does not know — and may not.
     let got = changed(100, &0x201u32.to_le_bytes());
