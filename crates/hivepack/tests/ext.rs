@@ -51,6 +51,38 @@ fn tool(name: &str) -> Option<PathBuf> {
     Some(path)
 }
 
+/// A `mkfs.extN` that can fill a file system from a folder, where one is
+/// installed: `-d` came with e2fsprogs 1.43, and CI's s390x container has
+/// 1.42.13 from May 2015, which answers its usage message instead. Nothing
+/// it says tells the two apart, so it is asked by filling a small file
+/// system from an empty folder.
+fn mkfs_filling(kind: &str, what: &str) -> Option<PathBuf> {
+    let at = tool(&format!("mkfs.{kind}"))?;
+    let s = Scratch::new(&format!("{what} fills"));
+    let from = s.0.join("empty");
+    std::fs::create_dir_all(&from).unwrap();
+    let image = s.0.join("fs.img");
+    std::fs::write(&image, vec![0u8; 2 << 20]).unwrap();
+    let (ok, told) = said(
+        &at,
+        &[
+            "-q",
+            "-F",
+            "-d",
+            from.to_str().unwrap(),
+            image.to_str().unwrap(),
+        ],
+    );
+    if !ok {
+        eprintln!(
+            "this mkfs.{kind} cannot fill a file system from a folder: {}",
+            told.lines().next().unwrap_or("").trim()
+        );
+        return None;
+    }
+    Some(at)
+}
+
 fn run(at: &Path, args: &[&str]) {
     let out = Command::new(at).args(args).output().unwrap();
     assert!(
@@ -87,6 +119,14 @@ fn sound(what: &str, image: &[u8]) {
     // -f to check even a file system marked clean, -n to answer no to
     // every offer to change it.
     let (ok, told) = said(&e2fsck, &["-fn", path.to_str().unwrap()]);
+    // An `e2fsck` older than a feature the image carries refuses to look at
+    // it at all — 1.42.13 says so of `inline_data` — so it has not judged
+    // it, and there is nothing in what it said to assert. The modern one in
+    // the other jobs does judge it, which is what keeps this honest.
+    if !ok && told.contains("unsupported feature") {
+        eprintln!("this e2fsck is older than what {what} carries, so it cannot judge it:\n{told}");
+        return;
+    }
     assert!(ok, "{what}: e2fsck does not call this sound:\n{told}");
 }
 
@@ -225,8 +265,8 @@ fn what_it_holds<D: Disk>(fs: &Ext<D>) -> BTreeMap<Vec<u8>, Thing> {
 #[cfg(unix)]
 fn through_mkfs(kind: &str, options: &[&str]) {
     let what = format!("{kind} {}", options.join(" "));
-    let Some(mkfs) = tool(&format!("mkfs.{kind}")) else {
-        eprintln!("mkfs.{kind} cannot be run here: {what} is not checked against it");
+    let Some(mkfs) = mkfs_filling(kind, &what) else {
+        eprintln!("mkfs.{kind} cannot fill one here: {what} is not checked against it");
         return;
     };
     let s = Scratch::new(&what);
@@ -424,13 +464,31 @@ fn what_is_refused_is_refused_as_mke2fs_writes_it() {
         eprintln!("mkfs.ext4 cannot be run here: what is refused is not checked against it");
         return;
     };
-    for (options, want) in [
-        (vec!["-O", "bigalloc"], Unsupported::BigAlloc),
+    // Where the superblock keeps the two feature words these options are
+    // in, and the bit each asks for: an older `mke2fs` takes `-O meta_bg`,
+    // writes a file system without it and says nothing, and then there is
+    // nothing for the reader to refuse.
+    const INCOMPAT: usize = 1024 + 96;
+    const RO_COMPAT: usize = 1024 + 100;
+    for (options, want, at, bit) in [
+        (
+            vec!["-O", "bigalloc"],
+            Unsupported::BigAlloc,
+            RO_COMPAT,
+            0x200u32,
+        ),
         (
             vec!["-O", "meta_bg", "-O", "^resize_inode"],
             Unsupported::MetaGroups,
+            INCOMPAT,
+            0x10,
         ),
-        (vec!["-O", "encrypt"], Unsupported::Encrypted),
+        (
+            vec!["-O", "encrypt"],
+            Unsupported::Encrypted,
+            INCOMPAT,
+            0x1_0000,
+        ),
     ] {
         let s = Scratch::new(&format!("refused {}", options.join(" ")));
         let image = s.0.join("fs.img");
@@ -446,6 +504,13 @@ fn what_is_refused_is_refused_as_mke2fs_writes_it() {
             continue;
         }
         let raw = std::fs::read(&image).unwrap();
+        if get32(&raw, at) & bit == 0 {
+            eprintln!(
+                "this mkfs.ext4 took {options:?} and wrote a file system without the \
+                 feature, so {want:?} is checked by hand instead"
+            );
+            continue;
+        }
         let got = Ext::open(&raw);
         assert!(
             matches!(&got, Err(Error::Needs(needs)) if *needs == want),
@@ -471,8 +536,8 @@ fn what_is_refused_is_refused_as_mke2fs_writes_it() {
 #[test]
 #[cfg(unix)]
 fn what_is_small_enough_to_be_in_the_inode_is_read_from_it() {
-    let Some(mkfs) = tool("mkfs.ext4") else {
-        eprintln!("mkfs.ext4 cannot be run here: data in the inode is not checked against it");
+    let Some(mkfs) = mkfs_filling("ext4", "inline") else {
+        eprintln!("mkfs.ext4 cannot fill one here: data in the inode is not checked against it");
         return;
     };
     let s = Scratch::new("inline");
@@ -546,8 +611,8 @@ fn what_is_small_enough_to_be_in_the_inode_is_read_from_it() {
 /// partitions, and a partition holds a file system.
 #[test]
 fn a_file_system_in_a_partition_of_a_card_is_read_through_it() {
-    let Some(mkfs) = tool("mkfs.ext4") else {
-        eprintln!("mkfs.ext4 cannot be run here: the layering is not checked");
+    let Some(mkfs) = mkfs_filling("ext4", "in a partition") else {
+        eprintln!("mkfs.ext4 cannot fill one here: the layering is not checked");
         return;
     };
     let s = Scratch::new("in a partition");
@@ -606,8 +671,8 @@ fn a_file_system_in_a_partition_of_a_card_is_read_through_it() {
 #[test]
 #[cfg(unix)]
 fn the_extended_attributes_of_an_inode_are_read() {
-    let Some(mkfs) = tool("mkfs.ext4") else {
-        eprintln!("mkfs.ext4 cannot be run here: extended attributes are not checked against it");
+    let Some(mkfs) = mkfs_filling("ext4", "xattrs") else {
+        eprintln!("mkfs.ext4 cannot fill one here: extended attributes are not checked against it");
         return;
     };
     let Some(debugfs) = tool("debugfs") else {
