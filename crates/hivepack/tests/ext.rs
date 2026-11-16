@@ -117,6 +117,12 @@ enum Thing {
 
 /// A folder of files to put into a file system, and what should come back
 /// out of it.
+///
+/// Only where the system this is built for has symbolic links and names
+/// that are bytes, which is where `mke2fs` is as well. What is read out of
+/// an image rather than put into one is checked everywhere: the half built
+/// byte by byte holds links and a name that is not UTF-8 too.
+#[cfg(unix)]
 fn a_tree(at: &Path) -> BTreeMap<Vec<u8>, Thing> {
     let mut want: BTreeMap<Vec<u8>, Thing> = BTreeMap::new();
     let mut file = |path: &str, bytes: Vec<u8>| {
@@ -216,6 +222,7 @@ fn what_it_holds<D: Disk>(fs: &Ext<D>) -> BTreeMap<Vec<u8>, Thing> {
 
 /// A tree through `mke2fs -d`, which puts a folder into a new file system,
 /// and then read back.
+#[cfg(unix)]
 fn through_mkfs(kind: &str, options: &[&str]) {
     let what = format!("{kind} {}", options.join(" "));
     let Some(mkfs) = tool(&format!("mkfs.{kind}")) else {
@@ -257,6 +264,7 @@ fn through_mkfs(kind: &str, options: &[&str]) {
 
 /// What `debugfs` says about the same file system: the inode of a few
 /// paths, and the bytes of a file it dumps itself.
+#[cfg(unix)]
 fn against_debugfs<D: Disk>(what: &str, image: &Path, fs: &Ext<D>) {
     let Some(debugfs) = tool("debugfs") else {
         eprintln!("debugfs cannot be run here: {what} is not checked against it");
@@ -331,11 +339,13 @@ fn against_debugfs<D: Disk>(what: &str, image: &Path, fs: &Ext<D>) {
 }
 
 #[test]
+#[cfg(unix)]
 fn an_ext4_file_system_reads_as_the_tree_that_went_into_it() {
     through_mkfs("ext4", &["-b", "1024"]);
 }
 
 #[test]
+#[cfg(unix)]
 fn an_ext2_file_system_reads_as_the_tree_that_went_into_it() {
     // No journal, no extents: the block numbers in the inode and the
     // indirect blocks they lead to, which is what ext2 had.
@@ -343,6 +353,7 @@ fn an_ext2_file_system_reads_as_the_tree_that_went_into_it() {
 }
 
 #[test]
+#[cfg(unix)]
 fn an_ext3_file_system_reads_as_the_tree_that_went_into_it() {
     through_mkfs("ext3", &["-b", "1024"]);
 }
@@ -353,6 +364,7 @@ fn an_ext3_file_system_reads_as_the_tree_that_went_into_it() {
 /// ext4 whose files are mapped as ext2's were; a directory record that says
 /// nothing about what it names; and blocks of 1, 2 and 4 KiB.
 #[test]
+#[cfg(unix)]
 fn the_layouts_a_file_system_may_have_are_each_read() {
     for (kind, options) in [
         ("ext2", vec!["-b", "1024", "-I", "128"]),
