@@ -11,6 +11,7 @@ The crate's own code is under the MIT license ([LICENSE](LICENSE)). Each port ke
 | `crypto` | MIT | [src/crypto/LICENSE](src/crypto/LICENSE) |
 | `deflate` | Zlib AND MIT (libdeflate's compressor, `deflate::Compressor`) | [src/deflate/LICENSE](src/deflate/LICENSE), [src/deflate/libdeflate/LICENSE](src/deflate/libdeflate/LICENSE) |
 | `extract` | MIT AND Unicode-3.0 | [LICENSE](LICENSE), [src/extract/LICENSE-UNICODE](src/extract/LICENSE-UNICODE) |
+| `image` | MIT, the crate's own: nothing is ported, as a partition table has no library behind it | [LICENSE](LICENSE) |
 | `iso` | BSD-2-Clause | [src/iso/LICENSE](src/iso/LICENSE) |
 | `lz4` | BSD-2-Clause | [src/lz4/LICENSE](src/lz4/LICENSE) |
 | `lzo` | MIT | [src/lzo/LICENSE](src/lzo/LICENSE) |
