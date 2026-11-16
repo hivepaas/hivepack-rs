@@ -18,7 +18,7 @@
 //! | [`crypto`] | `crypto` | the cryptography of the formats, behind one interface |
 //! | [`deflate`] | `deflate` | Deflate, zlib, gzip (zlib 1.3.2) |
 //! | [`extract`] | `extract` | extracting archives to disk, safe by default |
-//! | [`image`] | `image` | disk images: the disk (raw, VHD, QCOW2, VHDX), and its partitions (MBR, GPT) |
+//! | [`image`] | `image` | disk images: the disk (raw, VHD, QCOW2, VHDX, VMDK), and its partitions (MBR, GPT) |
 //! | [`iso`] | `iso` | ISO 9660 images |
 //! | [`lz4`] | `lz4` | LZ4 (liblz4 1.10.0) |
 //! | [`lzo`] | `lzo` | LZO1X blocks, decompression (lzokay; liblzo2 2.10's results) |

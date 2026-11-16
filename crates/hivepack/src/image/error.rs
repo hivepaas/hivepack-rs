@@ -57,6 +57,15 @@ pub enum Error {
     /// that is neither 512 bytes nor 4096, or metadata that does not say
     /// what the disk is.
     VhdxSays,
+    /// A VMDK says a layout that cannot be read: a grain size the format
+    /// does not have, a table that is not on the file, a descriptor naming
+    /// no extent at all or more than are read, or a stream of compressed
+    /// grains whose footer is not where it has to be.
+    VmdkSays,
+    /// A VMDK's descriptor names an extent as a path rather than as a name
+    /// beside it. Reading it would be reading a file the descriptor chose,
+    /// which is refused however the path reads.
+    VmdkElsewhere,
     /// An image that needs something this does not do. Each of these would
     /// otherwise be read as a disk of holes, so none is passed over.
     Needs(Unsupported),
@@ -72,6 +81,10 @@ pub enum Unsupported {
     Backing,
     /// The data in a file of its own, this one holding only the tables.
     ExternalData,
+    /// The files beside it, which hold the disk a descriptor only
+    /// describes: a reader of one file cannot reach them, and
+    /// [`Vmdk::beside`](super::Vmdk::beside), which is given a path, can.
+    Beside,
     /// Encryption of the image's own, rather than of a layer around it.
     Encrypted,
     /// The image is marked as damaged by whatever last wrote it.
@@ -93,6 +106,7 @@ impl fmt::Display for Unsupported {
         f.write_str(match self {
             Unsupported::Backing => "another image behind it",
             Unsupported::ExternalData => "its data in a file of its own",
+            Unsupported::Beside => "the files beside it, which hold the disk",
             Unsupported::Encrypted => "to be decrypted",
             Unsupported::Corrupt => "repairing, as it is marked damaged",
             Unsupported::ExtendedL2 => "subclusters",
@@ -129,6 +143,10 @@ impl fmt::Display for Error {
                 write!(f, "the VHDX's headers and tables fail their own CRC-32C")
             }
             Error::VhdxSays => write!(f, "the VHDX says a layout it cannot have"),
+            Error::VmdkSays => write!(f, "the VMDK says a layout it cannot have"),
+            Error::VmdkElsewhere => {
+                write!(f, "the VMDK names an extent somewhere other than beside it")
+            }
             Error::Needs(what) => write!(f, "the image needs {what}, which is not read"),
         }
     }

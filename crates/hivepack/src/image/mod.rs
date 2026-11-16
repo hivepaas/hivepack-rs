@@ -11,9 +11,10 @@
 //! `std::fs::File` is one. A container keeps a disk in less room than it is
 //! long, and presents one, so the partitions of any of them are read as a
 //! disk's are: [`Vhd`] for a VHD image (`.vhd`, QEMU's `vpc`), [`Qcow2`] for
-//! QEMU's own, compressed clusters and all, and [`Vhdx`] for the one Hyper-V
-//! and WSL2 write, which alone says what a sector is on the disk it holds.
-//! VMDK is not read yet, nor is any of the file systems a partition holds.
+//! QEMU's own, compressed clusters and all, [`Vhdx`] for the one Hyper-V and
+//! WSL2 write, which alone says what a sector is on the disk it holds, and
+//! [`Vmdk`] for VMware's, which is one file or a descriptor naming several.
+//! No file system a partition holds is read yet.
 //!
 //! Nothing in this module is a port. A master boot record's layout is the
 //! one every system has agreed on since MS-DOS, and a GUID partition
@@ -46,6 +47,7 @@ mod partition;
 mod qcow2;
 mod vhd;
 mod vhdx;
+mod vmdk;
 
 pub use disk::{Disk, Part};
 pub use error::{Error, Unsupported};
@@ -53,6 +55,7 @@ pub use partition::{Kind, Partition, Table};
 pub use qcow2::Qcow2;
 pub use vhd::Vhd;
 pub use vhdx::Vhdx;
+pub use vmdk::Vmdk;
 
 /// The sector sizes a table's numbers are counted in: what every disk has
 /// had, and what a disk that gave up 512-byte sectors has.
