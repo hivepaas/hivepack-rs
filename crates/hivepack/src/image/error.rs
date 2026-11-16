@@ -48,6 +48,15 @@ pub enum Error {
     /// format does not have, a table that is not on the file, or one that
     /// does not reach the whole disk.
     Qcow2Says,
+    /// A VHDX's headers, or both of its region tables, fail their own
+    /// CRC-32C: neither copy of what says where the image's parts are can
+    /// be trusted.
+    VhdxCheck,
+    /// A VHDX says a layout that cannot be read: a block size the format
+    /// does not have, a region or an item that is not on the file, a sector
+    /// that is neither 512 bytes nor 4096, or metadata that does not say
+    /// what the disk is.
+    VhdxSays,
     /// An image that needs something this does not do. Each of these would
     /// otherwise be read as a disk of holes, so none is passed over.
     Needs(Unsupported),
@@ -72,6 +81,9 @@ pub enum Unsupported {
     /// Clusters compressed with Zstandard, in a build without hivepack's
     /// `zstd` feature.
     Zstd,
+    /// Entries written to a VHDX's log and never applied: what they say
+    /// belongs in its tables, and putting it there is writing.
+    Log,
     /// Something the image says it needs that is not known here at all.
     Feature,
 }
@@ -85,6 +97,7 @@ impl fmt::Display for Unsupported {
             Unsupported::Corrupt => "repairing, as it is marked damaged",
             Unsupported::ExtendedL2 => "subclusters",
             Unsupported::Zstd => "Zstandard, which this build leaves out",
+            Unsupported::Log => "its log applied, which is a write",
             Unsupported::Feature => "a feature this does not know",
         })
     }
@@ -112,6 +125,10 @@ impl fmt::Display for Error {
             Error::VhdCheck => write!(f, "the VHD's dynamic header fails its own checksum"),
             Error::VhdSays => write!(f, "the VHD says a layout it cannot have"),
             Error::Qcow2Says => write!(f, "the QCOW2 image says a layout it cannot have"),
+            Error::VhdxCheck => {
+                write!(f, "the VHDX's headers and tables fail their own CRC-32C")
+            }
+            Error::VhdxSays => write!(f, "the VHDX says a layout it cannot have"),
             Error::Needs(what) => write!(f, "the image needs {what}, which is not read"),
         }
     }
