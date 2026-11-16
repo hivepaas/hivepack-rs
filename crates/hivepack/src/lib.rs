@@ -19,6 +19,7 @@
 //! | [`deflate`] | `deflate` | Deflate, zlib, gzip (zlib 1.3.2) |
 //! | [`extract`] | `extract` | extracting archives to disk, safe by default |
 //! | [`image`] | `image` | disk images: the disk (raw, VHD, QCOW2, VHDX, VMDK), and its partitions (MBR, GPT) |
+//! | [`fat`] | `fat` | FAT12, FAT16 and FAT32 file systems, with VFAT long names, reading |
 //! | [`iso`] | `iso` | ISO 9660 images |
 //! | [`lz4`] | `lz4` | LZ4 (liblz4 1.10.0) |
 //! | [`lzo`] | `lzo` | LZO1X blocks, decompression (lzokay; liblzo2 2.10's results) |
@@ -68,6 +69,8 @@ pub mod crypto;
 pub mod deflate;
 #[cfg(feature = "extract")]
 pub mod extract;
+#[cfg(feature = "fat")]
+pub mod fat;
 #[cfg(feature = "extract")]
 mod hidden;
 #[cfg(feature = "image")]
