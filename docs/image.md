@@ -2,13 +2,16 @@
 
 `hivepack::image` reads what a disk image holds: the block device in it, and the partitions the table at its start names. It is the layer every other part of a disk image stands on, and it is **not a port** — there is no library behind a partition table. A master boot record's layout is the one every system has agreed on since MS-DOS, and a GUID partition table's is the UEFI specification's (version 2.10, §5.3, "GPT Disk Layout"). The repository's own MIT license covers the module, which is why it has no `LICENSE` of its own, unlike the ports beside it.
 
-What is **not** here yet, and the order it comes in, is in [issue #225](https://github.com/hivepaas/hivepack-rs/issues/225): the containers that keep a disk in less room than it is long (VHD, QCOW2, VHDX, VMDK, each ported from QEMU's block driver for it), and then the file systems a partition holds (FAT, ext2/3/4, NTFS). On its own, this module reads a raw image — an `.img`, a `.bin`, a `dd` of a card — and says where each partition is.
+It reads a raw image — an `.img`, a `.bin`, a `dd` of a card — and **VHD** (`.vhd`, QEMU's `vpc`), the first of the containers that keep a disk in less room than it is long. What is **not** here yet, and the order it comes in, is in [issue #225](https://github.com/hivepaas/hivepack-rs/issues/225): QCOW2, VHDX and VMDK, and then the file systems a partition holds (FAT, ext2/3/4, NTFS).
+
+**None of the containers is a port either**, and that is a choice worth writing down. QEMU's block drivers are the obvious reference and are GPL-2.0, which a module ported from them would carry — hivepack is otherwise MIT and BSD, and `rar` alone is an exception. All four formats have published specifications instead: Microsoft's *Virtual Hard Disk Image Format Specification* and *VHDX Format Specification*, both under its Open Specification Promise; QEMU's own `docs/interop/qcow2.txt`, which is an interoperability specification written for other programs to implement; and VMware's *Virtual Disk Format*. So each is implemented from its specification and checked against `qemu-img`, which is a tool that is run, not code that is copied. NTFS is the one layer where this will not work: it has no published specification, and the only references are GPL-2.0 (ntfs-3g, and the kernel's ntfs3).
 
 ## What it gives
 
 - **A `Disk`** is a size and reads at offsets, never a position, so one disk can be read from several threads, as the file systems inside it will be. `std::fs::File`, `[u8]` and `Vec<u8>` are disks; a container will be one over another.
 - **`partitions(&disk)`** answers with the table, the sector size its numbers are counted in, and the partitions in the order the table holds them — or with **none**, for a disk that has no table at all. A file system written straight to a disk has none, and so has a file that is not a disk image: that is not an error.
 - **`partitions_in(&disk, sector)`** is the same, in sectors the caller gives: 512 or more, a power of two.
+- **`Vhd`** is the disk inside a VHD image, and a `Disk` itself, so the partitions of one are read as any disk's are. A fixed image is the file with its footer taken off; one that grows is read through its table of blocks, and a block that was never written reads as zeroes.
 - **`Part`** is one partition as a disk of its own. What reads the file system in it sees nothing of the disk before it and nothing past its end.
 
 ## The rules it follows
@@ -25,12 +28,24 @@ What is **not** here yet, and the order it comes in, is in [issue #225](https://
   A disk whose sectors are its own is read by `partitions_in(&disk, sector)`, for a caller that knows the size from somewhere else. That somewhere is the container: VHDX records the logical sector size, VHD's geometry is in 512-byte sectors, and QCOW2 says nothing — so this is the hook the containers will hang on when they arrive.
 - **What a partition holds is what the table says it holds, which is not what is in it.** `Kind::says` names the types met on a disk anyone opens, and answers nothing for the rest; what is in a partition is told by reading it.
 
+## What a VHD is, of what matters to read one
+
+- **The footer is at the end of the file**, 512 bytes of it, and every number in a VHD is big-endian. An image that grows keeps a copy of the footer at the start, which is read when the one at the end does not hold: its checksum — the ones' complement of the sum of its bytes — is what says whether it does, and is what tells a VHD from a file that merely starts with `conectix`.
+- **A fixed image is the disk itself**, the footer apart. One that grows has a dynamic header (`cxsparse`, 1024 bytes) and a table of 4-byte entries, one for each block of the disk, each saying in sectors where that block's bitmap is. An entry of `0xFFFFFFFF` is a block that was never written, and reads as zeroes.
+- **Each block has a bitmap before it**, of one bit for each of its sectors, its length rounded up to a whole sector. A block is 2 MiB in every image anything writes.
+- **The bitmap is not what is read.** It says which sectors of a block have been written, and the specification leaves the rest undefined; a block is zeroes in the file where nothing was put in it, so the bitmap says nothing the data does not. QEMU does not read it either, which was measured rather than assumed: an image built with a block whose bitmap is all zeroes and whose data is not, converted by `qemu-img` 10.2.1, comes out as the data.
+- **The size is the footer's, not what the geometry multiplies out to.** A footer holds both, and an image can say two things. hivepack reads the size, which is what Microsoft's own tools write, and the only one of the two that can hold a disk larger than a CHS geometry can count — 65535 × 16 × 255 sectors, about 127 GiB. QEMU's rule was measured on an image made to disagree: for a creator of `win ` (Hyper-V and disk2vhd) or its own `qem2` it reads the footer's size, and only for its own older `qemu` images does it take the geometry, which those were written with anyway, so the two agree in every file that was not made to disagree.
+- **A VHD's disk is not as long as what went into it.** `qemu-img` rounds the size up to a whole cylinder of the geometry it writes — 8 MiB of data comes out as a disk of 8390656 bytes — and what is past the data reads as zeroes.
+- **A differencing image is refused.** It holds only what changed from another disk, and reading one means reading its parent, which is a file this cannot reach.
+
 ## How it is checked
 
-`crates/hivepack/tests/image_partitions.rs`.
+`crates/hivepack/tests/image_partitions.rs`, for the disk and its tables, and `crates/hivepack/tests/image_vhd.rs` for VHD.
 
 - **Tables built byte by byte**, with their CRC-32s computed as a tool computes them: a master boot record of two partitions; an extended partition holding two logical ones, numbered 5 and 6; a chain that leads back into itself; a GUID partition table whose names are UTF-16 and not all ASCII; a damaged primary header, where the copy at the end gives the same answer; both copies damaged; entries that fail their check; a partition past the end of the disk; a protective record with no table behind it; a GUID partition table counted in 4096-byte sectors; a master boot record read both as every tool reads one and in the sectors `partitions_in` is told, with the sector sizes no disk has refused; and files that have no table at all.
 - **Tables util-linux wrote**, where `sfdisk` is installed: the same two layouts, in a 16 MiB image, read back and compared with what was asked for — the partitions' places, sizes, types, names and bootable flags. Where it is not installed, the test says so and passes; the tables built by hand are what CI checks.
+- **VHD against `qemu-img`**, where it is installed: a disk with data and holes, as fixed and as growing, a disk of nothing but holes, and a disk full of data, each converted to VHD by `qemu-img` and then read twice — once by `qemu-img convert -O raw` and once by hivepack — with the two compared byte for byte, lengths included, and with what went in checked to be at the front of what comes out and the rounding's own bytes to be zeroes. And the partitions of a card's image read through a VHD, which is the layering working.
+- **VHD images built byte by byte**, so that CI checks the reader where `qemu-img` is not installed: an image that grows, read in pieces that do not line up with its blocks; the footer at the start read where the one at the end is ruined; a block whose bitmap is all zeroes; a footer whose size and geometry disagree; and the four ways one is refused — a file that is not a VHD, a dynamic header that fails its checksum, a differencing image, and a block size that is not a power of two.
 
 ## What a reader should know
 
@@ -38,3 +53,10 @@ What is **not** here yet, and the order it comes in, is in [issue #225](https://
 - A name is UTF-16, little-endian, to the first NUL. An empty name is none, not an empty string.
 - `Partition::id` is a GUID partition table's unique GUID for the partition, written as every system writes one (the first three fields with their bytes the other way about, as they are on the disk). A master boot record has none.
 - `bootable` is an entry's active flag in a master boot record, and the legacy BIOS bootable attribute (bit 2) in a GUID partition table. Neither says anything about what boots on a system that uses the other.
+
+### VHD
+
+- **Against `qemu-img`, byte for byte.** Four blocks of data whose bytes are the same nowhere, the second and fourth of them zeroes so that a tool leaves them unwritten, converted to a dynamic image and to a fixed one, and read back whole in runs of 512 bytes, of a block, of a block and a sector, and of 3587 bytes, so that reads landing on a block's start, on its end and across it are all made. The same data read out of the image by `qemu-img convert -O raw` is compared too, so that both agree about what is in it.
+- **The partitions of a VHD are the partitions of the disk that went into it**: a GPT written by `sfdisk` into a raw image, converted to a VHD, read through `Vhd` and compared with what was read from the raw.
+- **Images built byte by byte**, with their checksums as a tool computes them, so that CI checks the reader where `qemu-img` is not installed: blocks written and unwritten in turn, a read that crosses from one into the other, a fixed image, a footer at the end that does not hold (where the copy at the start is read), a differencing image, a dynamic header whose checksum fails, and a disk type nothing has.
+- Where `qemu-img` or `sfdisk` is not installed, those tests say so and pass.

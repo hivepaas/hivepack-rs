@@ -35,6 +35,18 @@ pub enum Error {
         /// What it was given.
         sector: u64,
     },
+    /// Not an image of the format it was opened as.
+    Unrecognized,
+    /// A VHD's dynamic header does not pass its own checksum. The footer
+    /// failing its own is `Unrecognized`, as that is what tells a VHD.
+    VhdCheck,
+    /// A VHD says a layout that cannot be read: a disk of no whole
+    /// sectors, a block size that is not a power of two, a table that is
+    /// not on the file or that does not reach the whole disk.
+    VhdSays,
+    /// A VHD that holds only what changed from another disk. Reading one
+    /// means reading its parent, which is a file this cannot reach.
+    Differencing,
 }
 
 impl fmt::Display for Error {
@@ -54,6 +66,15 @@ impl fmt::Display for Error {
             }
             Error::SectorSize { sector } => {
                 write!(f, "no disk has sectors of {sector} bytes")
+            }
+            Error::Unrecognized => write!(f, "not an image of that format"),
+            Error::VhdCheck => write!(f, "the VHD's dynamic header fails its own checksum"),
+            Error::VhdSays => write!(f, "the VHD says a layout it cannot have"),
+            Error::Differencing => {
+                write!(
+                    f,
+                    "a differencing VHD holds only what changed from its parent"
+                )
             }
         }
     }
