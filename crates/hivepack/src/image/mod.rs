@@ -14,7 +14,8 @@
 //! QEMU's own, compressed clusters and all, [`Vhdx`] for the one Hyper-V and
 //! WSL2 write, which alone says what a sector is on the disk it holds, and
 //! [`Vmdk`] for VMware's, which is one file or a descriptor naming several.
-//! No file system a partition holds is read yet.
+//! What a partition holds is read by a module of its own: `hivepack::fat`
+//! for FAT12, FAT16 and FAT32, behind the `fat` feature.
 //!
 //! Nothing in this module is a port. A master boot record's layout is the
 //! one every system has agreed on since MS-DOS, and a GUID partition

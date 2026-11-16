@@ -40,7 +40,7 @@ features = ["full", "memory"]
 # Every format but RAR, whose code is under UnRAR's license: see LICENSE.md.
 default = ["full"]
 
-full = ["age", "appimage", "ar", "bzip2", "cpio", "crypto", "deflate", "extract", "image", "iso", "lz4", "lzo", "open", "sevenz", "sign", "squashfs", "tar", "udf", "xar", "xz", "zip", "zstd"]
+full = ["age", "appimage", "ar", "bzip2", "cpio", "crypto", "deflate", "extract", "fat", "image", "iso", "lz4", "lzo", "open", "sevenz", "sign", "squashfs", "tar", "udf", "xar", "xz", "zip", "zstd"]
 
 # How much memory the program may still take, and a budget to choose threads
 # under it. Not a format, and so not in `full`: it calls the system through
@@ -93,6 +93,8 @@ extract = ["zip", "tar", "iso", "cpio", "xar", "open", "udf", "squashfs", "seven
 # A GUID partition table's header and entries carry a CRC-32, which is the
 # one hivepack already has; qcow2's compressed clusters will want the rest.
 image = ["deflate"]
+
+fat = ["image"]
 
 iso = ["deflate"]
 
