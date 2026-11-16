@@ -279,8 +279,30 @@ mod by_hand {
         footer[8..12].copy_from_slice(&2u32.to_be_bytes()); // features
         footer[12..16].copy_from_slice(&0x0001_0000u32.to_be_bytes());
         footer[16..24].copy_from_slice(&512u64.to_be_bytes()); // the header
+        // What wrote it, which no real tool leaves empty, and which is how
+        // a reader knows the size below is the disk's rather than the
+        // geometry: QEMU takes the geometry unless the name here is one it
+        // knows writes the size, and a name of zeroes is not one of them.
+        // Measured, with this image in six shapes: `qemu-img` 5.1.0, which
+        // CI's s390x container has, reads a disk of no sectors from a zero
+        // geometry and a 2 MiB one from a geometry saying half — and the
+        // size either way once this field says `win `. 10.2.1 reads the
+        // size whatever the geometry says, which is why this went unseen.
+        footer[28..32].copy_from_slice(b"win "); // what Hyper-V writes
         footer[40..48].copy_from_slice(&(size as u64).to_be_bytes()); // original
         footer[48..56].copy_from_slice(&(size as u64).to_be_bytes()); // current
+        // And a geometry that agrees with the size, so that a reader
+        // taking either answers the same: 16 heads of 16 sectors divide
+        // every size built here exactly.
+        let cylinders = u16::try_from(size / SECTOR / (16 * 16)).unwrap();
+        assert_eq!(
+            usize::from(cylinders) * 16 * 16 * SECTOR,
+            size,
+            "the geometry has to multiply out to the disk"
+        );
+        footer[56..58].copy_from_slice(&cylinders.to_be_bytes());
+        footer[58] = 16; // heads
+        footer[59] = 16; // sectors in a cylinder
         footer[60..64].copy_from_slice(&3u32.to_be_bytes()); // it grows
         checksum(&mut footer, 64);
         // The copy at the start, the header, then the table.
@@ -379,11 +401,14 @@ mod by_hand {
     /// own tools write and the only field that can hold a disk larger than
     /// CHS can count (65535 × 16 × 255 sectors, about 127 GiB).
     ///
-    /// QEMU reads the size too, for an image whose creator is `win ` (what
-    /// Hyper-V and disk2vhd write) or its own `qem2`; for its own older
-    /// `qemu` images it takes the geometry instead, and those it wrote with
-    /// the geometry's own size, so the two agree in every file that is not
-    /// made to disagree.
+    /// QEMU's rule turns on who wrote the image: it reads the size for a
+    /// creator it knows writes one — `win ` (Hyper-V and disk2vhd), its own
+    /// `qem2` — and takes the geometry for a creator it does not recognise.
+    /// Measured in six shapes: 5.1.0 reads a disk of no sectors from an
+    /// unrecognised creator and a zero geometry; 10.2.1 reads the size
+    /// whatever the geometry says. The builder above writes `win ` and an
+    /// agreeing geometry, so this image disagrees in the one field this
+    /// test is about and nowhere else.
     #[test]
     fn the_size_in_the_footer_is_what_the_disk_is() {
         let (mut image, _) = an_image(2, &[0]);
