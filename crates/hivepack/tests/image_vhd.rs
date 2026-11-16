@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use hivepack::image::{Disk, Error, Table, Vhd, partitions};
+use hivepack::image::{Disk, Error, Table, Unsupported, Vhd, partitions};
 
 /// A folder in the system's temporary one, removed when dropped.
 struct Scratch(PathBuf);
@@ -420,7 +420,10 @@ mod by_hand {
             let footer = &mut image[at - 60..at - 60 + 512];
             checksum(footer, 64);
         }
-        assert!(matches!(Vhd::open(&image), Err(Error::Differencing)));
+        assert!(matches!(
+            Vhd::open(&image),
+            Err(Error::Needs(Unsupported::Backing))
+        ));
         // A block size that is not a power of two.
         let (mut image, _) = an_image(2, &[0]);
         image[512 + 32..512 + 36].copy_from_slice(&3_000_000u32.to_be_bytes());
