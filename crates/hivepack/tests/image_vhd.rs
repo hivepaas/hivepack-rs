@@ -30,15 +30,22 @@ impl Drop for Scratch {
     }
 }
 
+/// `qemu-img`, if it is installed **and** can be run: a process cannot be
+/// started everywhere these tests run — CI's 32-bit container answers
+/// `ENOSYS` to `spawn` — so a test that needs a tool says so and passes
+/// rather than failing for the want of one. The images built by hand are
+/// what checks the reader there.
 fn qemu_img() -> Option<PathBuf> {
-    [
+    let path = [
         "/usr/bin/qemu-img",
         "/usr/local/bin/qemu-img",
         "/bin/qemu-img",
     ]
     .into_iter()
     .map(PathBuf::from)
-    .find(|p| p.exists())
+    .find(|p| p.exists())?;
+    Command::new(&path).arg("--version").output().ok()?;
+    Some(path)
 }
 
 fn run(tool: &Path, args: &[&str]) {
@@ -104,7 +111,7 @@ fn read_whole<D: Disk>(disk: &D) -> Vec<u8> {
 /// is zeroes, which is checked too.
 fn through_qemu(what: &str, raw: &[u8], format: &str, options: &[&str]) {
     let Some(tool) = qemu_img() else {
-        eprintln!("qemu-img is not installed: {what} is not checked against it");
+        eprintln!("qemu-img cannot be run here: {what} is not checked against it");
         return;
     };
     let s = Scratch::new(what);
@@ -198,7 +205,7 @@ fn a_disk_whose_data_is_everywhere_reads_whole() {
 #[test]
 fn the_partitions_of_a_disk_in_a_vhd_are_its_own() {
     let Some(tool) = qemu_img() else {
-        eprintln!("qemu-img is not installed: partitions in a VHD are not checked");
+        eprintln!("qemu-img cannot be run here: partitions in a VHD are not checked");
         return;
     };
     let s = Scratch::new("partitions");
