@@ -380,9 +380,12 @@ fn the_tables_util_linux_writes_are_read_as_it_names_them() {
             child.wait().unwrap().success(),
             "sfdisk wrote no {label:?} table"
         );
-        let found = partitions(&std::fs::File::open(&image).unwrap())
-            .unwrap()
-            .unwrap_or_else(|| panic!("no table where sfdisk wrote a {label:?} one"));
+        let read = partitions(&std::fs::File::open(&image).unwrap()).unwrap();
+        assert!(
+            read.is_some(),
+            "no table where sfdisk wrote a {label:?} one"
+        );
+        let found = read.unwrap();
         assert_eq!(found.table, label);
         assert_eq!(found.sector, 512);
         assert_eq!(found.partitions.len(), 2, "{label:?}");
