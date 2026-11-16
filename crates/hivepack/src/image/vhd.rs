@@ -10,7 +10,7 @@
 use std::io;
 
 use super::disk::Disk;
-use super::error::Error;
+use super::error::{Error, Unsupported};
 
 /// The footer's cookie, and the dynamic header's.
 const FOOTER_COOKIE: &[u8; 8] = b"conectix";
@@ -104,7 +104,7 @@ impl<D: Disk> Vhd<D> {
                     grows: Some(grows),
                 })
             }
-            DIFFERENCING => Err(Error::Differencing),
+            DIFFERENCING => Err(Error::Needs(Unsupported::Backing)),
             _ => Err(Error::VhdSays),
         }
     }

@@ -44,9 +44,50 @@ pub enum Error {
     /// sectors, a block size that is not a power of two, a table that is
     /// not on the file or that does not reach the whole disk.
     VhdSays,
-    /// A VHD that holds only what changed from another disk. Reading one
-    /// means reading its parent, which is a file this cannot reach.
-    Differencing,
+    /// A QCOW2 image says a layout that cannot be read: a cluster size the
+    /// format does not have, a table that is not on the file, or one that
+    /// does not reach the whole disk.
+    Qcow2Says,
+    /// An image that needs something this does not do. Each of these would
+    /// otherwise be read as a disk of holes, so none is passed over.
+    Needs(Unsupported),
+}
+
+/// What an image needs that is not read, which is why it is refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Unsupported {
+    /// Another image behind this one: what is not in it is in that one,
+    /// named by a path written when this one was made. A differencing VHD
+    /// and a QCOW2 image with a backing file are both this.
+    Backing,
+    /// The data in a file of its own, this one holding only the tables.
+    ExternalData,
+    /// Encryption of the image's own, rather than of a layer around it.
+    Encrypted,
+    /// The image is marked as damaged by whatever last wrote it.
+    Corrupt,
+    /// Clusters divided into subclusters, whose tables are twice as wide.
+    ExtendedL2,
+    /// Clusters compressed with Zstandard, in a build without hivepack's
+    /// `zstd` feature.
+    Zstd,
+    /// Something the image says it needs that is not known here at all.
+    Feature,
+}
+
+impl fmt::Display for Unsupported {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Unsupported::Backing => "another image behind it",
+            Unsupported::ExternalData => "its data in a file of its own",
+            Unsupported::Encrypted => "to be decrypted",
+            Unsupported::Corrupt => "repairing, as it is marked damaged",
+            Unsupported::ExtendedL2 => "subclusters",
+            Unsupported::Zstd => "Zstandard, which this build leaves out",
+            Unsupported::Feature => "a feature this does not know",
+        })
+    }
 }
 
 impl fmt::Display for Error {
@@ -70,12 +111,8 @@ impl fmt::Display for Error {
             Error::Unrecognized => write!(f, "not an image of that format"),
             Error::VhdCheck => write!(f, "the VHD's dynamic header fails its own checksum"),
             Error::VhdSays => write!(f, "the VHD says a layout it cannot have"),
-            Error::Differencing => {
-                write!(
-                    f,
-                    "a differencing VHD holds only what changed from its parent"
-                )
-            }
+            Error::Qcow2Says => write!(f, "the QCOW2 image says a layout it cannot have"),
+            Error::Needs(what) => write!(f, "the image needs {what}, which is not read"),
         }
     }
 }

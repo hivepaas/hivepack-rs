@@ -41,11 +41,13 @@ mod error;
 mod gpt;
 mod mbr;
 mod partition;
+mod qcow2;
 mod vhd;
 
 pub use disk::{Disk, Part};
-pub use error::Error;
+pub use error::{Error, Unsupported};
 pub use partition::{Kind, Partition, Table};
+pub use qcow2::Qcow2;
 pub use vhd::Vhd;
 
 /// The sector sizes a table's numbers are counted in: what every disk has
