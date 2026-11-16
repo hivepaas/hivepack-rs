@@ -35,6 +35,10 @@ pub enum Error {
     /// A directory whose records run past the end of a block, or whose
     /// record says a length that would not move on.
     Records,
+    /// The extended attributes of an inode cannot be read: a block with no
+    /// signature of its own, an entry that runs past the room it is in, an
+    /// entry of no name, or a value that is not where it says.
+    Xattrs,
     /// A directory of more entries, or more bytes, than are read.
     TooMany,
     /// Directories inside directories past what is walked, or a directory
@@ -104,6 +108,7 @@ impl fmt::Display for Error {
             }
             Error::ExtentTree => write!(f, "the extent tree cannot be walked"),
             Error::Records => write!(f, "a directory's records run past its blocks"),
+            Error::Xattrs => write!(f, "the extended attributes of an inode cannot be read"),
             Error::TooMany => write!(f, "a directory holds more than is read"),
             Error::TooDeep => write!(f, "directories inside directories past what is walked"),
             Error::NotADirectory => write!(f, "that is not a directory"),

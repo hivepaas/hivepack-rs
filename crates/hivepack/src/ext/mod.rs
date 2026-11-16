@@ -4,8 +4,8 @@
 //! of a disk image, or a file that holds one as it is — and reads its
 //! directories, its inodes and its files: the block numbers ext2 had and
 //! the extents ext4 brought, files with holes, symbolic links, devices,
-//! what each inode says about owner, mode, links and times, and the whole
-//! tree. This is where most of what anyone wants out of a disk image is: a
+//! what each inode says about owner, mode, links and times, the extended
+//! attributes kept beside it, and the whole tree. This is where most of what anyone wants out of a disk image is: a
 //! Raspberry Pi's root, WSL2's `ext4.vhdx`, a Linux machine's QCOW2.
 //!
 //! Nothing here is a port. The layout is what the kernel's own
@@ -39,6 +39,7 @@ mod dir;
 mod error;
 mod inode;
 mod sb;
+mod xattr;
 
 use std::collections::BTreeSet;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -51,6 +52,7 @@ pub use dir::Entry;
 pub use error::{Error, Unsupported};
 pub use inode::{Node, Time, What};
 pub use sb::Kind;
+pub use xattr::Xattr;
 
 /// Which inode the root directory is, in every ext file system there has
 /// ever been.
@@ -146,6 +148,59 @@ impl<D: Disk> Ext<D> {
 
     /// One inode, by its number.
     pub fn node(&self, ino: u32) -> Result<Node, Error> {
+        Node::of(&self.inode_bytes(ino)?, ino, &self.sb)
+    }
+
+    /// The extended attributes of an inode: the names and values kept
+    /// beside it, which is where a system keeps a file's SELinux label, the
+    /// capabilities a program is given, and its access control lists.
+    ///
+    /// The ones that fit are in the room left over in the inode, and the
+    /// rest are in a block of its own; both are read, in that order, as a
+    /// system reading them does. A value the file system gave an inode of
+    /// its own is read from there.
+    pub fn xattrs(&self, node: &Node) -> Result<Vec<Xattr>, Error> {
+        let mut found = Vec::new();
+        // In the inode, where it is long enough to have room left over and
+        // says how much of itself was written.
+        if self.sb.inode_size > 128 && node.extra_isize >= 4 {
+            let raw = self.inode_bytes(node.ino)?;
+            let at = 128 + usize::from(node.extra_isize);
+            if at + xattr::INODE_HEADER <= raw.len() && sb::le32(&raw, at) == xattr::MAGIC {
+                // Inside an inode an entry counts where its value is from
+                // the first entry; in a block, from the block's own start.
+                let from = at + xattr::INODE_HEADER;
+                for one in xattr::entries(&raw, from, from)? {
+                    found.push(self.held(&raw, one)?);
+                }
+            }
+        }
+        // And in a block of its own, where there are more than fit.
+        if node.xattrs != 0 {
+            let raw = self.block(node.xattrs)?;
+            if sb::le32(&raw, 0) != xattr::MAGIC {
+                return Err(Error::Xattrs);
+            }
+            for one in xattr::entries(&raw, xattr::BLOCK_HEADER, 0)? {
+                found.push(self.held(&raw, one)?);
+            }
+        }
+        Ok(found)
+    }
+
+    /// One extended attribute by its whole name, or none where the inode
+    /// has no such one.
+    pub fn xattr(&self, node: &Node, name: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, Error> {
+        let name = name.as_ref();
+        Ok(self
+            .xattrs(node)?
+            .into_iter()
+            .find(|found| found.name == name)
+            .map(|found| found.value))
+    }
+
+    /// The bytes of one inode, as they lie in the table.
+    fn inode_bytes(&self, ino: u32) -> Result<Vec<u8>, Error> {
         if ino == 0 || ino > self.sb.inodes {
             return Err(Error::NoSuchInode { ino });
         }
@@ -158,7 +213,26 @@ impl<D: Disk> Ext<D> {
         let mut raw = vec![0u8; self.sb.inode_size as usize];
         self.disk
             .read_exact_at(at + into * u64::from(self.sb.inode_size), &mut raw)?;
-        Node::of(&raw, ino, &self.sb)
+        Ok(raw)
+    }
+
+    /// The value of an entry: out of the room it was found in, or out of
+    /// the inode the file system put it in instead.
+    fn held(&self, raw: &[u8], one: xattr::Found) -> Result<Xattr, Error> {
+        let value = if one.inode == 0 {
+            raw.get(one.at..one.at + one.len)
+                .ok_or(Error::Xattrs)?
+                .to_vec()
+        } else {
+            // A value too long even for a block: the file system gives it
+            // an inode, and the value is that inode's data.
+            let node = self.node(one.inode)?;
+            self.data(&node, xattr::MOST_VALUE)?
+        };
+        Ok(Xattr {
+            name: one.name,
+            value,
+        })
     }
 
     /// The entries of a directory, in the order its records hold them.

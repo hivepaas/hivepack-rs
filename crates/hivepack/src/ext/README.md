@@ -2,7 +2,7 @@
 
 Reading ext2, ext3 and ext4 file systems in safe Rust, read-only.
 
-> **Status:** reads the directories, the inodes and the files of an ext file system on a [`Disk`](../image) — a partition of a card or of a disk image, or a file that holds one as it is. The block numbers ext2 kept in the inode and the indirect blocks after them, the trees of extents ext4 brought, files with holes (which read as zeroes, as what is in them is zeroes), both kinds of symbolic link, devices, pipes and sockets, hard links, names that are bytes rather than text, and what each inode says about owner, mode, links and times down to the nanosecond. Checked against trees put into file systems by `mke2fs -d` and read back out, against what `debugfs` reads of the same image, and against file systems built byte by byte that `e2fsck` is run over. Writing is not here and is not planned; NTFS is what is left of [issue #225](https://github.com/hivepaas/hivepack-rs/issues/225).
+> **Status:** reads the directories, the inodes and the files of an ext file system on a [`Disk`](../image) — a partition of a card or of a disk image, or a file that holds one as it is. The block numbers ext2 kept in the inode and the indirect blocks after them, the trees of extents ext4 brought, files with holes (which read as zeroes, as what is in them is zeroes), both kinds of symbolic link, devices, pipes and sockets, hard links, names that are bytes rather than text, what each inode says about owner, mode, links and times down to the nanosecond, and the extended attributes beside it, in the inode's own room and in a block. Checked against trees put into file systems by `mke2fs -d` and read back out, against what `debugfs` reads of the same image, and against file systems built byte by byte that `e2fsck` is run over. Writing is not here and is not planned; NTFS is what is left of [issue #225](https://github.com/hivepaas/hivepack-rs/issues/225).
 
 ```rust
 use std::io::Read;
@@ -32,6 +32,7 @@ A partition is read by giving it the partition: `Ext::open(Part::new(&disk, part
 - **`lookup_path("sub/file.txt")`** — by the bytes of each name. A symbolic link in the middle of a path is **not** followed.
 - **`file(&node)`** — the data, as `io::Read` and `io::Seek`. Blocks that follow one another are read in one go, and a hole reads as zeroes.
 - **`read_link(&node)`** — what a link points at, which is bytes.
+- **`xattrs(&node)`** and **`xattr(&node, name)`** — the extended attributes kept beside an inode, in the room left over in it and in a block of its own: a file's SELinux label, the capabilities a program is given, its access control lists. The name comes back whole, with the beginning the file system kept as a number put back on.
 - **`walk`** — every file and directory, each as a `Step` of a path, the record that named it and the inode behind it.
 
 **A name is bytes, not text.** Linux puts no meaning on a name's bytes beyond `/` and the byte that ends a string, so `Entry::name` is a `Vec<u8>` and a path is too; `Entry::name_text` makes text of one for showing, and loses what is not UTF-8.

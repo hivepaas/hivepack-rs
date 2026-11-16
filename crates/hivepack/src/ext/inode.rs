@@ -81,6 +81,13 @@ pub struct Node {
     /// The 60 bytes that say where the data is: block numbers, or the root
     /// of a tree of extents.
     pub(crate) map: [u8; 60],
+    /// The block the extended attributes that did not fit in the inode are
+    /// in, and 0 where there is none.
+    pub(crate) xattrs: u64,
+    /// How much of the inode past its first 128 bytes was written, which is
+    /// where what is left of it begins — the room the extended attributes
+    /// kept in the inode itself are in.
+    pub(crate) extra_isize: u16,
 }
 
 impl Node {
@@ -133,7 +140,11 @@ impl Node {
         } else {
             u64::from(le32(raw, 4))
         };
-        let blocks = u64::from(le32(raw, 28)) | (u64::from(le16(raw, 118)) << 32);
+        // The second half of the fields the first ext2 had no room for:
+        // how many blocks, then where the extended attributes are, then
+        // the owner and the group.
+        let blocks = u64::from(le32(raw, 28)) | (u64::from(le16(raw, 116)) << 32);
+        let xattrs = u64::from(le32(raw, 104)) | (u64::from(le16(raw, 118)) << 32);
         let mut map = [0u8; 60];
         map.copy_from_slice(&raw[40..100]);
         Ok(Node {
@@ -151,6 +162,8 @@ impl Node {
             created: if has(144, 4) { time(144, 148) } else { None },
             flags,
             map,
+            xattrs,
+            extra_isize: extra as u16,
         })
     }
 

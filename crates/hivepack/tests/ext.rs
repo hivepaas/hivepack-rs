@@ -509,6 +509,145 @@ fn a_file_system_in_a_partition_of_a_card_is_read_through_it() {
     assert_eq!(data, b"in a partition\n");
 }
 
+/// The extended attributes of an inode, which is where a system keeps a
+/// file's SELinux label, the capabilities a program is given and its access
+/// control lists.
+///
+/// `debugfs` is what sets them here, because `setfattr` is not installed
+/// everywhere and `mke2fs -d` can only copy what the folder it is given
+/// already has. What it writes always goes in a block of its own, never in
+/// the room left over in the inode — so this checks the block, and the file
+/// systems built by hand below check the room in the inode.
+#[test]
+#[cfg(unix)]
+fn the_extended_attributes_of_an_inode_are_read() {
+    let Some(mkfs) = tool("mkfs.ext4") else {
+        eprintln!("mkfs.ext4 cannot be run here: extended attributes are not checked against it");
+        return;
+    };
+    let Some(debugfs) = tool("debugfs") else {
+        eprintln!("debugfs cannot be run here: extended attributes are not checked against it");
+        return;
+    };
+    let s = Scratch::new("xattrs");
+    let from = s.0.join("tree");
+    std::fs::create_dir_all(&from).unwrap();
+    std::fs::write(from.join("a.txt"), b"one\n").unwrap();
+    std::fs::write(from.join("b.txt"), b"two\n").unwrap();
+    let image = s.0.join("fs.img");
+    std::fs::write(&image, vec![0u8; 16 << 20]).unwrap();
+    run(
+        &mkfs,
+        &[
+            "-q",
+            "-F",
+            "-b",
+            "1024",
+            "-I",
+            "256",
+            "-d",
+            from.to_str().unwrap(),
+            image.to_str().unwrap(),
+        ],
+    );
+
+    // A value of 300 bytes fits in a block and not in an inode, and one of
+    // a few bytes would fit either way; `debugfs` puts both in a block.
+    let long = "L".repeat(300);
+    let want: Vec<(&str, &str, String)> = vec![
+        ("a.txt", "user.comment", "a_small_value".to_owned()),
+        (
+            "a.txt",
+            "security.selinux",
+            "unconfined_u:object_r:user_home_t:s0".to_owned(),
+        ),
+        ("b.txt", "user.big", long.clone()),
+    ];
+    let big = s.0.join("big.val");
+    std::fs::write(&big, &long).unwrap();
+    for (path, name, value) in &want {
+        // A long value is given as a file, as its own argument would be.
+        let args: Vec<String> = if value.len() > 100 {
+            vec![
+                "-w".into(),
+                "-R".into(),
+                format!("ea_set -f {} /{path} {name}", big.to_str().unwrap()),
+                image.to_str().unwrap().into(),
+            ]
+        } else {
+            vec![
+                "-w".into(),
+                "-R".into(),
+                format!("ea_set /{path} {name} {value}"),
+                image.to_str().unwrap().into(),
+            ]
+        };
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        run(&debugfs, &borrowed);
+    }
+
+    let raw = std::fs::read(&image).unwrap();
+    let fs = Ext::open(&raw).unwrap();
+    for path in ["a.txt", "b.txt"] {
+        let node = fs.lookup_path(path).unwrap().unwrap();
+        let mine = fs.xattrs(&node).unwrap();
+        let mut want_here: Vec<(Vec<u8>, Vec<u8>)> = want
+            .iter()
+            .filter(|(at, _, _)| *at == path)
+            .map(|(_, name, value)| (name.as_bytes().to_vec(), value.as_bytes().to_vec()))
+            .collect();
+        let mut got: Vec<(Vec<u8>, Vec<u8>)> = mine
+            .iter()
+            .map(|x| (x.name.clone(), x.value.clone()))
+            .collect();
+        want_here.sort();
+        got.sort();
+        assert_eq!(got, want_here, "/{path}: the attributes that were set");
+
+        // What `debugfs` reads of the same inode, which is its own reader
+        // of the same bytes: the names it lists, in its own order.
+        let (ok, told) = said(
+            &debugfs,
+            &["-R", &format!("ea_list /{path}"), image.to_str().unwrap()],
+        );
+        assert!(ok, "debugfs could not list /{path}: {told}");
+        // It writes each attribute on a line of its own, indented, which
+        // is what tells them from the version it says first.
+        let mut theirs: Vec<String> = told
+            .lines()
+            .filter(|line| line.starts_with(' '))
+            .filter_map(|line| line.trim().split_once(" ("))
+            .map(|(name, _)| name.to_owned())
+            .collect();
+        theirs.sort();
+        let mut names: Vec<String> = mine.iter().map(|x| x.name_text().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, theirs, "/{path}: the names debugfs lists");
+
+        // And one value it reads with its own reader, for the one that is
+        // short enough to come back unescaped.
+        if path == "a.txt" {
+            let (ok, told) = said(
+                &debugfs,
+                &[
+                    "-R",
+                    &format!("ea_get /{path} user.comment"),
+                    image.to_str().unwrap(),
+                ],
+            );
+            assert!(ok, "{told}");
+            assert!(
+                told.contains("\"a_small_value\""),
+                "debugfs reads the value this reads: {told}"
+            );
+        }
+    }
+    // An inode with none has none, and is not an error.
+    let root = fs.root().unwrap();
+    assert!(fs.xattrs(&root).unwrap().is_empty());
+    assert!(fs.xattr(&root, "user.nothing").unwrap().is_none());
+}
+
 // --- File systems built byte by byte --------------------------------------
 
 /// What a file system built here is made of: one block group, blocks of
@@ -797,6 +936,68 @@ impl Build {
         (map, 1)
     }
 
+    /// Extended attributes in the room left over in the inode, which is
+    /// where the ones that fit go.
+    ///
+    /// An entry kept in an inode carries no hash: the file system hashes
+    /// only the ones in a block, which it may then share between inodes.
+    fn xattrs_in_inode(&mut self, ino: u32, attrs: &[(u8, &[u8], &[u8])]) {
+        assert!(self.inode_size > 128, "a 128-byte inode has no room left");
+        let at = (5 * BLOCK + (ino - 1) * self.inode_size) as usize;
+        let size = self.inode_size as usize;
+        let mut room = self.image[at..at + size].to_vec();
+        // What `write_node` wrote for how much of the inode was written.
+        let from = 128 + 32;
+        put32(&mut room, from, XATTR_MAGIC);
+        let first = from + 4;
+        let (mut entry, mut value) = (first, size);
+        for (index, name, bytes) in attrs {
+            value -= bytes.len().next_multiple_of(4);
+            assert!(
+                entry + 16 + name.len() + 4 <= value,
+                "no room in the inode for the attributes"
+            );
+            // Inside an inode, where the value is, is counted from the
+            // first entry rather than from the start of the room, and
+            // nothing kept in an inode is hashed.
+            one_xattr(&mut room, entry, (*index, name, bytes), value, first, false);
+            entry += (16 + name.len()).next_multiple_of(4);
+        }
+        self.image[at..at + size].copy_from_slice(&room);
+    }
+
+    /// Extended attributes in a block of their own, which is where the ones
+    /// that do not fit in the inode go. Each is hashed, and the block holds
+    /// a hash of the hashes, both of which `e2fsck` checks.
+    fn xattrs_in_block(&mut self, ino: u32, attrs: &[(u8, &[u8], &[u8])]) {
+        let block = self.alloc();
+        let mut raw = vec![0u8; BLOCK as usize];
+        put32(&mut raw, 0, XATTR_MAGIC);
+        // One inode points at it, and it is one block long.
+        put32(&mut raw, 4, 1);
+        put32(&mut raw, 8, 1);
+        let (mut entry, mut value) = (32usize, BLOCK as usize);
+        let mut block_hash = 0u32;
+        for (index, name, bytes) in attrs {
+            value -= bytes.len().next_multiple_of(4);
+            assert!(
+                entry + 16 + name.len() + 4 <= value,
+                "no room in a block for the attributes"
+            );
+            let hash = one_xattr(&mut raw, entry, (*index, name, bytes), value, 0, true);
+            block_hash = block_hash.rotate_left(16) ^ hash;
+            entry += (16 + name.len()).next_multiple_of(4);
+        }
+        put32(&mut raw, 16, block_hash);
+        self.write(block, &raw);
+        // The inode points at the block, and counts it among the blocks it
+        // takes, which `e2fsck` adds up for itself.
+        let at = (5 * BLOCK + (ino - 1) * self.inode_size) as usize;
+        put32(&mut self.image, at + 104, block);
+        let blocks = get32(&self.image, at + 28) + BLOCK / 512;
+        put32(&mut self.image, at + 28, blocks);
+    }
+
     /// The superblock, the group descriptor and the two bitmaps, once
     /// everything else is in: the whole image.
     fn finish(mut self) -> Vec<u8> {
@@ -863,6 +1064,11 @@ impl Build {
         // What it says it needs: records that say what they name, and
         // extents where the files are mapped that way. Nothing else, so
         // that what is read is the oldest layout there is.
+        // What it may have, which a reader need not know to read it: that
+        // inodes may have extended attributes. Without it `e2fsck` calls
+        // the block an inode points at for them rubbish, and will not
+        // count it among the blocks the inode takes either.
+        put32(&mut sb, 92, 0x8);
         put32(&mut sb, 96, 0x2 | if self.extents { 0x40 } else { 0 });
         put32(&mut sb, 100, 0x1);
         for (i, byte) in (0u8..16).enumerate() {
@@ -919,6 +1125,57 @@ fn extent(raw: &mut [u8], at: usize, (first, start, len): (u32, u32, u32)) {
     put32(raw, at + 8, start);
 }
 
+/// What a region of extended attributes begins with.
+const XATTR_MAGIC: u32 = 0xEA02_0000;
+
+/// One entry at `at`, with its value at `value_at`. What the entry says
+/// about where its value is, is counted from `base`: the first entry inside
+/// an inode, and the start of the block in a block.
+///
+/// `hashed` says whether to hash it, which only a block's entries are, and
+/// what comes back is the hash written, so that a block's own hash of its
+/// hashes can be built out of them.
+fn one_xattr(
+    raw: &mut [u8],
+    at: usize,
+    (index, name, value): (u8, &[u8], &[u8]),
+    value_at: usize,
+    base: usize,
+    hashed: bool,
+) -> u32 {
+    let hash = if hashed { xattr_hash(name, value) } else { 0 };
+    raw[at] = name.len() as u8;
+    raw[at + 1] = index;
+    put16(raw, at + 2, (value_at - base) as u16);
+    put32(raw, at + 8, value.len() as u32);
+    put32(raw, at + 12, hash);
+    raw[at + 16..at + 16 + name.len()].copy_from_slice(name);
+    raw[value_at..value_at + value.len()].copy_from_slice(value);
+    hash
+}
+
+/// The hash of one entry, as e2fsprogs computes it: the name a shift at a
+/// time, and then the value four bytes at a time, read as the little-endian
+/// numbers they lie as.
+fn xattr_hash(name: &[u8], value: &[u8]) -> u32 {
+    let mut hash = 0u32;
+    for byte in name {
+        hash = hash.rotate_left(5) ^ u32::from(*byte);
+    }
+    if !value.is_empty() {
+        let mut padded = value.to_vec();
+        padded.resize(value.len().next_multiple_of(4), 0);
+        for four in padded.as_chunks::<4>().0 {
+            hash = hash.rotate_left(16) ^ u32::from_le_bytes(*four);
+        }
+    }
+    hash
+}
+
+fn get32(raw: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(raw[at..at + 4].try_into().unwrap())
+}
+
 fn put16(raw: &mut [u8], at: usize, value: u16) {
     raw[at..at + 2].copy_from_slice(&value.to_le_bytes());
 }
@@ -926,6 +1183,14 @@ fn put16(raw: &mut [u8], at: usize, value: u16) {
 fn put32(raw: &mut [u8], at: usize, value: u32) {
     raw[at..at + 4].copy_from_slice(&value.to_le_bytes());
 }
+
+/// What the file systems built here keep beside their inodes: two in the
+/// room left over in the inode of `hello.txt`, where the ones that fit go,
+/// and two in a block of their own for `big.bin`, the first of them longer
+/// than any inode could have held.
+const IN_INODE: [(u8, &[u8], &[u8]); 2] = [(1, b"comment", b"small"), (4, b"thing", b"x")];
+const BIG: [u8; 300] = [b'L'; 300];
+const SELINUX: &[u8] = b"unconfined_u:object_r:user_home_t:s0";
 
 /// A file system with one of everything in it, built byte by byte.
 fn by_hand(inode_size: u32, extents: bool) -> (Vec<u8>, BTreeMap<Vec<u8>, Thing>) {
@@ -935,6 +1200,10 @@ fn by_hand(inode_size: u32, extents: bool) -> (Vec<u8>, BTreeMap<Vec<u8>, Thing>
     let short = b"a few bytes\n".to_vec();
     let hello = build.file(&short);
     want.insert(b"hello.txt".to_vec(), Thing::File(short));
+    // Attributes in the room left over in the inode, where it has any.
+    if inode_size > 128 {
+        build.xattrs_in_inode(hello, &IN_INODE);
+    }
 
     // Longer than the twelve numbers an inode holds and longer than one
     // block of numbers after them, so that all three levels of the map are
@@ -942,6 +1211,9 @@ fn by_hand(inode_size: u32, extents: bool) -> (Vec<u8>, BTreeMap<Vec<u8>, Thing>
     let big = pattern(300 * BLOCK as usize, 5);
     let big_ino = build.file(&big);
     want.insert(b"big.bin".to_vec(), Thing::File(big));
+    // And attributes in a block of their own, which is where the ones too
+    // long for an inode go.
+    build.xattrs_in_block(big_ino, &[(1, b"big", &BIG), (6, b"selinux", SELINUX)]);
 
     // A file of holes with three pieces in it, which is three extents.
     let piece = pattern(BLOCK as usize, 9);
@@ -1056,6 +1328,48 @@ fn a_file_system_built_by_hand_reads_as_it_was_built() {
             (1000, 1000, 0o644),
             "{what}"
         );
+
+        // The attributes in the room left over in the inode. A 128-byte
+        // inode has none to leave over, so it carries none.
+        let held: Vec<(Vec<u8>, Vec<u8>)> = fs
+            .xattrs(&node)
+            .unwrap()
+            .into_iter()
+            .map(|one| (one.name, one.value))
+            .collect();
+        let wanted: Vec<(Vec<u8>, Vec<u8>)> = if inode_size > 128 {
+            vec![
+                (b"user.comment".to_vec(), b"small".to_vec()),
+                (b"trusted.thing".to_vec(), b"x".to_vec()),
+            ]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(held, wanted, "{what}: kept in the inode");
+
+        // And the ones in a block of their own, the first of them longer
+        // than an inode could have held.
+        let big = fs.lookup_path("big.bin").unwrap().unwrap();
+        let held: Vec<(Vec<u8>, Vec<u8>)> = fs
+            .xattrs(&big)
+            .unwrap()
+            .into_iter()
+            .map(|one| (one.name, one.value))
+            .collect();
+        assert_eq!(
+            held,
+            vec![
+                (b"user.big".to_vec(), BIG.to_vec()),
+                (b"security.selinux".to_vec(), SELINUX.to_vec()),
+            ],
+            "{what}: kept in a block"
+        );
+        assert_eq!(
+            fs.xattr(&big, "security.selinux").unwrap().as_deref(),
+            Some(SELINUX),
+            "{what}: one by name"
+        );
+        assert!(fs.xattr(&big, "user.nothing").unwrap().is_none(), "{what}");
     }
 }
 
@@ -1131,6 +1445,60 @@ fn a_file_reads_the_same_in_pieces_of_any_size() {
     file.read_to_end(&mut end).unwrap();
     assert_eq!(end, bytes[bytes.len() - 1024..]);
     assert!(file.seek(SeekFrom::Current(-1_000_000)).is_err());
+}
+
+/// The fields the first ext2 had no room for lie one after another in the
+/// second half of the inode, two bytes each: how many blocks the file takes
+/// at 116, where its extended attributes are at 118, the owner at 120, the
+/// group at 122. Reading one of them where the next lies answers a number
+/// that belongs to something else — and it stays hidden, because a file
+/// system that needs neither high half writes zero in both.
+///
+/// So each is patched in and asked for by itself.
+#[test]
+fn the_high_halves_of_an_inode_are_read_where_each_lies() {
+    let (image, _) = by_hand(256, true);
+    let fs = Ext::open(&image).unwrap();
+    let node = fs.lookup_path("hello.txt").unwrap().unwrap();
+    let at = (5 * BLOCK + (node.ino - 1) * 256) as usize;
+    let was = node.blocks;
+    assert_eq!(
+        fs.xattrs(&node).unwrap().len(),
+        2,
+        "two in the inode's room"
+    );
+
+    // How many blocks it takes, in the half at 116.
+    let mut changed = image.clone();
+    put16(&mut changed, at + 116, 1);
+    let fs = Ext::open(&changed).unwrap();
+    let node = fs.lookup_path("hello.txt").unwrap().unwrap();
+    assert_eq!(node.blocks, was + (1 << 32), "the blocks are at 116");
+    assert_eq!(fs.xattrs(&node).unwrap().len(), 2, "and nothing else moved");
+
+    // Where its extended attributes are, in the half at 118: it says a
+    // block the file system has not got, so asking for them says so — and
+    // how many blocks the file takes is what it was.
+    let mut changed = image.clone();
+    put16(&mut changed, at + 118, 1);
+    let fs = Ext::open(&changed).unwrap();
+    let node = fs.lookup_path("hello.txt").unwrap().unwrap();
+    assert_eq!(node.blocks, was, "the attributes are not the blocks");
+    assert!(matches!(
+        fs.xattrs(&node),
+        Err(Error::PastTheEnd {
+            block: 0x1_0000_0000
+        })
+    ));
+
+    // And the owner and the group, in the halves after them.
+    let mut changed = image.clone();
+    put16(&mut changed, at + 120, 1);
+    put16(&mut changed, at + 122, 2);
+    let fs = Ext::open(&changed).unwrap();
+    let node = fs.lookup_path("hello.txt").unwrap().unwrap();
+    assert_eq!((node.uid, node.gid), (65_536 + 1000, 131_072 + 1000));
+    assert_eq!(node.blocks, was);
 }
 
 #[test]
