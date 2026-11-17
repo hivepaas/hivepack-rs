@@ -57,19 +57,18 @@ fn an_image(s: &Scratch, from: &Path) -> Option<Vec<u8>> {
 }
 
 /// The tree that goes in, and what it is: a file, a folder with a file in
-/// it, two names for one file, a symbolic link, and a name that is not
-/// UTF-8, which a file system allows and a name's rules may not.
+/// it, two names for one file and a symbolic link.
+///
+/// Not a name that is not UTF-8, though a file system holds one happily:
+/// macOS will not create such a file at all (`EILSEQ`), so that case is
+/// written into the image instead, below.
 #[cfg(unix)]
 fn a_tree(at: &Path) {
-    use std::os::unix::ffi::OsStrExt;
-
     std::fs::create_dir_all(at.join("folder")).unwrap();
     std::fs::write(at.join("hello.txt"), b"hello\n").unwrap();
     std::fs::write(at.join("folder/inside.bin"), vec![7u8; 5000]).unwrap();
     std::fs::hard_link(at.join("hello.txt"), at.join("again.txt")).unwrap();
     std::os::unix::fs::symlink("hello.txt", at.join("link")).unwrap();
-    let odd = std::ffi::OsStr::from_bytes(b"not\xffutf8.txt");
-    std::fs::write(at.join(odd), b"bytes\n").unwrap();
 }
 
 fn extract(
@@ -94,9 +93,6 @@ fn a_tree_comes_out_as_it_went_in() {
     let out = s.path().join("out");
     // Links are refused by default, which is the safe default; this test
     // is about what comes out, so it asks for the ones that stay inside.
-    // And the name that is not UTF-8 is refused by the rules these tests
-    // run with, so the rest is asked for and that one is checked below: a
-    // file system allows bytes a name's rules do not.
     let summary = extract(
         &image,
         &out,
@@ -139,19 +135,7 @@ fn a_tree_comes_out_as_it_went_in() {
         std::fs::read_link(out.join("link")).unwrap(),
         Path::new("hello.txt")
     );
-    // The name that is not UTF-8 was left out, and said why.
-    assert!(
-        summary.skipped.iter().any(|e| matches!(
-            e.kind,
-            hivepack::extract::ErrorKind::Name(NameError::NotUtf8)
-        )),
-        "wanted the odd name refused, got {:?}",
-        summary
-            .skipped
-            .iter()
-            .map(|e| format!("{:?}", e.kind))
-            .collect::<Vec<_>>()
-    );
+    assert!(summary.skipped.is_empty(), "{summary:?}");
     // Three files: the two with data and the second name for one of them,
     // which is a hard link and holds no bytes of its own. Two folders, the
     // one that went in and the `lost+found` every mke2fs writes. One
@@ -177,6 +161,43 @@ fn a_tree_comes_out_as_it_went_in() {
         "the two names are not one file"
     );
     assert_eq!(one.nlink(), 2, "the file says how many names it has");
+}
+
+/// A name a file system holds and a name's rules refuse: bytes that are
+/// not UTF-8, written into the image rather than asked of the operating
+/// system, since macOS will not create such a file (`EILSEQ`) and this is
+/// about what an image can hold, not what a system will make.
+#[test]
+#[cfg(unix)]
+fn a_name_that_is_not_utf8_is_refused() {
+    let s = Scratch::new();
+    let from = s.path().join("tree");
+    std::fs::create_dir_all(&from).unwrap();
+    std::fs::write(from.join("aaa.txt"), b"inside\n").unwrap();
+    let Some(mut image) = an_image(&s, &from) else {
+        return;
+    };
+    let at = image
+        .windows(7)
+        .position(|w| w == b"aaa.txt")
+        .expect("the name is on the image");
+    // The same length, so every other record stays where it was.
+    image[at..at + 7].copy_from_slice(b"aa\xff.txt");
+
+    let out = s.path().join("out");
+    let summary = extract(&image, &out, &options(|o| o.on_refused = OnRefused::Skip)).unwrap();
+    assert!(
+        summary.skipped.iter().any(|e| matches!(
+            e.kind,
+            hivepack::extract::ErrorKind::Name(NameError::NotUtf8)
+        )),
+        "wanted the odd name refused, got {:?}",
+        summary
+            .skipped
+            .iter()
+            .map(|e| format!("{:?}", e.kind))
+            .collect::<Vec<_>>()
+    );
 }
 
 /// An image made to climb out of the destination: a real image with one
