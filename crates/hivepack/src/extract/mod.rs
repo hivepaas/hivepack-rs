@@ -76,6 +76,13 @@
 //! through the same `Options::owners` and `Options::xattrs` a tar
 //! archive's do.
 //!
+//! With the feature `fat`, `extract_fat` extracts the FAT12, FAT16 and
+//! FAT32 file systems `hivepack::fat` reads — a card's boot partition, an
+//! EFI system partition, a camera's card. FAT keeps less than the others
+//! and what it does not keep is not invented: no permissions, no owner, no
+//! extended attributes and neither kind of link, so only files and
+//! directories come out.
+//!
 //! With the feature `rar`, off by default as it takes UnRAR's license,
 //! `extract_rar` extracts RAR archives the same way, reading them twice.
 //!
@@ -94,6 +101,8 @@ mod destination;
 mod error;
 #[cfg(feature = "ext")]
 mod ext;
+#[cfg(feature = "fat")]
+mod fat;
 mod iso;
 mod name;
 mod once;
@@ -119,6 +128,8 @@ pub use error::RarProblem;
 pub use error::{Error, ErrorKind};
 #[cfg(feature = "ext")]
 pub use ext::{extract_ext, extract_ext_to};
+#[cfg(feature = "fat")]
+pub use fat::{extract_fat, extract_fat_to};
 pub use iso::{extract_iso, extract_iso_to};
 pub use name::{MAX_COMPONENT, Name, NameError, NameRules, check_name, check_name_for};
 pub use origin::Origin;

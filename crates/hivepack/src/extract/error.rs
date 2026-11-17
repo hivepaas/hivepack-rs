@@ -145,6 +145,10 @@ pub enum ErrorKind {
     /// hold together.
     #[cfg(feature = "ext")]
     Ext(crate::ext::Error),
+    /// The FAT file system could not be read: a file whose chain leads off
+    /// it, or a directory whose records do not read.
+    #[cfg(feature = "fat")]
+    Fat(crate::fat::Error),
     /// The 7z archive's data could not be read: damaged, a CRC that does
     /// not match, a method `hivepack::sevenz` does not decode, or a password
     /// missing or wrong.
@@ -194,6 +198,8 @@ impl ErrorKind {
             | ErrorKind::Squashfs(_) => true,
             #[cfg(feature = "ext")]
             ErrorKind::Ext(_) => true,
+            #[cfg(feature = "fat")]
+            ErrorKind::Fat(_) => true,
             ErrorKind::SevenZip(e) => !matches!(
                 e,
                 crate::sevenz::Error::PasswordRequired
@@ -262,6 +268,8 @@ impl fmt::Display for ErrorKind {
             ErrorKind::Squashfs(e) => write!(f, "image: {e}"),
             #[cfg(feature = "ext")]
             ErrorKind::Ext(e) => write!(f, "file system: {e}"),
+            #[cfg(feature = "fat")]
+            ErrorKind::Fat(e) => write!(f, "file system: {e}"),
             ErrorKind::SevenZip(e) => write!(f, "archive: {e}"),
             #[cfg(feature = "rar")]
             ErrorKind::Rar(e) => write!(f, "archive: {e}"),
@@ -301,6 +309,8 @@ impl std::error::Error for Error {
             ErrorKind::Squashfs(e) => Some(e),
             #[cfg(feature = "ext")]
             ErrorKind::Ext(e) => Some(e),
+            #[cfg(feature = "fat")]
+            ErrorKind::Fat(e) => Some(e),
             ErrorKind::SevenZip(e) => Some(e),
             #[cfg(feature = "rar")]
             ErrorKind::Rar(e) => Some(e),
