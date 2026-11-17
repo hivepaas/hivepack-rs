@@ -67,6 +67,15 @@
 //! volumes, [`extract_squashfs`] SquashFS images (snaps, AppImages) and
 //! [`extract_7z`] 7z archives, checked first, as ZIP archives are.
 //!
+//! With the feature `ext`, `extract_ext` extracts the ext2, ext3 and ext4
+//! file systems `hivepack::ext` reads — a card's root partition, what
+//! WSL2's `ext4.vhdx` holds — checked first in the same way. It is the
+//! first thing here that can give back who owned a file and what was
+//! beside it: a file system records the owner and group of every inode, and
+//! the extended attributes SELinux labels and ACLs live in, which go
+//! through the same `Options::owners` and `Options::xattrs` a tar
+//! archive's do.
+//!
 //! With the feature `rar`, off by default as it takes UnRAR's license,
 //! `extract_rar` extracts RAR archives the same way, reading them twice.
 //!
@@ -83,6 +92,8 @@
 mod cpio;
 mod destination;
 mod error;
+#[cfg(feature = "ext")]
+mod ext;
 mod iso;
 mod name;
 mod once;
@@ -106,6 +117,8 @@ pub use cpio::{extract_cpio, extract_cpio_to};
 #[cfg(feature = "rar")]
 pub use error::RarProblem;
 pub use error::{Error, ErrorKind};
+#[cfg(feature = "ext")]
+pub use ext::{extract_ext, extract_ext_to};
 pub use iso::{extract_iso, extract_iso_to};
 pub use name::{MAX_COMPONENT, Name, NameError, NameRules, check_name, check_name_for};
 pub use origin::Origin;

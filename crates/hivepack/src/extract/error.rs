@@ -140,6 +140,10 @@ pub enum ErrorKind {
     /// The SquashFS image could not be read: an entry's inode, data or link
     /// target, or a directory with a broken entry.
     Squashfs(crate::squashfs::Error),
+    /// The ext file system could not be read: an entry's inode, data, link
+    /// target or extended attributes, or a directory whose records do not
+    /// hold together.
+    Ext(crate::ext::Error),
     /// The 7z archive's data could not be read: damaged, a CRC that does
     /// not match, a method `hivepack::sevenz` does not decode, or a password
     /// missing or wrong.
@@ -186,7 +190,8 @@ impl ErrorKind {
             | ErrorKind::Cpio(_)
             | ErrorKind::Xar(_)
             | ErrorKind::Udf(_)
-            | ErrorKind::Squashfs(_) => true,
+            | ErrorKind::Squashfs(_)
+            | ErrorKind::Ext(_) => true,
             ErrorKind::SevenZip(e) => !matches!(
                 e,
                 crate::sevenz::Error::PasswordRequired
@@ -253,6 +258,7 @@ impl fmt::Display for ErrorKind {
             ErrorKind::Payload(e) => write!(f, "payload: {e}"),
             ErrorKind::Udf(e) => write!(f, "volume: {e}"),
             ErrorKind::Squashfs(e) => write!(f, "image: {e}"),
+            ErrorKind::Ext(e) => write!(f, "file system: {e}"),
             ErrorKind::SevenZip(e) => write!(f, "archive: {e}"),
             #[cfg(feature = "rar")]
             ErrorKind::Rar(e) => write!(f, "archive: {e}"),
@@ -290,6 +296,7 @@ impl std::error::Error for Error {
             ErrorKind::Payload(e) => Some(e),
             ErrorKind::Udf(e) => Some(e),
             ErrorKind::Squashfs(e) => Some(e),
+            ErrorKind::Ext(e) => Some(e),
             ErrorKind::SevenZip(e) => Some(e),
             #[cfg(feature = "rar")]
             ErrorKind::Rar(e) => Some(e),
