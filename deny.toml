@@ -31,6 +31,26 @@ exceptions = [
 
 [advisories]
 yanked = "deny"
+# RUSTSEC-2026-0544, a heap buffer overflow in zlib 1.3.1.2 through 1.3.2,
+# against libz-sys, which this workspace pins to =1.1.31 because it bundles
+# the zlib release hivepack::deflate ports and is the oracle that port is
+# checked against. Ignored rather than bumped, for three measured reasons:
+#
+#   * libz-sys and flate2 are dev-dependencies of hivepack (`cargo metadata`
+#     says `kind=dev` for each), so nothing published carries them and no
+#     one who installs hivepack gets either.
+#   * the overflow is in zlib's gzFile API -- `gz_vacate`, reached through
+#     `gzprintf` or `gzvprintf`. Nothing here calls it: the two `GzEncoder`
+#     uses are in tests, and flate2 builds the gzip wrapper in Rust, with
+#     no `gzprintf`, `gz_vacate`, `gzwrite` or `gzopen` in its source.
+#     Only zlib's deflate and inflate are linked through.
+#   * the upgrade the advisory names is not a patch release. libz-sys
+#     1.1.33 bundles zlib **1.4**, where the pinned 1.1.31 bundles 1.3.2,
+#     so taking it would stop the oracle being the release the port ports.
+#
+# Which leaves porting against zlib 1.4 as its own piece of work, with this
+# ignore removed when it lands. docs/deflate.md says what the port ports.
+ignore = [{ id = "RUSTSEC-2026-0544", reason = "libz-sys is a dev-dependency and zlib's gzFile API, where the overflow is, is never called: see the comment above" }]
 
 [bans]
 multiple-versions = "warn"
