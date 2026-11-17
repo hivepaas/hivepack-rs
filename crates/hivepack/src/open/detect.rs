@@ -84,6 +84,34 @@ pub enum Container {
     /// `hivepack::squashfs` reads by random access: in a layer, it must be
     /// taken out to a file first.
     Squashfs,
+    /// A VHD disk image that grows (`.vhd`, QEMU's `vpc`), read by
+    /// `hivepack::image::Vhd`. A fixed one keeps its footer only at the
+    /// end, where a stream cannot reach: it is told by opening the file,
+    /// not here.
+    Vhd,
+    /// A QCOW2 disk image (`.qcow2`), read by `hivepack::image::Qcow2`.
+    Qcow2,
+    /// A VHDX disk image (`.vhdx`, Hyper-V's and WSL2's), read by
+    /// `hivepack::image::Vhdx`.
+    Vhdx,
+    /// A VMDK disk image (`.vmdk`, VMware's), read by
+    /// `hivepack::image::Vmdk`: the sparse kind by its own signature, and a
+    /// descriptor naming other files by its first line. A descriptor is
+    /// only of use beside those files, so one under layers names nothing
+    /// that can be reached.
+    Vmdk,
+    /// A raw disk image with a partition table on it (`.img`, `.bin`, a
+    /// `dd` of a card or a stick), read by `hivepack::image::partitions`,
+    /// whose partitions hold the file systems.
+    PartitionedDisk,
+    /// A FAT12, FAT16 or FAT32 file system with no table in front of it,
+    /// read by `hivepack::fat`: an EFI system partition taken out on its
+    /// own, a camera's card, a floppy image.
+    Fat,
+    /// An ext2, ext3 or ext4 file system with no table in front of it, read
+    /// by `hivepack::ext`: a partition taken out on its own, and what
+    /// WSL2's `ext4.vhdx` holds.
+    Ext,
     /// Data: one file, compressed or encrypted (`notes.txt.zst`).
     Data,
 }
@@ -125,6 +153,24 @@ const LZ4_LEGACY_MAGIC: &[u8] = &[0x02, 0x21, 0x4C, 0x18];
 /// as `Archive::IsSignature` tells them) and RAR 1.4 (`RE~^`).
 const RAR_MAGIC: &[u8] = b"Rar!\x1a\x07";
 const RAR14_MAGIC: &[u8] = b"RE~^";
+
+/// The disk images' signatures, each kept here so that telling one does not
+/// take `hivepack::image`: `open` is built without it.
+const VHD_MAGIC: &[u8] = b"conectix";
+const QCOW2_MAGIC: &[u8] = b"QFI\xfb";
+const VHDX_MAGIC: &[u8] = b"vhdxfile";
+const VMDK_MAGIC: &[u8] = b"KDMV";
+/// What a VMDK descriptor, which is text, begins with.
+const VMDK_DESCRIPTOR: &[u8] = b"# Disk DescriptorFile";
+/// A GUID partition table's header signature, in the second sector.
+const GPT_SIGNATURE: &[u8] = b"EFI PART";
+/// Where a master boot record's four entries are, and what one is.
+const MBR_ENTRIES: usize = 446;
+const MBR_ENTRY: usize = 16;
+/// An ext file system's magic, little-endian, 56 bytes into the superblock
+/// that is 1024 bytes into the disk.
+const EXT_MAGIC: [u8; 2] = [0x53, 0xEF];
+const EXT_SUPER: usize = 1024;
 
 /// A 7z archive's signature (`hivepack::sevenz::SIGNATURE`, kept here so that
 /// telling one does not take the decoder).
@@ -349,6 +395,116 @@ fn is_lzma_name(name: &str) -> bool {
     name.ends_with(".lzma") || name.ends_with(".tlz")
 }
 
+/// Whether the disk checks may be made on `head`.
+///
+/// A head of exactly [`HEAD_LEN`] is the first of two, and a file longer
+/// than it has more to come — the part where ISO 9660's and UDF's own
+/// descriptors are, after a 32 KiB system area that holds anything, a
+/// hybrid ISO's a protective master boot record to be written to a USB
+/// stick. Telling a table from the first head would hide every one of
+/// those images, because only [`Container::Data`] asks for the second
+/// head. Any other length is everything there is to have: the whole of a
+/// shorter file, or the second head itself.
+fn enough_for_a_disk(head: &[u8]) -> bool {
+    head.len() != HEAD_LEN
+}
+
+/// Whether `head` has a partition table on it: a GUID partition table's
+/// header in the second sector, of either size a sector is, or a master
+/// boot record whose entries are entries.
+fn is_partitioned(head: &[u8]) -> bool {
+    for sector in [512usize, 4096] {
+        if head.get(sector..sector + GPT_SIGNATURE.len()) == Some(GPT_SIGNATURE) {
+            return true;
+        }
+    }
+    if head.get(510..512) != Some(&[0x55, 0xAA][..]) {
+        return false;
+    }
+    // The signature a record ends with is the signature a boot sector ends
+    // with, and a file system begins with one: what tells them apart is
+    // what is where the entries go. A FAT or NTFS boot sector has its code
+    // and its own fields there, which fail these.
+    let mut any = false;
+    for i in 0..4 {
+        let at = MBR_ENTRIES + i * MBR_ENTRY;
+        let Some(entry) = head.get(at..at + MBR_ENTRY) else {
+            return false;
+        };
+        // Bootable or not, and nothing else.
+        if entry[0] != 0x00 && entry[0] != 0x80 {
+            return false;
+        }
+        let kind = entry[4];
+        let sectors = u32::from_le_bytes([entry[12], entry[13], entry[14], entry[15]]);
+        if kind == 0 && sectors == 0 {
+            continue;
+        }
+        // A partition of a type but no sectors, or sectors but no type, is
+        // what a tool leaves behind rather than what it writes.
+        if kind == 0 || sectors == 0 {
+            return false;
+        }
+        any = true;
+    }
+    any
+}
+
+/// Whether `head` begins a FAT file system. The rules are the reader's own
+/// (`crates/hivepack/src/fat/boot.rs`), written again here because telling
+/// one must not take the reader: `open` is built without `fat`. A test with
+/// the feature on asserts that what the reader opens is told here
+/// (`crates/hivepack/tests/open_open.rs`).
+fn is_fat(head: &[u8]) -> bool {
+    let Some(first) = head.get(..512) else {
+        return false;
+    };
+    if first[510..512] != [0x55, 0xAA] || !matches!(first[0], 0xEB | 0xE9) {
+        return false;
+    }
+    // exFAT keeps the same signature and the same jump, says its name
+    // where the one that made the file system goes, and leaves every field
+    // FAT's numbers are in zero. It is not read here.
+    if &first[3..11] == b"EXFAT   " {
+        return false;
+    }
+    let sector = u16::from_le_bytes([first[11], first[12]]);
+    let per_cluster = first[13];
+    let reserved = u16::from_le_bytes([first[14], first[15]]);
+    let fats = first[16];
+    let small_sectors = u16::from_le_bytes([first[19], first[20]]);
+    let large_sectors = u32::from_le_bytes([first[32], first[33], first[34], first[35]]);
+    let small_fat = u16::from_le_bytes([first[22], first[23]]);
+    let large_fat = u32::from_le_bytes([first[36], first[37], first[38], first[39]]);
+    matches!(sector, 512 | 1024 | 2048 | 4096)
+        && per_cluster != 0
+        && per_cluster.is_power_of_two()
+        && per_cluster <= 128
+        && reserved != 0
+        && fats != 0
+        && fats <= 4
+        && (small_sectors != 0 || large_sectors != 0)
+        && (small_fat != 0 || large_fat != 0)
+}
+
+/// Whether `head` holds an ext superblock: its magic, and the two fields
+/// every ext file system has had, which say sizes nothing else would.
+fn is_ext(head: &[u8]) -> bool {
+    let Some(sb) = head.get(EXT_SUPER..EXT_SUPER + 64) else {
+        return false;
+    };
+    if sb[56..58] != EXT_MAGIC {
+        return false;
+    }
+    // A block is 1 KiB shifted by this, and the format allows 0 to 6
+    // (1 KiB to 64 KiB); a file system of no inodes and no blocks is not
+    // one.
+    let shift = u32::from_le_bytes([sb[24], sb[25], sb[26], sb[27]]);
+    let inodes = u32::from_le_bytes([sb[0], sb[1], sb[2], sb[3]]);
+    let blocks = u32::from_le_bytes([sb[4], sb[5], sb[6], sb[7]]);
+    shift <= 6 && inodes != 0 && blocks != 0
+}
+
 /// What `head`, the first [`HEAD_LEN`] bytes of a stream (fewer if it is
 /// shorter), or [`ISO_HEAD_LEN`] to tell an ISO 9660 image, or
 /// [`UDF_HEAD_LEN`] to tell a UDF volume, is. `name`, the file's name if
@@ -440,6 +596,33 @@ pub fn detect(head: &[u8], name: Option<&str>) -> Detected {
     }
     if is_iso(head) {
         return Detected::Container(Container::Iso);
+    }
+    // The disk images, after the two whose system area may hold anything:
+    // a hybrid ISO carries a protective master boot record in its own.
+    if starts(QCOW2_MAGIC) {
+        return Detected::Container(Container::Qcow2);
+    }
+    if starts(VHDX_MAGIC) {
+        return Detected::Container(Container::Vhdx);
+    }
+    if starts(VMDK_MAGIC) || starts(VMDK_DESCRIPTOR) {
+        return Detected::Container(Container::Vmdk);
+    }
+    if starts(VHD_MAGIC) {
+        return Detected::Container(Container::Vhd);
+    }
+    // A table, or a file system with none in front of it, told only from a
+    // head that has already said it is not an image.
+    if enough_for_a_disk(head) {
+        if is_partitioned(head) {
+            return Detected::Container(Container::PartitionedDisk);
+        }
+        if is_fat(head) {
+            return Detected::Container(Container::Fat);
+        }
+        if is_ext(head) {
+            return Detected::Container(Container::Ext);
+        }
     }
     if name.is_some_and(is_lzma_name) {
         return Detected::Layer(Layer::Lzma);
@@ -719,6 +902,192 @@ mod tests {
         for head in [&wrong[..], &unnamed, &[0; 512], &v7[..511], b""] {
             assert_eq!(layer(head), Detected::Container(Container::Data));
         }
+    }
+
+    /// A boot sector: the jump every one begins with, a BPB that holds
+    /// together, and the signature at 510. `at` is where the kind's name
+    /// goes, which nothing reads.
+    fn boot_sector(sector: u16, per_cluster: u8, fat32: bool) -> Vec<u8> {
+        let mut b = vec![0u8; 512];
+        b[0] = 0xEB;
+        b[1] = 0x3C;
+        b[2] = 0x90;
+        b[3..11].copy_from_slice(b"mkfs.fat");
+        b[11..13].copy_from_slice(&sector.to_le_bytes());
+        b[13] = per_cluster;
+        b[14..16].copy_from_slice(&1u16.to_le_bytes()); // reserved
+        b[16] = 2; // two tables
+        b[19..21].copy_from_slice(&0u16.to_le_bytes());
+        b[32..36].copy_from_slice(&131072u32.to_le_bytes()); // sectors
+        if fat32 {
+            b[36..40].copy_from_slice(&1024u32.to_le_bytes()); // the table
+        } else {
+            b[17..19].copy_from_slice(&512u16.to_le_bytes()); // root entries
+            b[22..24].copy_from_slice(&64u16.to_le_bytes()); // the table
+        }
+        b[510..512].copy_from_slice(&[0x55, 0xAA]);
+        b
+    }
+
+    /// A master boot record: `kinds` are the types of its entries, each of
+    /// 2048 sectors, the first bootable.
+    fn mbr(kinds: &[u8]) -> Vec<u8> {
+        let mut b = vec![0u8; 512];
+        for (i, &kind) in kinds.iter().enumerate().take(4) {
+            let at = MBR_ENTRIES + i * MBR_ENTRY;
+            b[at] = if i == 0 { 0x80 } else { 0x00 };
+            b[at + 4] = kind;
+            b[at + 8..at + 12].copy_from_slice(&(2048u32 * (i as u32 + 1)).to_le_bytes());
+            b[at + 12..at + 16].copy_from_slice(&2048u32.to_le_bytes());
+        }
+        b[510..512].copy_from_slice(&[0x55, 0xAA]);
+        b
+    }
+
+    /// An ext superblock, 1024 bytes into the disk.
+    fn ext(blocks: u32, inodes: u32, shift: u32, magic: [u8; 2]) -> Vec<u8> {
+        let mut b = vec![0u8; EXT_SUPER + 1024];
+        let sb = &mut b[EXT_SUPER..];
+        sb[0..4].copy_from_slice(&inodes.to_le_bytes());
+        sb[4..8].copy_from_slice(&blocks.to_le_bytes());
+        sb[24..28].copy_from_slice(&shift.to_le_bytes());
+        sb[56..58].copy_from_slice(&magic);
+        b
+    }
+
+    /// Long enough that it is not the first head of two.
+    fn whole(mut head: Vec<u8>) -> Vec<u8> {
+        if head.len() == HEAD_LEN {
+            head.push(0);
+        }
+        head
+    }
+
+    #[test]
+    fn the_disk_images_by_their_signatures() {
+        for (magic, want) in [
+            (&b"QFI\xfb\0\0\0\x03"[..], Container::Qcow2),
+            (b"vhdxfile\0\0", Container::Vhdx),
+            (b"KDMV\x03\0\0\0", Container::Vmdk),
+            (b"# Disk DescriptorFile\nversion=1\n", Container::Vmdk),
+            (b"conectix\0\0\0\x02", Container::Vhd),
+        ] {
+            assert_eq!(layer(magic), Detected::Container(want), "{magic:?}");
+        }
+    }
+
+    #[test]
+    fn a_table_is_told_from_its_entries_and_not_its_signature() {
+        // A GUID partition table, in either sector size.
+        for sector in [512usize, 4096] {
+            let mut disk = vec![0u8; sector + 8];
+            disk[sector..].copy_from_slice(b"EFI PART");
+            assert_eq!(
+                layer(&whole(disk)),
+                Detected::Container(Container::PartitionedDisk)
+            );
+        }
+        // A master boot record of one partition, and of four.
+        for kinds in [&[0x83u8][..], &[0x83, 0x0C, 0x82, 0x07]] {
+            assert_eq!(
+                layer(&whole(mbr(kinds))),
+                Detected::Container(Container::PartitionedDisk)
+            );
+        }
+        // The signature alone is not a table: a boot sector ends with it
+        // too. Four empty entries, an entry of a type but no sectors, and
+        // one whose status is neither bootable nor not.
+        let mut empty = vec![0u8; 512];
+        empty[510..512].copy_from_slice(&[0x55, 0xAA]);
+        let mut no_sectors = mbr(&[0x83]);
+        no_sectors[MBR_ENTRIES + 12..MBR_ENTRIES + 16].fill(0);
+        let mut odd_status = mbr(&[0x83]);
+        odd_status[MBR_ENTRIES] = 0x42;
+        for head in [empty, no_sectors, odd_status] {
+            assert_eq!(layer(&whole(head)), Detected::Container(Container::Data));
+        }
+    }
+
+    #[test]
+    fn a_file_system_with_no_table_in_front_of_it_is_told() {
+        // FAT16's shape and FAT32's, in each sector size.
+        for sector in [512u16, 4096] {
+            for fat32 in [false, true] {
+                let head = whole(boot_sector(sector, 8, fat32));
+                assert_eq!(layer(&head), Detected::Container(Container::Fat));
+            }
+        }
+        // An ext file system, and the fields that say it is not one: the
+        // magic, a block size the format has not got, and a file system of
+        // no inodes.
+        assert_eq!(
+            layer(&whole(ext(1024, 256, 0, EXT_MAGIC))),
+            Detected::Container(Container::Ext)
+        );
+        for head in [
+            ext(1024, 256, 0, [0x53, 0xEE]),
+            ext(1024, 256, 7, EXT_MAGIC),
+            ext(1024, 0, 0, EXT_MAGIC),
+            ext(0, 256, 0, EXT_MAGIC),
+        ] {
+            assert_eq!(layer(&whole(head)), Detected::Container(Container::Data));
+        }
+    }
+
+    #[test]
+    fn what_is_not_a_boot_sector_is_not_a_file_system() {
+        // No jump, a sector size no disk has, no table, and exFAT, which
+        // keeps FAT's signature and jump and is not read here.
+        let mut no_jump = boot_sector(512, 1, false);
+        no_jump[0] = 0x00;
+        let odd_sector = boot_sector(777, 1, false);
+        let mut no_fat = boot_sector(512, 1, false);
+        no_fat[22..24].fill(0);
+        let mut exfat = boot_sector(512, 1, false);
+        exfat[3..11].copy_from_slice(b"EXFAT   ");
+        let mut three_clusters = boot_sector(512, 3, false);
+        three_clusters[13] = 3;
+        for head in [no_jump, odd_sector, no_fat, exfat, three_clusters] {
+            assert_eq!(layer(&whole(head)), Detected::Container(Container::Data));
+        }
+    }
+
+    /// The trap this order is for: an image that is both. A hybrid ISO
+    /// carries a protective master boot record in its system area, to be
+    /// written to a USB stick, and its files are on its ISO 9660 side.
+    #[test]
+    fn a_hybrid_image_is_the_image_and_not_the_table_in_front_of_it() {
+        let mut image = mbr(&[0xEE]);
+        image.resize(ISO_HEAD_LEN, 0);
+        // The first descriptor, after the 32 KiB system area.
+        image[ISO_DESCRIPTORS] = 1;
+        image[ISO_DESCRIPTORS + 1..ISO_DESCRIPTORS + 6].copy_from_slice(b"CD001");
+        image[ISO_DESCRIPTORS + 6] = 1;
+        assert_eq!(layer(&image), Detected::Container(Container::Iso));
+        // And the head that matters: the first one, which holds the record
+        // and not the descriptor. It has to say data, or the second head
+        // is never read and the image is lost behind its own boot sector.
+        assert_eq!(
+            layer(&image[..HEAD_LEN]),
+            Detected::Container(Container::Data),
+            "the first head of a hybrid image must ask for the second"
+        );
+    }
+
+    /// And the trap in how the heads are read: a table told from the first
+    /// of them would stop the second from ever being read, because only
+    /// data asks for it. So a head of exactly HEAD_LEN says data, and the
+    /// same bytes with one more say what they are.
+    #[test]
+    fn a_disk_waits_for_the_head_that_rules_an_image_out() {
+        let mut first = mbr(&[0x83]);
+        first.resize(HEAD_LEN, 0);
+        assert_eq!(layer(&first), Detected::Container(Container::Data));
+        first.push(0);
+        assert_eq!(
+            layer(&first),
+            Detected::Container(Container::PartitionedDisk)
+        );
     }
 
     #[test]

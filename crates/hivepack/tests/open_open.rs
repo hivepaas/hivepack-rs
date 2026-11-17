@@ -1484,3 +1484,208 @@ fn xz_blocks_decode_in_threads_as_in_one() {
         }
     }
 }
+
+/// A tool, if it is installed and can be run: see image_vhd.rs, which says
+/// why the second half matters.
+fn tool(name: &str) -> Option<std::path::PathBuf> {
+    let path = ["/usr/sbin", "/usr/bin", "/sbin", "/bin", "/usr/local/sbin"]
+        .into_iter()
+        .map(|at| std::path::PathBuf::from(at).join(name))
+        .find(|p| p.exists())?;
+    std::process::Command::new(&path).arg("-V").output().ok()?;
+    Some(path)
+}
+
+/// A file of `size` zeroes with `make` run over it, and its bytes.
+fn an_image(s: &Scratch, name: &str, size: u64, make: &[&str]) -> Option<Vec<u8>> {
+    let path = s.path().join(name);
+    std::fs::write(&path, vec![0u8; size as usize]).unwrap();
+    let tool = tool(make[0])?;
+    let out = std::process::Command::new(&tool)
+        .args(&make[1..])
+        .arg(&path)
+        .output()
+        .unwrap();
+    if !out.status.success() {
+        eprintln!(
+            "{:?} wrote no {name}: {}",
+            tool,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return None;
+    }
+    Some(std::fs::read(&path).unwrap())
+}
+
+/// The containers, told by what they begin with. A fixed VHD is not among
+/// them: its footer is only at its end, where a stream cannot reach.
+#[test]
+fn the_disk_images_are_told_from_their_first_bytes() {
+    for (head, want) in [
+        (&b"QFI\xfb\0\0\0\x03"[..], Container::Qcow2),
+        (b"vhdxfile\0\0\0\0", Container::Vhdx),
+        (b"KDMV\x03\0\0\0", Container::Vmdk),
+        (b"# Disk DescriptorFile\nversion=1\n", Container::Vmdk),
+        (b"conectix\0\0\0\x02", Container::Vhd),
+    ] {
+        let (layers, container, _) = open(head).unwrap();
+        assert!(layers.is_empty(), "{head:?}");
+        assert_eq!(container, want, "{head:?}");
+    }
+}
+
+/// What the readers open, the opener tells: the one contract between the
+/// two, since `open` is built without `fat` and `ext` and so writes those
+/// rules again rather than calling them.
+///
+/// Under a layer too, which is the part that could not work by accident: a
+/// file system is told from the second head, and a layer changes where
+/// that head comes from.
+#[test]
+#[cfg(all(feature = "fat", feature = "ext", feature = "image"))]
+fn a_file_system_the_reader_opens_is_told_by_the_opener() {
+    let s = Scratch::new();
+    let cases = [
+        (
+            "fat12",
+            an_image(&s, "fat12.img", 64 << 10, &["mkfs.fat", "-F", "12"]),
+            Container::Fat,
+        ),
+        (
+            "fat32",
+            an_image(&s, "fat32.img", 64 << 20, &["mkfs.fat", "-F", "32"]),
+            Container::Fat,
+        ),
+        (
+            "ext2",
+            an_image(
+                &s,
+                "ext2.img",
+                256 << 10,
+                &["mke2fs", "-q", "-F", "-t", "ext2", "-b", "1024"],
+            ),
+            Container::Ext,
+        ),
+        (
+            "ext4",
+            an_image(
+                &s,
+                "ext4.img",
+                8 << 20,
+                &["mke2fs", "-q", "-F", "-t", "ext4", "-b", "1024"],
+            ),
+            Container::Ext,
+        ),
+    ];
+    let mut checked = 0;
+    for (what, image, want) in cases {
+        let Some(image) = image else {
+            continue;
+        };
+        checked += 1;
+        // The reader opens it.
+        match want {
+            Container::Fat => {
+                hivepack::fat::Fat::open(&image[..]).unwrap_or_else(|e| panic!("{what}: {e}"));
+            }
+            Container::Ext => {
+                hivepack::ext::Ext::open(&image[..]).unwrap_or_else(|e| panic!("{what}: {e}"));
+            }
+            _ => unreachable!(),
+        }
+        // So the opener has to say so, as it is and under a layer.
+        let (layers, container, _) = open(&image).unwrap();
+        assert!(layers.is_empty(), "{what}");
+        assert_eq!(container, want, "{what}");
+        let (layers, container, data) = open(&zstd(&image)).unwrap();
+        assert_eq!(layers, vec![Layer::Zstd], "{what} under zstd");
+        assert_eq!(container, want, "{what} under zstd");
+        assert_eq!(data, image, "{what} under zstd: not the same bytes");
+    }
+    if checked == 0 {
+        eprintln!(
+            "neither mkfs.fat nor mke2fs can be run here: what the readers open is not \
+             checked against what the opener tells. The images built by hand in \
+             tests/fat.rs and tests/ext.rs are what check the readers everywhere, and \
+             the rules this contract is about are checked on their own in \
+             open::detect's tests."
+        );
+    }
+}
+
+/// A disk with a table on it, and the file system in its partition told
+/// through it: the three layers of a disk image, which is what this is for.
+#[test]
+#[cfg(all(feature = "fat", feature = "image"))]
+fn a_card_image_is_told_and_its_partition_holds_a_file_system() {
+    let Some(sfdisk) = tool("sfdisk") else {
+        eprintln!("sfdisk cannot be run here: a card image is not checked");
+        return;
+    };
+    let s = Scratch::new();
+    let path = s.path().join("card.img");
+    std::fs::write(&path, vec![0u8; 8 << 20]).unwrap();
+    let mut sfdisk = std::process::Command::new(sfdisk)
+        .arg(&path)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        let stdin = sfdisk.stdin.as_mut().unwrap();
+        stdin
+            .write_all(b"label: gpt\nsize=2MiB, type=uefi\nsize=2MiB, type=linux\n")
+            .unwrap();
+    }
+    if !sfdisk.wait().unwrap().success() {
+        eprintln!("sfdisk wrote no table here: a card image is not checked");
+        return;
+    }
+    let card = std::fs::read(&path).unwrap();
+
+    let (layers, container, _) = open(&card).unwrap();
+    assert!(layers.is_empty());
+    assert_eq!(container, Container::PartitionedDisk);
+    // Under a layer as well, which is a card image as it is kept.
+    let (layers, container, _) = open(&zstd(&card)).unwrap();
+    assert_eq!(layers, vec![Layer::Zstd]);
+    assert_eq!(container, Container::PartitionedDisk);
+
+    let found = hivepack::image::partitions(&card).unwrap().unwrap();
+    assert_eq!(found.table, hivepack::image::Table::Gpt);
+    assert_eq!(found.partitions.len(), 2);
+
+    // A FAT file system in the first partition, told through the table: the
+    // partition's own bytes are what the opener is given, as what reads a
+    // card image would give it.
+    let Some(mkfs) = tool("mkfs.fat") else {
+        return;
+    };
+    let first = &found.partitions[0];
+    let mut card = card;
+    let at = first.at as usize;
+    let end = at + first.size as usize;
+    let inner = s.path().join("part.img");
+    std::fs::write(&inner, &card[at..end]).unwrap();
+    // FAT12, because 2 MiB is below the clusters FAT16 wants whatever the
+    // cluster size, and which of the three it is is not what this checks.
+    let out = std::process::Command::new(&mkfs)
+        .args(["-F", "12"])
+        .arg(&inner)
+        .output()
+        .unwrap();
+    if !out.status.success() {
+        eprintln!(
+            "mkfs.fat wrote no file system of that size here: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        return;
+    }
+    let part = std::fs::read(&inner).unwrap();
+    card[at..end].copy_from_slice(&part);
+    assert_eq!(open(&part).unwrap().1, Container::Fat);
+    // And the disk is still a disk: the table in front wins.
+    assert_eq!(open(&card).unwrap().1, Container::PartitionedDisk);
+}
