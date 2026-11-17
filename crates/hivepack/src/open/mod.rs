@@ -4,7 +4,8 @@
 //! archive around their `data.tar`, found by their first
 //! bytes and taken off one after the other, as many as there are, until
 //! what is under them is a container (a tar, ZIP, 7z, cpio or XAR archive,
-//! an ISO 9660 image, a UDF volume, a SquashFS image), or plain data.
+//! an ISO 9660 image, a UDF volume, a SquashFS image, a disk image or a
+//! file system with no partition table in front of it), or plain data.
 //!
 //! ```no_run
 //! use std::sync::Arc;

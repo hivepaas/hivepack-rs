@@ -71,6 +71,20 @@ A compressor checks its data at the end of its stream (gzip's and bzip2's CRC-32
 - **A UDF volume** is read by random access, as a ZIP archive is: under layers (`.iso.xz` of a Windows image), it must be written to a file first. With no layer, `hivepack::udf::Udf::open` mounts the file itself, and `hivepack::extract::extract_udf` extracts it. Its ISO 9660 side, if it has one, can still be read in order by `hivepack::iso`, under layers too.
 - **A SquashFS image** (a snap package) is read by random access, as a UDF volume is: under layers (`.sqfs.zst`), it must be written to a file first. With no layer, `hivepack::squashfs::Squashfs::open` opens the file itself, and `hivepack::extract::extract_squashfs` extracts it.
 - **An AppImage** of type 2 holds a SquashFS image after its program, read by random access from where the program ends: under layers, it must be written to a file first; with no layer, `hivepack::appimage::open_squashfs` opens its image, and `extract_squashfs` extracts it. One of type 1 is an ISO 9660 image, read in order by `hivepack::iso` from the file's start, under layers too, and extracted by `extract_iso`.
+- **A disk image** is read by random access, every one of them: a QCOW2's tables and a VHDX's are read where its header points, a VHD keeps its footer at the end, and a GUID partition table keeps its second copy at the disk's end. Under layers (`card.img.zst`, which is how a card is kept), it must be written to a file first, then opened with `hivepack::image` — `Vhd`, `Qcow2`, `Vhdx` or `Vmdk` for a container, `partitions` for the table on it. `PartitionedDisk` is a raw disk with a table and no container around it.
+
+  **A fixed VHD is not told here**, and cannot be: its footer is only at the end of the file, where a stream has not reached. One that grows carries a copy of that footer at the start, and is told by it. A fixed image is told by opening the file, which can seek: `hivepack::image::Vhd::open`.
+
+  **A VMDK descriptor is told by its first line**, and names the files beside it: under layers there is nothing beside it to name, so what comes out is a descriptor naming files that are not there. `Vmdk::beside` is what reads one, on a path, and it refuses a name that is not a plain file name in the same folder.
+
+- **A file system with no table in front of it** — `Fat` or `Ext` — is an EFI system partition taken out on its own, a camera's card, a floppy image, or what WSL2's `ext4.vhdx` holds. Read by random access with `hivepack::fat` or `hivepack::ext`; under layers, written to a file first.
+
+  Which it is, is told from the rules those readers use themselves: a boot sector's jump and a BPB that holds together, or an ext superblock's magic 1080 bytes in with sizes the format allows. `open` is built without either reader (`open` does not take `fat` or `ext`), so those rules are written again in `detect` — and `tests/open_open.rs` asserts the one direction that matters: **what the reader opens, the opener tells.** The other direction is not promised; a head is a hint, and the reader is what decides.
+
+  **A table in front wins**: a disk with partitions is a disk, not the file system in its first one.
+
+- **The order is the safety**: a hybrid ISO carries a protective master boot record in its system area, to be written to a USB stick, and its files are on its ISO 9660 side. So a disk is looked for only after ISO 9660 and UDF, and only in a head long enough to have ruled them out — never in the first 1570 bytes, because telling a table from those would stop the second head from ever being read. `detect` is a convenience, not a classifier to make a security decision on: a crafted file can satisfy a BPB's rules, which have no magic to check.
+
 - **Data** under layers is one file, whose name is the file's without the layers' extensions; writing it is the application's.
 
 ## Bounded resources
