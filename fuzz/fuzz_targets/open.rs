@@ -13,6 +13,15 @@
 //! decode zstd's frames, xz's Blocks, bzip2's streams and blocks and
 //! pbzx's chunks, it must end the same way, with the same data or its
 //! start. A panic is a bug.
+//!
+//! "The same way" is the end, the cap on what is read, or a failure — and
+//! not **which** failure. The error a damaged zstd frame gives depends on
+//! the sizes it was fed in, and that is libzstd's own doing, not the
+//! port's: measured side by side on one frame, libzstd answers data
+//! corruption when fed whole blocks and a destination too small when fed
+//! a byte at a time, and the port answers each exactly as it does
+//! (`tests/zstd_support::stream_both`, issue #240). Holding the readers to
+//! one message would hold them to a promise libzstd does not make.
 
 #![no_main]
 
@@ -50,6 +59,18 @@ fn read<F: FnMut() -> std::io::Result<Cursor<Vec<u8>>>>(
     (found, out, "-".into())
 }
 
+/// How a read ended, as far as anything promises: the end of the file, the
+/// cap on what is read, or a failure — not which failure. See the note at
+/// the top: which error a damaged zstd frame gives is libzstd's own
+/// business, and it depends on the sizes the decoder was fed in.
+fn how(ended: &str) -> &str {
+    match ended {
+        "end" => "end",
+        "-" => "-",
+        _ => "err",
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     let Some((&mode, file)) = data.split_first() else {
         return;
@@ -76,7 +97,7 @@ fuzz_target!(|data: &[u8]| {
     }
     let threaded = read(&mut threaded, seed.rotate_left(29));
     for again in [read(&mut opener, !seed), read(&mut opener, seed.rotate_left(17)), threaded] {
-        assert_eq!((&again.0, &again.2), (&first.0, &first.2));
+        assert_eq!((&again.0, how(&again.2)), (&first.0, how(&first.2)), "{again:?} {first:?}");
         if first.2 == "end" || first.2 == "-" {
             assert!(again.1 == first.1);
         } else {
