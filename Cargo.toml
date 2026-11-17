@@ -67,6 +67,14 @@ nix = { version = "0.31", default-features = false, features = ["user"] }
 # tree, under rustix and cap-std.
 libc = { version = "0.2.172", default-features = false }
 windows-sys = { version = "0.61", default-features = false }
+# NTFS is read by this library, not by a port, which every other format
+# here is. There is no published specification, and both complete readers
+# (ntfs-3g and the kernel's ntfs3) are GPL-2.0, which this crate cannot
+# take. Colin Finck's is MIT or Apache-2.0, forbids `unsafe` code, and
+# reads the structures; what it does not read, hivepack::ntfs refuses
+# rather than answering wrongly. docs/ntfs.md says what was measured of it
+# and why the feature is off by default.
+ntfs = "0.4.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

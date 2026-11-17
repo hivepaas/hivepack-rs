@@ -104,6 +104,13 @@ lz4 = []
 
 lzo = []
 
+# NTFS, which the `ntfs` crate reads the structures of: see the workspace's
+# own comment on that dependency. Not in `full`, as RAR is not, and for a
+# reason of the same shape rather than the same reason: the released
+# version of that library panics on a damaged directory index, the fix is
+# not in a release yet, and every reader here is fuzzed. docs/ntfs.md.
+ntfs = ["image", "dep:ntfs"]
+
 open = ["age", "ar", "bzip2", "cpio", "deflate", "lz4", "xz", "zstd"]
 
 rar = ["crypto", "deflate"]
@@ -149,6 +156,8 @@ scrypt = { version = "0.12", default-features = false, optional = true }
 sha1 = { version = "0.11", default-features = false, optional = true }
 sha2 = { version = "0.11", default-features = false, optional = true }
 subtle = { version = "2", default-features = false, optional = true }
+# The library that reads NTFS: see the workspace's comment on it.
+ntfs = { workspace = true, optional = true }
 # Directories opened by handle, for `extract`.
 cap-std = { workspace = true, optional = true }
 cap-fs-ext = { workspace = true, optional = true }

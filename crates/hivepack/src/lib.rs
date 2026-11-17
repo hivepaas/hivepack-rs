@@ -86,6 +86,8 @@ pub mod lz4;
 pub mod lzo;
 #[cfg(feature = "memory")]
 pub mod memory;
+#[cfg(feature = "ntfs")]
+pub mod ntfs;
 #[cfg(feature = "open")]
 pub mod open;
 #[cfg(feature = "rar")]
