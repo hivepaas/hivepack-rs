@@ -37,6 +37,12 @@ pub enum NameError {
     Device,
     /// A component that ends in a space or a dot, which Windows drops.
     TrailingSpaceOrDot,
+    /// A separator or a NUL inside what is one component: a file system's
+    /// record is a name and not a path, and a kernel allows neither in one,
+    /// so a record holding either did not come from a kernel. Cut into
+    /// components it would be written somewhere other than where the image
+    /// says it is.
+    Separator,
     /// A component longer than 255 bytes.
     TooLong,
 }
@@ -45,11 +51,12 @@ impl NameError {
     /// Whether the name is one the system cannot take, or might not show for what
     /// it is, rather than one that leads outside the destination or names
     /// nothing: it can be left out, or renamed, and the rest extracted. Not
-    /// [`NameError::Empty`], [`NameError::Absolute`] or [`NameError::Dot`].
+    /// [`NameError::Empty`], [`NameError::Absolute`], [`NameError::Dot`] or
+    /// [`NameError::Separator`].
     pub fn is_unnamable(self) -> bool {
         !matches!(
             self,
-            NameError::Empty | NameError::Absolute | NameError::Dot
+            NameError::Empty | NameError::Absolute | NameError::Dot | NameError::Separator
         )
     }
 }
@@ -122,6 +129,7 @@ impl fmt::Display for NameError {
             NameError::Dot => "component \".\" or \"..\"",
             NameError::Device => "Windows device name",
             NameError::TrailingSpaceOrDot => "component ending in a space or a dot",
+            NameError::Separator => "separator or NUL inside one name",
             NameError::TooLong => "component longer than 255 bytes",
         })
     }

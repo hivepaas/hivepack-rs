@@ -197,7 +197,36 @@ KeeWeb's snap extracts 17 times as fast on 32 threads; measured apart, 3.26 s on
 
 ## Into something other than a folder
 
-Each extractor has a twin that writes into a `Sink` in place of a folder: `extract_zip_to`, `extract_tar_to`, `extract_7z_to`, `extract_rar_to`, `extract_cpio_to`, `extract_xar_to`, `extract_iso_to`, `extract_udf_to` and `extract_squashfs_to`. A sink is what converts an archive to another format, entry by entry, without a folder in between: one that writes an archive, an index, a checksum of each file. Both go through the same code, so the sink is given what the folder would get, after the same checks, in the same order, and nothing it is not:
+## ext2, ext3 and ext4
+
+`extract_ext` extracts the file systems `hivepack::ext` reads, behind the feature `ext`: a Raspberry Pi card's root partition, a Linux VM's disk, what WSL2's `ext4.vhdx` holds. A file system is read by random access, as a UDF volume is, so it is read once: its tree is walked first, parents before what they hold, in the order each directory holds its records; every inode is read, every file's data reached for, every link's target read, and every entry checked, before anything is written; then the files are written, each read where it is.
+
+It is the first thing extracted here that can give back **who owned a file and what was beside it**. A file system records the owner and the group of every inode, and the extended attributes where SELinux labels, ACLs and capabilities live. Both are handed to the machinery a tar archive's go through, so what is done with them is `Options::owners` and `Options::xattrs` and not this reader's doing — and the attributes are not even read unless they are wanted, since for a tree of thousands they are a read apiece.
+
+What differs from tar:
+
+- **A record is one name, not a path.** An archive's entry name is a path, and `a/b` means b inside a. A file system's record is a single component, and the kernel allows neither `/` nor NUL in one — so a record holding either did not come from a kernel. It is refused (`NameError::Separator`), because cut into components it would be written somewhere other than where the file system says it is. **This is not what keeps an extraction inside its destination**; `extract/name.rs` does that, and it was measured: with this check taken out, a record named `../x.tx` is still stopped (`Name(Dot)`) and nothing lands outside. What the check stops is a record named `a/b.txt` — no dots, nothing the path rules object to — being written into a folder `a`.
+- **A name is bytes**, as it is on the disk, and goes through every rule a tar archive's name does: one that is not UTF-8 is refused or renamed by `NameRules`, not by this.
+- **Hard links** are the names that point at an inode another name pointed at first, which a root file system is full of: created as tar's are, or copied with `Links::AsFile`.
+- **A directory named twice is refused** (`ErrorKind::DirectoryAgain`), as the format does not allow one.
+- **What cannot be read is refused** (`ErrorKind::Ext`): an entry whose inode, data, target or attributes do not read, and a directory whose records do not hold together, whose entries are then missing. `OnRefused::Skip` leaves them out — but a root directory that does not read stops the extraction.
+- **Devices, FIFOs and sockets are not created**, as for UDF and SquashFS.
+- **A hole reads as zeros**, so a sparse file comes out as long as it says it is, holding what it holds.
+
+## FAT12, FAT16 and FAT32
+
+`extract_fat` extracts the file systems `hivepack::fat` reads, behind the feature `fat`: a card's boot partition, an EFI system partition, a camera's card, a floppy image. Walked and checked first, as an ext file system is, then the files written where their data is.
+
+**FAT keeps less than the others, and what it does not keep is not invented here.** There are no permissions, no owner, no extended attributes, no symbolic links and no hard links, so only files and directories come out and what they are given is `Options::permissions`. **The name is the long one** where the records carry one, as a system shows it, and the 8.3 name where they do not; `.` and `..` are records of their own in every directory but the root and are passed over rather than offered up and refused.
+
+**A FAT time has no zone.** The format keeps the local time of whatever wrote it and no offset, so there is nothing to convert from: the parts are read as UTC, which `fat::Time::unix` does and says. Linux's own vfat driver reads them as the mounting machine's local time instead, so the same card can show times hours apart; neither is wrong, because the file system does not say which it meant.
+
+Two things a hostile image can write that a kernel cannot:
+
+- **A record holding a separator or a NUL** is refused (`NameError::Separator`), as for ext: a record is one name, not a path.
+- **A record naming a directory already walked into** is refused (`ErrorKind::DirectoryAgain`): a chain that leads back on itself. **The limit on entries does not stop this one.** Measured by taking the guard out: the walk ran 46 seconds and reached about 40 GB of memory before it was killed, never reaching the 100,000 entries `Options::limits.max_entries` allows — because each turn round the loop makes the path longer than the last, so what is held grows as the square of the depth and the count climbs slowly. The guard is what makes it stop at once, and it is the same guard the reader's own walk keeps. ext's backend has the equivalent, keyed by inode.
+
+Each extractor has a twin that writes into a `Sink` in place of a folder: `extract_zip_to`, `extract_tar_to`, `extract_7z_to`, `extract_rar_to`, `extract_cpio_to`, `extract_xar_to`, `extract_iso_to`, `extract_udf_to`, `extract_squashfs_to`, `extract_ext_to` and `extract_fat_to`. A sink is what converts an archive to another format, entry by entry, without a folder in between: one that writes an archive, an index, a checksum of each file. Both go through the same code, so the sink is given what the folder would get, after the same checks, in the same order, and nothing it is not:
 
 - **What is given.** Directories, files and the links `Options::links` keeps, each with its path, checked as names are (so a sink never sees `..`, an absolute path, or two entries of one path), its time, and its permission bits as `Options::permissions` has them. A directory on the way to an entry is given only if the archive has an entry for it.
 - **Files** come as `start_file`, their data in pieces as it is decoded, then `finish_file`; nothing more of an entry is held than the piece being given. The limits count what is given, as they count what is written. A file whose data fails its check is ended with `discard_file`, and the extraction stops with its error.
