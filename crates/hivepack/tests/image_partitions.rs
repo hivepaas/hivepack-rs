@@ -299,6 +299,100 @@ fn a_master_boot_record_is_read_in_the_sectors_it_is_told() {
     ));
 }
 
+/// A disk that says it is as long as a disk can be and reads as zeroes
+/// but for the bytes put in it: what a sparse file is, and what says an
+/// allocation is held by a number in a header and not by what is there.
+struct Claims {
+    size: u64,
+    head: Vec<u8>,
+}
+
+impl Disk for Claims {
+    fn size(&self) -> std::io::Result<u64> {
+        Ok(self.size)
+    }
+
+    /// The header where it goes, and the same bytes where the copy at the
+    /// end goes: a table whose primary header is refused has its copy read,
+    /// and the error that comes out is the copy's, so both have to say the
+    /// same thing for the test to be about what it says it is.
+    fn read_at(&self, at: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+        buf.fill(0);
+        let backup = self.size - 512;
+        for from in [0u64, backup] {
+            let Some(within) = at.checked_sub(from) else {
+                continue;
+            };
+            if let Some(bytes) = self.head.get(within as usize..) {
+                let n = bytes.len().min(buf.len());
+                buf[..n].copy_from_slice(&bytes[..n]);
+            }
+        }
+        Ok(buf.len())
+    }
+}
+
+/// An entry's size is bounded, so that a header cannot ask for an array of
+/// gigabytes: the count is held to 1024, and 1024 entries of a megabyte
+/// would be a gigabyte read out of a disk that only says it is long.
+#[test]
+fn an_entry_larger_than_an_entry_can_be_is_refused() {
+    let sector = 512usize;
+    // A header of one entry per the count, with the size the case gives.
+    let header = |entry_size: u32, count: u32| {
+        let mut head = vec![0u8; 92];
+        put(&mut head, 0, b"EFI PART");
+        put(&mut head, 8, &0x0001_0000u32.to_le_bytes());
+        put(&mut head, 12, &92u32.to_le_bytes());
+        put(&mut head, 24, &1u64.to_le_bytes());
+        put(&mut head, 32, &2u64.to_le_bytes());
+        put(&mut head, 40, &34u64.to_le_bytes());
+        put(&mut head, 48, &1000u64.to_le_bytes());
+        put(&mut head, 56, &[0x11; 16]);
+        put(&mut head, 72, &2u64.to_le_bytes());
+        put(&mut head, 80, &count.to_le_bytes());
+        put(&mut head, 84, &entry_size.to_le_bytes());
+        put(&mut head, 88, &0u32.to_le_bytes());
+        let crc = crc32(0, &head);
+        put(&mut head, 16, &crc.to_le_bytes());
+        let mut image = vec![0u8; sector * 3];
+        put(&mut image, sector, &head);
+        // And the copy, which is read from the disk's last sector: the
+        // bytes are served there as well, so the offset inside this is the
+        // same one.
+        put(&mut image, 0, &head);
+        image
+    };
+    // A terabyte of disk, so that nothing but the bound stands in the way.
+    let huge = 1u64 << 40;
+    for (what, entry_size) in [
+        ("a megabyte an entry", 1 << 20),
+        ("a sector and one byte", 4104),
+        ("not a power of two", 136),
+    ] {
+        let disk = Claims {
+            size: huge,
+            head: header(entry_size, 1024),
+        };
+        let got = partitions(&disk);
+        assert!(
+            matches!(got, Err(Error::HeaderSays)),
+            "{what}: wanted a refusal, got {:?}",
+            got.map(|f| f.map(|f| f.partitions.len()))
+        );
+    }
+    // And the size every tool writes is still read: the header says so and
+    // the entries' check is what it fails on, not the size.
+    let disk = Claims {
+        size: huge,
+        head: header(128, 128),
+    };
+    assert!(
+        matches!(partitions(&disk), Err(Error::EntriesCheck)),
+        "128-byte entries are read, and fail on their own checksum"
+    );
+}
+
 #[test]
 fn a_file_with_no_table_has_none() {
     assert!(partitions(&disk(64, SECTOR)).unwrap().is_none());

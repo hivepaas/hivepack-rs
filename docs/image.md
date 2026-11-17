@@ -80,6 +80,40 @@ It reads a raw image — an `.img`, a `.bin`, a `dd` of a card — and the four 
 - **A log that was written and never applied is refused.** What its entries say belongs in the tables, and putting it there is writing; a reader that passed over it would answer with what the disk held before.
 - **An image with another behind it is refused**, as a differencing VHD and a QCOW2 image with a backing file are (`Unsupported::Backing`). Its blocks are marked as only partly present, and what is missing is in the image it came from.
 
+## What a header may ask for
+
+Every table and every container here is a number in a header saying how much
+to read. A reader that trusts those numbers can be made to hold gigabytes for
+a file of a few hundred bytes, so each has a bound that does not depend on the
+file:
+
+- **A GUID partition table**: 1024 entries at most (`MOST_ENTRIES`, eight times
+  the 128 every tool writes), and an entry of at most 4096 bytes (`MOST_ENTRY`).
+  The specification says an entry is 128 × 2^n bytes (2.10, §5.3.2), so a power
+  of two of at least 128 is what is accepted — tighter than the multiple of 8
+  that was checked before, and the specification's own words.
+- **QCOW2**: an L1 table of 4 Mi entries at most (`MOST_L1`), and a cluster of
+  2 MiB (`MOST_BITS`).
+- **VHD** and **VHDX**: 4 Mi block table entries at most (`MOST_ENTRIES`), and
+  VHDX blocks of 256 MiB (`MOST_BLOCK`).
+- **ext**: blocks of 64 KiB at most (`MOST_LOG_BLOCK`), which is the format's
+  own limit.
+- **FAT**: a chain no longer than the clusters the file system has, 16 MiB of
+  directory records (`MOST_DIR`), and 32 KiB read to find a label (`LABEL_IN`).
+
+**A file's length is not a bound.** It was the only one on a GUID partition
+table's entries until an entry's own size was bounded: 1024 entries of a
+megabyte is a gibibyte, and a header is free to say so as long as the disk is
+long enough to hold it — which a sparse file is, for nothing. A test says so
+with a disk that claims a terabyte and holds 1536 bytes: without the bound the
+reader allocates and reads the gibibyte before failing the array's checksum,
+and with it the header is refused.
+
+The limits in `hivepack::open::Limits` are not these. They bound what the
+layers around a file decode; `open` tells a disk image from a head and never
+reads one, so what a disk's own headers may ask for is bounded in the readers,
+where the reading is.
+
 ## How it is checked
 
 `crates/hivepack/tests/image_partitions.rs`, for the disk and its tables, and one file for each container beside it: `image_vhd.rs`, `image_qcow2.rs`, `image_vhdx.rs`, `image_vmdk.rs`.
@@ -108,3 +142,5 @@ It reads a raw image — an `.img`, a `.bin`, a `dd` of a card — and the four 
 - **Images built byte by byte**, with their checksums as a tool computes them, so that CI checks the reader where `qemu-img` is not installed: blocks written and unwritten in turn, a read that crosses from one into the other, a fixed image, a footer at the end that does not hold (where the copy at the start is read), a differencing image, a dynamic header whose checksum fails, and a disk type nothing has.
 - Where `qemu-img` or `sfdisk` is not installed, those tests say so and pass.
 - **A tool being there is not the same as it being able.** The `qemu-img` in CI's s390x container is built without Zstandard in its QCOW2 driver, and says so only when asked to convert — `Invalid parameter 'zstd'`. So the options a test wants are tried on a small image first, and the test says what the tool refused and passes. Writing the image is the tool's own work, so its limit is not the reader's; a mistake in the options lands in the same place, which is why the refusal is printed rather than swallowed.
+
+- **A fuzzer feeds it anything** (`fuzz/fuzz_targets/image.rs`). A raw disk's table in each sector size, every partition as a disk of its own, and all four containers opened on the same bytes. What is read is read twice, in pieces of different sizes the input itself picks, and the two must agree: a reader that is right only for the order it was asked in is a bug, as is a panic. The corpus is seeded with the smallest images the tools will write, because a header that fails its own checks is refused in the first bytes and nothing behind it is ever reached.

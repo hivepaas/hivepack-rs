@@ -719,6 +719,44 @@ jobs:
           for f in testdata/squashfs/*.sqfs; do { printf '\x22'; cat "$f"; } > "fuzz/corpus/extract_squashfs/$(basename "$f")"; done
       - run: cargo fuzz run --target x86_64-unknown-linux-gnu squashfs -- -max_total_time=${FUZZ_SECONDS:-60} -rss_limit_mb=4096 -max_len=65536
       - run: cargo fuzz run --target x86_64-unknown-linux-gnu extract_squashfs -- -max_total_time=${FUZZ_SECONDS:-60} -rss_limit_mb=4096 -max_len=65536
+      # The disk images and the file systems in them. A superblock or a
+      # header that fails its own checks is refused in the first bytes, so a
+      # fuzzer starting from nothing never reaches what is behind one: the
+      # corpora are seeded with the smallest images the tools here will
+      # write, measured rather than guessed. The step says what it made and
+      # does not fail the job if a tool is missing, which costs the fuzzer
+      # its head start and nothing else.
+      - name: Seed the disk and file system corpora
+        run: |
+          set -x
+          mkdir -p fuzz/corpus/image fuzz/corpus/fat fuzz/corpus/ext target/seeds
+          # 256 KiB is the smallest mke2fs writes with 1 KiB blocks; ext4
+          # that small has no room for a journal, and says so.
+          truncate -s 256K target/seeds/ext2.img && mke2fs -q -F -t ext2 -b 1024 target/seeds/ext2.img || true
+          truncate -s 256K target/seeds/ext4.img && mke2fs -q -F -t ext4 -b 1024 target/seeds/ext4.img || true
+          # FAT12 fits in 64 KiB. FAT16 and FAT32 need megabytes of clusters,
+          # too big to mutate, and the fuzzer reaches both from here anyway:
+          # which of the three a file system is, is decided by the shape of
+          # its BPB, which is a few bytes of this one.
+          truncate -s 64K target/seeds/fat12.img && mkfs.fat -F 12 target/seeds/fat12.img || true
+          # A disk with a table, and the containers of it that stay small.
+          truncate -s 256K target/seeds/raw.img || true
+          printf 'label: gpt\nsize=64KiB, type=linux\nsize=64KiB, type=uefi\n' \
+            | sfdisk target/seeds/raw.img || true
+          qemu-img convert -f raw -O qcow2 target/seeds/raw.img target/seeds/disk.qcow2 || true
+          qemu-img convert -f raw -O vmdk target/seeds/raw.img target/seeds/disk.vmdk || true
+          # An empty VHD is 2.5 KiB, where converting one rounds the disk up
+          # to a whole cylinder. VHDX is not seeded: its header region alone
+          # is 8 MiB, and the images built by hand in its tests are what
+          # check that reader.
+          qemu-img create -f vpc target/seeds/empty.vhd 16M || true
+          cp target/seeds/ext*.img fuzz/corpus/ext/ || true
+          cp target/seeds/fat*.img fuzz/corpus/fat/ || true
+          cp target/seeds/raw.img target/seeds/disk.qcow2 target/seeds/disk.vmdk target/seeds/empty.vhd fuzz/corpus/image/ || true
+          ls -l fuzz/corpus/ext fuzz/corpus/fat fuzz/corpus/image
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu image -- -max_total_time=${FUZZ_SECONDS:-60} -rss_limit_mb=4096 -max_len=524288
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu fat -- -max_total_time=${FUZZ_SECONDS:-60} -rss_limit_mb=4096 -max_len=262144
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu ext -- -max_total_time=${FUZZ_SECONDS:-60} -rss_limit_mb=4096 -max_len=262144
       - name: Seed the xz corpus
         run: |
           mkdir -p fuzz/corpus/xz
