@@ -48,6 +48,36 @@ fn qemu_img() -> Option<PathBuf> {
     Some(path)
 }
 
+/// Whether this `qemu-img` can write `options`: the build in some containers
+/// has no Zstandard in its QCOW2 driver, and says so only when asked to
+/// convert. Writing the image is the tool's own work, so what it refuses
+/// here is its limit and not the reader's — but a mistake in the options
+/// would also land here, which is why the refusal is printed.
+fn can_write(tool: &Path, options: &[&str], what: &str) -> bool {
+    let s = Scratch::new(&format!("{what}-probe"));
+    let source = s.0.join("probe.raw");
+    let image = s.0.join("probe.qcow2");
+    std::fs::write(&source, vec![0u8; 1 << 16]).unwrap();
+    let mut args = vec!["convert", "-f", "raw", "-O", "qcow2"];
+    args.extend_from_slice(options);
+    args.push(source.to_str().unwrap());
+    args.push(image.to_str().unwrap());
+    match Command::new(tool).args(&args).output() {
+        Ok(out) if out.status.success() => true,
+        Ok(out) => {
+            eprintln!(
+                "this qemu-img refuses {options:?}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            false
+        }
+        Err(e) => {
+            eprintln!("this qemu-img cannot be run: {e}");
+            false
+        }
+    }
+}
+
 fn run(tool: &Path, args: &[&str]) {
     let out = Command::new(tool).args(args).output().unwrap();
     assert!(
@@ -100,6 +130,10 @@ fn through_qemu(what: &str, raw: &[u8], options: &[&str]) {
         eprintln!("qemu-img cannot be run here: {what} is not checked against it");
         return;
     };
+    if !options.is_empty() && !can_write(&tool, options, what) {
+        eprintln!("{what} is not checked against qemu-img: it cannot write it");
+        return;
+    }
     let s = Scratch::new(what);
     let source = s.0.join("disk.raw");
     let image = s.0.join("disk.qcow2");
