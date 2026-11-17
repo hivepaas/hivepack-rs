@@ -25,6 +25,13 @@ const ENTRY: usize = 128;
 /// this allows eight times that before refusing the header.
 const MOST_ENTRIES: u32 = 1024;
 
+/// How large one entry may say it is. The specification says 128 × 2^n
+/// bytes (2.10, §5.3.2) and every tool writes 128; this allows up to a
+/// sector of the largest kind. Without a bound, a header saying entries of
+/// a megabyte would have the array read — and held in memory — as far as
+/// the disk is long, and a sparse file is long for nothing.
+const MOST_ENTRY: u32 = 4096;
+
 /// What a header holds, of what is read here.
 struct Header {
     entries_at: u64,
@@ -86,8 +93,12 @@ fn read<D: Disk>(disk: &D, at: u64, sector: u64, whole: u64) -> Result<Vec<Parti
         entry_size: u32::from_le_bytes(head[84..88].try_into().unwrap_or_default()),
         entries_crc: u32::from_le_bytes(head[88..92].try_into().unwrap_or_default()),
     };
+    // An entry is 128 × 2^n bytes, which is a power of two of at least 128:
+    // tighter than the multiple of 8 this asked for before, and the
+    // specification's own words.
     if header.entry_size < ENTRY as u32
-        || !header.entry_size.is_multiple_of(8)
+        || !header.entry_size.is_power_of_two()
+        || header.entry_size > MOST_ENTRY
         || header.count == 0
         || header.count > MOST_ENTRIES
     {
