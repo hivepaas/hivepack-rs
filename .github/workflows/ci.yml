@@ -729,7 +729,7 @@ jobs:
       - name: Seed the disk and file system corpora
         run: |
           set -x
-          mkdir -p fuzz/corpus/image fuzz/corpus/fat fuzz/corpus/ext seeds
+          mkdir -p fuzz/corpus/image fuzz/corpus/fat fuzz/corpus/ext target/seeds
           # 256 KiB is the smallest mke2fs writes with 1 KiB blocks; ext4
           # that small has no room for a journal, and says so.
           truncate -s 256K target/seeds/ext2.img && mke2fs -q -F -t ext2 -b 1024 target/seeds/ext2.img || true
@@ -740,7 +740,7 @@ jobs:
           # its BPB, which is a few bytes of this one.
           truncate -s 64K target/seeds/fat12.img && mkfs.fat -F 12 target/seeds/fat12.img || true
           # A disk with a table, and the containers of it that stay small.
-          truncate -s 256K target/seeds/raw.img
+          truncate -s 256K target/seeds/raw.img || true
           printf 'label: gpt\nsize=64KiB, type=linux\nsize=64KiB, type=uefi\n' \
             | sfdisk target/seeds/raw.img || true
           qemu-img convert -f raw -O qcow2 target/seeds/raw.img target/seeds/disk.qcow2 || true
