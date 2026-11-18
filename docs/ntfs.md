@@ -82,6 +82,14 @@ With `extract` as well, `extract_ntfs` writes a volume's tree into a folder, or 
 
 One thing the extraction found that reading alone did not: **which of two names of one record holds the bytes is the directory's order.** The first name met is the file and the second is a hard link to it, and an NTFS index is sorted, so for `hardlink.txt` beside `plain.txt` it is `hardlink.txt` that is written and `plain.txt` that points at it. Nothing in the format makes it the other way round, so the test asks for the pair rather than for a direction.
 
+## Being told at all
+
+`hivepack::open` tells an NTFS file system with no partition table in front of it as `Container::Ntfs` — a Windows partition taken out on its own, or what a `.vhdx` holds once the table has been read — and it tells it **whether or not the crate was built with `ntfs`**. Naming what a file is does not take the reader, and answering "data" about a Windows volume would be worse than naming it and letting the caller find that this build cannot read it.
+
+So the rules are written again in `open/detect.rs`, as FAT's and ext's are, since `open` does not take those readers. `detect` asks for more than this module does: the name at offset 3 (which is the whole of what `Ntfs::open` adds to the library's own check), the fields NTFS leaves zero where FAT keeps its numbers — reserved sectors, tables, root entries, the 16-bit sector count, the table size — and the two NTFS fills instead, how long the volume is and where `$MFT` begins. **What is told is narrower than what this module opens, not wider**, so everything told as NTFS, `Ntfs::open` opens.
+
+FAT and NTFS begin alike: the same jump, the same two bytes at 510. `is_fat` already refused an NTFS boot sector for having no reserved count and no table, and `is_ntfs` refuses a FAT one for its name; `detect`'s tests check each against the other's bytes, and `tests/open_open.rs` holds the one direction that matters — what the reader opens, the opener tells — over a real `mkntfs` image, as it is and under zstd. [open.md](open.md) has the order the containers are told in, and why a table in front wins.
+
 ## Why the feature is off by default
 
 `ntfs` is not in `full`, as `rar` is not. RAR's reason is its license; this one's is the panics above — the two that were found, and the class they belong to. Every reader here is fuzzed, the fix for the index-entry panic is not in any release, and a fuzz target cannot be a gate while it finds a crash nobody here can fix.
