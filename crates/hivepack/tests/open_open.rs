@@ -1720,3 +1720,58 @@ fn a_card_image_is_told_and_its_partition_holds_a_file_system() {
     // And the disk is still a disk: the table in front wins.
     assert_eq!(open(&card).unwrap().1, Container::PartitionedDisk);
 }
+
+/// A VDI, the one container told by a signature that is not at the file's
+/// start: what the reader opens, the opener tells, as it is and under a
+/// layer. The rule on its own is checked over a header built by hand in
+/// `open::detect`'s tests; this is the direction that matters, over an
+/// image a tool wrote.
+#[test]
+#[cfg(feature = "image")]
+fn a_vdi_the_reader_opens_is_told_by_the_opener() {
+    let Some(qemu) = tool("qemu-img") else {
+        eprintln!(
+            "qemu-img cannot be run here: what hivepack::image::Vdi opens is not \
+             checked against what the opener tells. The rule is checked on its own \
+             in open::detect's tests, over a header built by hand."
+        );
+        return;
+    };
+    let s = Scratch::new();
+    let raw = s.path().join("card.raw");
+    let image = s.path().join("card.vdi");
+    // A disk with a GUID partition table on it, so that what is told is
+    // the container around it and not the table inside.
+    let mut disk = vec![0u8; 4 << 20];
+    disk[512..520].copy_from_slice(b"EFI PART");
+    std::fs::write(&raw, &disk).unwrap();
+    let out = std::process::Command::new(&qemu)
+        .args(["convert", "-f", "raw", "-O", "vdi"])
+        .arg(&raw)
+        .arg(&image)
+        .output()
+        .unwrap();
+    if !out.status.success() {
+        eprintln!(
+            "qemu-img wrote no VDI here: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return;
+    }
+    let vdi = std::fs::read(&image).unwrap();
+
+    // The reader opens it, and what it holds is the disk that went in.
+    let read = hivepack::image::Vdi::open(&vdi[..]).unwrap();
+    let mut held = vec![0u8; 520];
+    hivepack::image::Disk::read_exact_at(&read, 0, &mut held).unwrap();
+    assert_eq!(&held[512..], b"EFI PART");
+
+    // So the opener has to say so, as it is and under a layer.
+    let (layers, container, _) = open(&vdi).unwrap();
+    assert!(layers.is_empty());
+    assert_eq!(container, Container::Vdi);
+    let (layers, container, data) = open(&zstd(&vdi)).unwrap();
+    assert_eq!(layers, vec![Layer::Zstd]);
+    assert_eq!(container, Container::Vdi);
+    assert_eq!(data, vdi, "under zstd: not the same bytes");
+}

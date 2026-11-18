@@ -100,6 +100,11 @@ pub enum Container {
     /// only of use beside those files, so one under layers names nothing
     /// that can be reached.
     Vmdk,
+    /// A VDI disk image (`.vdi`, VirtualBox's, QEMU's `vdi`), read by
+    /// `hivepack::image::Vdi`: told by the signature 64 bytes in, since
+    /// what is in front of it is a line of text saying which tool wrote
+    /// the image and not what the image is.
+    Vdi,
     /// A raw disk image with a partition table on it (`.img`, `.bin`, a
     /// `dd` of a card or a stick), read by `hivepack::image::partitions`,
     /// whose partitions hold the file systems.
@@ -167,6 +172,15 @@ const VHDX_MAGIC: &[u8] = b"vhdxfile";
 const VMDK_MAGIC: &[u8] = b"KDMV";
 /// What a VMDK descriptor, which is text, begins with.
 const VMDK_DESCRIPTOR: &[u8] = b"# Disk DescriptorFile";
+/// A VDI's signature and where it is: 64 bytes in, after the line of text
+/// that says what wrote the image. It is the one disk image here whose
+/// numbers are little-endian, and the one that does not begin with its own
+/// magic.
+const VDI_SIGNATURE: [u8; 4] = 0xbeda_107fu32.to_le_bytes();
+const VDI_SIGNATURE_AT: usize = 0x40;
+/// Its major version, the two bytes after the signature's four and the
+/// minor version's two: the layout read here is version 1's.
+const VDI_MAJOR: [u8; 2] = 1u16.to_le_bytes();
 /// A GUID partition table's header signature, in the second sector.
 const GPT_SIGNATURE: &[u8] = b"EFI PART";
 /// Where a master boot record's four entries are, and what one is.
@@ -460,6 +474,22 @@ fn is_partitioned(head: &[u8]) -> bool {
 /// one must not take the reader: `open` is built without `fat`. A test with
 /// the feature on asserts that what the reader opens is told here
 /// (`crates/hivepack/tests/open_open.rs`).
+/// Whether a VDI begins here: the signature 64 bytes in, and a major
+/// version of 1, which is the version whose header holds what is read.
+///
+/// The text in front of the signature is not checked. Every tool writes its
+/// own line there — VirtualBox's names itself, and QEMU writes one of its
+/// own — so a reader that asked for one of them would miss the images
+/// written by the other tools and by the next version of either.
+///
+/// A minor version other than 1.1 is a VDI here and refused by the reader,
+/// which says what it needs: better than calling it data of no kind.
+fn is_vdi(head: &[u8]) -> bool {
+    let at = VDI_SIGNATURE_AT;
+    head.get(at..at + 4) == Some(&VDI_SIGNATURE[..])
+        && head.get(at + 6..at + 8) == Some(&VDI_MAJOR[..])
+}
+
 fn is_fat(head: &[u8]) -> bool {
     let Some(first) = head.get(..512) else {
         return false;
@@ -663,6 +693,9 @@ pub fn detect(head: &[u8], name: Option<&str>) -> Detected {
     }
     if starts(VHD_MAGIC) {
         return Detected::Container(Container::Vhd);
+    }
+    if is_vdi(head) {
+        return Detected::Container(Container::Vdi);
     }
     // A table, or a file system with none in front of it, told only from a
     // head that has already said it is not an image.
@@ -1048,6 +1081,46 @@ mod tests {
         ] {
             assert_eq!(layer(magic), Detected::Container(want), "{magic:?}");
         }
+    }
+
+    /// A VDI says what it is 64 bytes in, so the rule is its own: the
+    /// signature there, whatever the text in front of it says, and a major
+    /// version of 1.
+    #[test]
+    fn a_vdi_is_told_by_the_signature_after_its_text() {
+        let vdi = |text: &[u8], version: u32| {
+            let mut head = vec![0u8; 0x200];
+            head[..text.len()].copy_from_slice(text);
+            head[0x40..0x44].copy_from_slice(&VDI_SIGNATURE);
+            head[0x44..0x48].copy_from_slice(&version.to_le_bytes());
+            head
+        };
+        // Whatever tool wrote it, and whichever minor version: the reader
+        // is the one that refuses a version it does not read.
+        for text in [
+            &b"<<< Oracle VM VirtualBox Disk Image >>>\n"[..],
+            b"<<< QEMU VM Virtual Disk Image >>>\n",
+            b"<<< innotek VirtualBox Disk Image >>>\n",
+            b"",
+        ] {
+            for version in [0x0001_0001, 0x0001_0000, 0x0001_0009] {
+                assert_eq!(
+                    layer(&vdi(text, version)),
+                    Detected::Container(Container::Vdi),
+                    "{text:?} {version:#x}"
+                );
+            }
+        }
+        // A major version whose header is not this one is not told as a
+        // VDI, and neither is the signature anywhere but 64 bytes in.
+        assert_ne!(
+            layer(&vdi(b"<<< x >>>", 0x0002_0000)),
+            Detected::Container(Container::Vdi)
+        );
+        let mut moved = vec![0u8; 0x200];
+        moved[0x30..0x34].copy_from_slice(&VDI_SIGNATURE);
+        moved[0x36..0x38].copy_from_slice(&VDI_MAJOR);
+        assert_ne!(layer(&moved), Detected::Container(Container::Vdi));
     }
 
     #[test]

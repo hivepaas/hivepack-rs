@@ -13,7 +13,8 @@
 //! disk's are: [`Vhd`] for a VHD image (`.vhd`, QEMU's `vpc`), [`Qcow2`] for
 //! QEMU's own, compressed clusters and all, [`Vhdx`] for the one Hyper-V and
 //! WSL2 write, which alone says what a sector is on the disk it holds, and
-//! [`Vmdk`] for VMware's, which is one file or a descriptor naming several.
+//! [`Vmdk`] for VMware's, which is one file or a descriptor naming several,
+//! and [`Vdi`] for VirtualBox's, whose numbers alone are little-endian.
 //! What a partition holds is read by a module of its own: `hivepack::fat`
 //! for FAT12, FAT16 and FAT32, and `hivepack::ext` for ext2, ext3 and
 //! ext4, each behind a feature of its name.
@@ -47,6 +48,7 @@ mod gpt;
 mod mbr;
 mod partition;
 mod qcow2;
+mod vdi;
 mod vhd;
 mod vhdx;
 mod vmdk;
@@ -55,6 +57,7 @@ pub use disk::{Disk, Part};
 pub use error::{Error, Unsupported};
 pub use partition::{Kind, Partition, Table};
 pub use qcow2::Qcow2;
+pub use vdi::Vdi;
 pub use vhd::Vhd;
 pub use vhdx::Vhdx;
 pub use vmdk::Vmdk;

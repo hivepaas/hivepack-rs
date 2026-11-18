@@ -66,6 +66,11 @@ pub enum Error {
     /// beside it. Reading it would be reading a file the descriptor chose,
     /// which is refused however the path reads.
     VmdkElsewhere,
+    /// A VDI says a layout that cannot be read: a disk or a block of no
+    /// length, a block that is not a whole number of sectors, a map that is
+    /// not on the file or that does not reach the whole disk, or an image
+    /// type the format does not have.
+    VdiSays,
     /// An image that needs something this does not do. Each of these would
     /// otherwise be read as a disk of holes, so none is passed over.
     Needs(Unsupported),
@@ -76,8 +81,9 @@ pub enum Error {
 #[non_exhaustive]
 pub enum Unsupported {
     /// Another image behind this one: what is not in it is in that one,
-    /// named by a path written when this one was made. A differencing VHD
-    /// and a QCOW2 image with a backing file are both this.
+    /// named by a path written when this one was made. A differencing VHD,
+    /// a QCOW2 image with a backing file, and a VDI that is a differencing
+    /// or an undo image are all this.
     Backing,
     /// The data in a file of its own, this one holding only the tables.
     ExternalData,
@@ -97,7 +103,9 @@ pub enum Unsupported {
     /// Entries written to a VHDX's log and never applied: what they say
     /// belongs in its tables, and putting it there is writing.
     Log,
-    /// Something the image says it needs that is not known here at all.
+    /// Something the image says it needs that is not known here at all: a
+    /// VDI of a version other than 1.1, which keeps its map elsewhere, or
+    /// one that keeps bytes of its own in front of every block.
     Feature,
 }
 
@@ -147,6 +155,7 @@ impl fmt::Display for Error {
             Error::VmdkElsewhere => {
                 write!(f, "the VMDK names an extent somewhere other than beside it")
             }
+            Error::VdiSays => write!(f, "the VDI says a layout it cannot have"),
             Error::Needs(what) => write!(f, "the image needs {what}, which is not read"),
         }
     }
