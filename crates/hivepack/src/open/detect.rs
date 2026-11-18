@@ -112,6 +112,11 @@ pub enum Container {
     /// by `hivepack::ext`: a partition taken out on its own, and what
     /// WSL2's `ext4.vhdx` holds.
     Ext,
+    /// An NTFS file system with no table in front of it, read by
+    /// `hivepack::ntfs`: a Windows partition taken out on its own, and
+    /// what a Windows `.vhdx` or a VM's disk holds. Told whether or not
+    /// the crate was built with `ntfs`; reading it takes that feature.
+    Ntfs,
     /// Data: one file, compressed or encrypted (`notes.txt.zst`).
     Data,
 }
@@ -487,6 +492,54 @@ fn is_fat(head: &[u8]) -> bool {
         && (small_fat != 0 || large_fat != 0)
 }
 
+/// Whether `head` begins an NTFS file system. The name is the reader's own
+/// check (`crates/hivepack/src/ntfs/mod.rs`), written again here because
+/// telling one must not take the reader: `open` is built without `ntfs`. A
+/// test with the feature on asserts that what the reader opens is told
+/// here (`crates/hivepack/tests/open_open.rs`).
+///
+/// The fields beside the name are the ones NTFS leaves zero where FAT
+/// keeps its numbers, which is also why [`is_fat`] does not answer for an
+/// NTFS boot sector: it wants a reserved count and a table, and NTFS has
+/// neither. Everything told here the reader opens, since it asks for less
+/// — the whole boot sector and the name.
+fn is_ntfs(head: &[u8]) -> bool {
+    let Some(first) = head.get(..512) else {
+        return false;
+    };
+    if first[510..512] != [0x55, 0xAA] || !matches!(first[0], 0xEB | 0xE9) {
+        return false;
+    }
+    if &first[3..11] != b"NTFS    " {
+        return false;
+    }
+    let sector = u16::from_le_bytes([first[11], first[12]]);
+    let per_cluster = first[13];
+    let reserved = u16::from_le_bytes([first[14], first[15]]);
+    let fats = first[16];
+    let root_entries = u16::from_le_bytes([first[17], first[18]]);
+    let small_sectors = u16::from_le_bytes([first[19], first[20]]);
+    let table = u16::from_le_bytes([first[22], first[23]]);
+    let sectors = u64::from_le_bytes(first[40..48].try_into().unwrap_or_default());
+    let mft = u64::from_le_bytes(first[48..56].try_into().unwrap_or_default());
+    matches!(sector, 512 | 1024 | 2048 | 4096)
+        // Sectors in a cluster, a power of two; for the clusters above
+        // 64 KiB that Windows 10 added, 2^-n sectors written as the two's
+        // complement of n, which is 0xF4 and up.
+        && ((per_cluster.is_power_of_two() && per_cluster <= 128) || per_cluster >= 0xF4)
+        // Where FAT keeps its numbers, NTFS keeps nothing.
+        && reserved == 0
+        && fats == 0
+        && root_entries == 0
+        && small_sectors == 0
+        && table == 0
+        // And what NTFS keeps instead: how long the volume is, and where
+        // the master file table begins. A volume of no sectors, or whose
+        // table is at cluster 0, is not one.
+        && sectors != 0
+        && mft != 0
+}
+
 /// Whether `head` holds an ext superblock: its magic, and the two fields
 /// every ext file system has had, which say sizes nothing else would.
 fn is_ext(head: &[u8]) -> bool {
@@ -619,6 +672,9 @@ pub fn detect(head: &[u8], name: Option<&str>) -> Detected {
         }
         if is_fat(head) {
             return Detected::Container(Container::Fat);
+        }
+        if is_ntfs(head) {
+            return Detected::Container(Container::Ntfs);
         }
         if is_ext(head) {
             return Detected::Container(Container::Ext);
@@ -929,6 +985,24 @@ mod tests {
         b
     }
 
+    /// An NTFS boot sector, with the fields NTFS fills and the fields it
+    /// leaves zero where FAT keeps its numbers.
+    fn ntfs_boot_sector(sector: u16, per_cluster: u8) -> Vec<u8> {
+        let mut b = vec![0u8; 512];
+        b[0] = 0xEB;
+        b[1] = 0x52;
+        b[2] = 0x90;
+        b[3..11].copy_from_slice(b"NTFS    ");
+        b[11..13].copy_from_slice(&sector.to_le_bytes());
+        b[13] = per_cluster;
+        b[21] = 0xF8; // the media descriptor, as mkntfs writes it
+        b[40..48].copy_from_slice(&131_071u64.to_le_bytes()); // sectors
+        b[48..56].copy_from_slice(&4u64.to_le_bytes()); // $MFT's cluster
+        b[56..64].copy_from_slice(&8191u64.to_le_bytes()); // $MFTMirr's
+        b[510..512].copy_from_slice(&[0x55, 0xAA]);
+        b
+    }
+
     /// A master boot record: `kinds` are the types of its entries, each of
     /// 2048 sectors, the first bootable.
     fn mbr(kinds: &[u8]) -> Vec<u8> {
@@ -1032,6 +1106,66 @@ mod tests {
         ] {
             assert_eq!(layer(&whole(head)), Detected::Container(Container::Data));
         }
+    }
+
+    /// An NTFS boot sector is told as NTFS, and the fields that say it is
+    /// not one. The clusters Windows 10 added, written as the two's
+    /// complement of a power of two, are told as well.
+    #[test]
+    fn an_ntfs_file_system_with_no_table_in_front_of_it_is_told() {
+        for sector in [512u16, 4096] {
+            for per_cluster in [1u8, 8, 128, 0xF7] {
+                let head = whole(ntfs_boot_sector(sector, per_cluster));
+                assert_eq!(
+                    layer(&head),
+                    Detected::Container(Container::Ntfs),
+                    "sector {sector}, {per_cluster} per cluster"
+                );
+            }
+        }
+
+        // The name, which is the whole of what the library underneath
+        // checks and the only thing that tells NTFS from the other boot
+        // sectors; a volume of no sectors; a master file table at cluster
+        // 0; a sector size no disk has; and the fields FAT fills, which an
+        // NTFS boot sector leaves zero.
+        let mut other_name = ntfs_boot_sector(512, 8);
+        other_name[3..11].copy_from_slice(b"EXFAT   ");
+        let mut no_sectors = ntfs_boot_sector(512, 8);
+        no_sectors[40..48].fill(0);
+        let mut no_table = ntfs_boot_sector(512, 8);
+        no_table[48..56].fill(0);
+        let odd_sector = ntfs_boot_sector(777, 8);
+        let mut reserved = ntfs_boot_sector(512, 8);
+        reserved[14..16].copy_from_slice(&1u16.to_le_bytes());
+        let mut two_tables = ntfs_boot_sector(512, 8);
+        two_tables[16] = 2;
+        let mut three_sectors = ntfs_boot_sector(512, 3);
+        three_sectors[13] = 3;
+        for head in [
+            other_name,
+            no_sectors,
+            no_table,
+            odd_sector,
+            reserved,
+            two_tables,
+            three_sectors,
+        ] {
+            assert_eq!(layer(&whole(head)), Detected::Container(Container::Data));
+        }
+    }
+
+    /// The two boot sectors do not answer for each other: FAT's rules
+    /// refuse an NTFS one for having no reserved count and no table, and
+    /// NTFS's refuse a FAT one for its name. Neither looks like a
+    /// partition table, although all three end in the same two bytes.
+    #[test]
+    fn a_fat_boot_sector_and_an_ntfs_one_are_not_each_other() {
+        let fat = boot_sector(512, 8, false);
+        let ntfs = ntfs_boot_sector(512, 8);
+        assert!(is_fat(&fat) && !is_ntfs(&fat));
+        assert!(is_ntfs(&ntfs) && !is_fat(&ntfs));
+        assert!(!is_partitioned(&fat) && !is_partitioned(&ntfs));
     }
 
     #[test]
