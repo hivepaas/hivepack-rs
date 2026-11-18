@@ -174,10 +174,17 @@ jobs:
         run: cargo test --workspace --locked --features hivepack/unsafe-fast,hivepack/memory
       - run: cargo test -p hivepack --locked --features rar,memory --test extract_rar --test extract_rar_threads --test rar_oracle --test rar_threads --test memory_limits
       # hivepack::ntfs, off by default like rar, so the whole suite above
-      # does not reach it. The tests build a file system with mkntfs and
-      # ntfs-3g and say so and pass where those are not installed, which is
-      # every system here but Linux: docs/ntfs.md.
+      # does not reach it. The tests build a file system, which takes tools
+      # no runner image carries, so Linux installs them and is then held to
+      # having them: without `HIVEPACK_NTFS_REQUIRED`, a run that found no
+      # tools passes exactly as one that read an image does, and `cargo
+      # test` hides the printed reason for a test that passes. The other
+      # systems have no such tools at all and skip: docs/ntfs.md.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ntfs-3g
       - run: cargo test -p hivepack --locked --features ntfs --test ntfs
+        env:
+          HIVEPACK_NTFS_REQUIRED: ${{ runner.os == 'Linux' && '1' || '' }}
       # hivepack::memory, off by default: its tests on each system (on
       # Windows, its own process in a job object), and the example that
       # wires it to the coders.

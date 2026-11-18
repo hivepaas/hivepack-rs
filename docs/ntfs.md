@@ -86,6 +86,8 @@ What would turn it on: a release of the crate carrying PR #41, which also takes 
 
 `crates/hivepack/tests/ntfs.rs`. The file system is built once per run: `mkntfs` makes it, `ntfs-3g` mounts it so files can be written into it, and `python3` sets the two things that are extended attributes rather than files — `system.ntfs_attrib_be` of `0x800` on a directory, which is what makes NTFS compress what is written in it from then on, and a stream beside a file. Each tool is asked for on its own and what is missing is printed, so a machine without them says so instead of passing quietly.
 
+**And printing is not enough on its own.** `cargo test` hides what a passing test prints, so a run that found no tools and a run that read an image look the same from the outside — the green log of the first run of these tests on CI could not be told from a green log of nothing happening. So CI installs the tools on Linux and then sets `HIVEPACK_NTFS_REQUIRED`, under which not being able to build the image is a failure rather than a reason, the way `HIVEPACK_TESTDATA_REQUIRED` works for the data sets. That guard was checked by hiding `/usr/sbin` in a mount namespace: with the variable set the suite fails and names the missing tools, without it the suite passes and prints them, and with the tools there it passes 9 of 9.
+
 - **A tree read back as it went in**: every path, every length, every file's bytes, and nothing in the image that was never written.
 - **The compressed file refused**, with the premise checked first: the test asserts the file system really did compress it, so that it cannot pass on an image where there was nothing to refuse.
 - **The stream beside a file is not the file**, and is not a name in the directory either.

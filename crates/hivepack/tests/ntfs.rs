@@ -102,9 +102,23 @@ struct Built {
 }
 
 /// The image the tests read, built once, or why it could not be built.
+///
+/// Where `HIVEPACK_NTFS_REQUIRED` is set, not being able to build it is a
+/// failure rather than a reason: CI sets it on the systems whose tools it
+/// installs, as the data sets do with `HIVEPACK_TESTDATA_REQUIRED`.
+/// Without that, a test that found no tools and a test that read an image
+/// both pass, and `cargo test` hides the printed reason for a test that
+/// passes, so the suite could say nothing and look the same.
 fn built() -> Result<&'static Built, &'static str> {
     static ONCE: OnceLock<Result<Built, String>> = OnceLock::new();
-    ONCE.get_or_init(build).as_ref().map_err(String::as_str)
+    let built = ONCE.get_or_init(build).as_ref().map_err(String::as_str);
+    if let Err(why) = built {
+        assert!(
+            std::env::var_os("HIVEPACK_NTFS_REQUIRED").is_none(),
+            "HIVEPACK_NTFS_REQUIRED is set, so an image was to be built: {why}"
+        );
+    }
+    built
 }
 
 /// Builds the image: `mkntfs` makes the file system, `ntfs-3g` mounts it so
@@ -113,10 +127,13 @@ fn built() -> Result<&'static Built, &'static str> {
 /// NTFS compress what is written in a directory, and a stream beside a
 /// file. Each is asked for on its own, and what is missing is said.
 fn build() -> Result<Built, String> {
+    // `fusermount3` on a system with FUSE 3 and `fusermount` on one with
+    // FUSE 2; ntfs-3g takes either, and which it is says nothing about
+    // whether an image can be built.
     let (Some(mkntfs), Some(ntfs3g), Some(fusermount), Some(python)) = (
         tool("mkntfs"),
         tool("ntfs-3g"),
-        tool("fusermount"),
+        tool("fusermount3").or_else(|| tool("fusermount")),
         tool("python3"),
     ) else {
         return Err("mkntfs, ntfs-3g, fusermount and python3 are not all installed".into());
