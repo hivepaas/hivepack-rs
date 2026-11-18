@@ -149,6 +149,12 @@ pub enum ErrorKind {
     /// it, or a directory whose records do not read.
     #[cfg(feature = "fat")]
     Fat(crate::fat::Error),
+    /// The NTFS file system could not be read, or holds what is not read:
+    /// data NTFS compressed or encrypted, a reparse point, a file whose
+    /// runs do not cover its length, or a directory whose entries do not
+    /// read.
+    #[cfg(feature = "ntfs")]
+    Ntfs(crate::ntfs::Error),
     /// The 7z archive's data could not be read: damaged, a CRC that does
     /// not match, a method `hivepack::sevenz` does not decode, or a password
     /// missing or wrong.
@@ -200,6 +206,17 @@ impl ErrorKind {
             ErrorKind::Ext(_) => true,
             #[cfg(feature = "fat")]
             ErrorKind::Fat(_) => true,
+            // A file this crate will not read — compressed, encrypted, a
+            // reparse point — is not damage: reading on would not help,
+            // and `OnDamaged` is for what a second try can get past.
+            #[cfg(feature = "ntfs")]
+            ErrorKind::Ntfs(e) => !matches!(
+                e,
+                crate::ntfs::Error::Compressed
+                    | crate::ntfs::Error::Encrypted
+                    | crate::ntfs::Error::Reparse
+                    | crate::ntfs::Error::AttributeList
+            ),
             ErrorKind::SevenZip(e) => !matches!(
                 e,
                 crate::sevenz::Error::PasswordRequired
@@ -270,6 +287,8 @@ impl fmt::Display for ErrorKind {
             ErrorKind::Ext(e) => write!(f, "file system: {e}"),
             #[cfg(feature = "fat")]
             ErrorKind::Fat(e) => write!(f, "file system: {e}"),
+            #[cfg(feature = "ntfs")]
+            ErrorKind::Ntfs(e) => write!(f, "file system: {e}"),
             ErrorKind::SevenZip(e) => write!(f, "archive: {e}"),
             #[cfg(feature = "rar")]
             ErrorKind::Rar(e) => write!(f, "archive: {e}"),
@@ -311,6 +330,8 @@ impl std::error::Error for Error {
             ErrorKind::Ext(e) => Some(e),
             #[cfg(feature = "fat")]
             ErrorKind::Fat(e) => Some(e),
+            #[cfg(feature = "ntfs")]
+            ErrorKind::Ntfs(e) => Some(e),
             ErrorKind::SevenZip(e) => Some(e),
             #[cfg(feature = "rar")]
             ErrorKind::Rar(e) => Some(e),

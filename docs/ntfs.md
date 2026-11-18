@@ -76,6 +76,12 @@ Not read about. A 96 MiB file system built by `mkntfs`, filled through `ntfs-3g`
 - Runs that do not cover the length the file says: `Short { says, covers }`.
 - A directory of more than 2^20 entries, or a file of more than 2^20 runs: `TooMany`. Directories inside directories past 1024 deep: `TooDeep`. A directory leading back to one already walked into: `Again { at }`.
 
+## Taking the files out
+
+With `extract` as well, `extract_ntfs` writes a volume's tree into a folder, or `extract_ntfs_to` into a `Sink`, under the same rules every other extractor here follows: [extract.md](extract.md) has the section. What NTFS keeps that cannot come out whole is refused and not approximated — compressed data above all, where the library answers with the compressed bytes and no error — so a file either comes out as it is in the image or does not come out at all. The streams beside a file are left where they are, and the security descriptor is not turned into a Unix owner or mode.
+
+One thing the extraction found that reading alone did not: **which of two names of one record holds the bytes is the directory's order.** The first name met is the file and the second is a hard link to it, and an NTFS index is sorted, so for `hardlink.txt` beside `plain.txt` it is `hardlink.txt` that is written and `plain.txt` that points at it. Nothing in the format makes it the other way round, so the test asks for the pair rather than for a direction.
+
 ## Why the feature is off by default
 
 `ntfs` is not in `full`, as `rar` is not. RAR's reason is its license; this one's is the panics above — the two that were found, and the class they belong to. Every reader here is fuzzed, the fix for the index-entry panic is not in any release, and a fuzz target cannot be a gate while it finds a crash nobody here can fix.
@@ -84,7 +90,7 @@ What would turn it on: a release of the crate carrying PR #41, which also takes 
 
 ## How it is checked
 
-`crates/hivepack/tests/ntfs.rs`. The file system is built once per run: `mkntfs` makes it, `ntfs-3g` mounts it so files can be written into it, and `python3` sets the two things that are extended attributes rather than files — `system.ntfs_attrib_be` of `0x800` on a directory, which is what makes NTFS compress what is written in it from then on, and a stream beside a file. Each tool is asked for on its own and what is missing is printed, so a machine without them says so instead of passing quietly.
+`crates/hivepack/tests/ntfs.rs` reads a file system and `crates/hivepack/tests/extract_ntfs.rs` extracts one, both built by `crates/hivepack/tests/ntfs_support/mod.rs`. The file system is built once per test binary: `mkntfs` makes it, `ntfs-3g` mounts it so files can be written into it, and `python3` sets the two things that are extended attributes rather than files — `system.ntfs_attrib_be` of `0x800` on a directory, which is what makes NTFS compress what is written in it from then on, and a stream beside a file. Each tool is asked for on its own and what is missing is printed, so a machine without them says so instead of passing quietly.
 
 **And printing is not enough on its own.** `cargo test` hides what a passing test prints, so a run that found no tools and a run that read an image look the same from the outside — the green log of the first run of these tests on CI could not be told from a green log of nothing happening. So one CI job installs the tools and is held to having them with `HIVEPACK_NTFS_REQUIRED`, under which not being able to build the image is a failure rather than a reason, the way `HIVEPACK_TESTDATA_REQUIRED` works for the data sets.
 
@@ -100,6 +106,15 @@ The guard was checked by hiding `/usr/sbin` in a mount namespace so that `mkntfs
 - **A directory too long for its record**, read whole: 400 names.
 - **A file in many pieces read in order**, in reads of 777 bytes so that none lines up with a run, and then the last byte alone after a seek from the end.
 - **What is not NTFS is not opened**, and **a disk too short for a boot sector is not opened** — a FAT boot sector, zeroes, and the five lengths above. These two need no tools, so they run everywhere.
+
+What the extraction tests add, over the same image:
+
+- **A tree extracted comes out as it went in**: every file's bytes, every folder a folder, the counts and the total in the summary, and nothing in the destination that was never written.
+- **The compressed file is refused rather than written**, both ways: with `OnRefused::Skip` its folder comes out and it does not, and by default the extraction stops with `Ntfs(Compressed)` **before the destination is made** — which the test asserts by looking for the folder and not finding it. The premise is checked first here too.
+- **Two names of one record become one file**: the same inode and a link count of two, and two files holding the same bytes with `Links::AsFile`.
+- **A hole and a file in a hundred pieces come out whole**, and a name that is not ASCII comes out as its characters.
+- **The stream beside a file is not written**: nothing in the destination holds a colon, and `ads.txt` holds its own data.
+- **A sink is given what the folder would get**: the same folders, the same files with the same lengths, and the hard link as a link after the file it names.
 
 The build being fast enough to disbelieve — nine tests in under a tenth of a second, image and all — was settled by breaking one assertion on purpose and watching the test fail, rather than by argument.
 
