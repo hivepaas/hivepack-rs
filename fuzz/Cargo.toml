@@ -17,7 +17,7 @@ unsafe-fast = ["hivepack/unsafe-fast"]
 
 [dependencies]
 libfuzzer-sys = "0.4"
-hivepack = { path = "../crates/hivepack", features = ["rar"] }
+hivepack = { path = "../crates/hivepack", features = ["ntfs", "rar"] }
 # libzstd 1.5.7, without the x86-64 Huffman assembly, with its worker threads
 # and its dictionary builder, as the tests build it.
 zstd = { version = "0.14.3", default-features = false, features = ["experimental", "no_asm", "zdict_builder", "zstdmt"] }
@@ -350,6 +350,13 @@ bench = false
 [[bin]]
 name = "ext"
 path = "fuzz_targets/ext.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ntfs"
+path = "fuzz_targets/ntfs.rs"
 test = false
 doc = false
 bench = false
