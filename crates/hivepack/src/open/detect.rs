@@ -105,6 +105,11 @@ pub enum Container {
     /// what is in front of it is a line of text saying which tool wrote
     /// the image and not what the image is.
     Vdi,
+    /// An Android sparse image (`sparse.img`, a ROM's `super.img`, what
+    /// `img2simg` writes), read by `hivepack::image::AndroidSparse`: a
+    /// stream of chunks holding the blocks of a disk, which hold a file
+    /// system or a table of their own.
+    AndroidSparse,
     /// A raw disk image with a partition table on it (`.img`, `.bin`, a
     /// `dd` of a card or a stick), read by `hivepack::image::partitions`,
     /// whose partitions hold the file systems.
@@ -177,6 +182,8 @@ const VHDX_MAGIC: &[u8] = b"vhdxfile";
 const VMDK_MAGIC: &[u8] = b"KDMV";
 /// What a VMDK descriptor, which is text, begins with.
 const VMDK_DESCRIPTOR: &[u8] = b"# Disk DescriptorFile";
+/// What an Android sparse image begins with, little-endian.
+const SPARSE_MAGIC: &[u8] = &0xed26_ff3au32.to_le_bytes();
 /// A VDI's signature and where it is: 64 bytes in, after the line of text
 /// that says what wrote the image. It is the one disk image here whose
 /// numbers are little-endian, and the one that does not begin with its own
@@ -722,6 +729,9 @@ pub fn detect(head: &[u8], name: Option<&str>) -> Detected {
     if is_vdi(head) {
         return Detected::Container(Container::Vdi);
     }
+    if starts(SPARSE_MAGIC) {
+        return Detected::Container(Container::AndroidSparse);
+    }
     // A table, or a file system with none in front of it, told only from a
     // head that has already said it is not an image.
     if enough_for_a_disk(head) {
@@ -1114,6 +1124,17 @@ mod tests {
     /// A VDI says what it is 64 bytes in, so the rule is its own: the
     /// signature there, whatever the text in front of it says, and a major
     /// version of 1.
+    /// An Android sparse image, told by the four bytes it begins with.
+    #[test]
+    fn an_android_sparse_image_is_told_by_its_magic() {
+        let mut head = vec![0u8; 64];
+        head.splice(0..4, SPARSE_MAGIC.iter().copied());
+        assert_eq!(
+            layer(&whole(head)),
+            Detected::Container(Container::AndroidSparse)
+        );
+    }
+
     #[test]
     fn a_vdi_is_told_by_the_signature_after_its_text() {
         let vdi = |text: &[u8], version: u32| {

@@ -71,6 +71,12 @@ pub enum Error {
     /// not on the file or that does not reach the whole disk, or an image
     /// type the format does not have.
     VdiSays,
+    /// An Android sparse image says a layout that cannot be read: a block
+    /// of no length or not a whole number of four bytes, a header shorter
+    /// than the format's own, a chunk whose length does not match what it
+    /// holds, a chunk that is not on the file, or chunks covering more of
+    /// the disk than the header says there is.
+    SparseSays,
     /// An image that needs something this does not do. Each of these would
     /// otherwise be read as a disk of holes, so none is passed over.
     Needs(Unsupported),
@@ -105,7 +111,10 @@ pub enum Unsupported {
     Log,
     /// Something the image says it needs that is not known here at all: a
     /// VDI of a version other than 1.1, which keeps its map elsewhere, or
-    /// one that keeps bytes of its own in front of every block.
+    /// one that keeps bytes of its own in front of every block; an Android
+    /// sparse image of a major version past 1, or one holding a kind of
+    /// chunk this does not know, which cannot be stepped over because the
+    /// chunks are the disk in order.
     Feature,
 }
 
@@ -156,6 +165,9 @@ impl fmt::Display for Error {
                 write!(f, "the VMDK names an extent somewhere other than beside it")
             }
             Error::VdiSays => write!(f, "the VDI says a layout it cannot have"),
+            Error::SparseSays => {
+                write!(f, "the sparse image says a layout it cannot have")
+            }
             Error::Needs(what) => write!(f, "the image needs {what}, which is not read"),
         }
     }
