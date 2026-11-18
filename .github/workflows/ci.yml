@@ -188,10 +188,23 @@ jobs:
       # all. The others still run the tests and print why they skip, and
       # the two that need no tools run everywhere: docs/ntfs.md.
       - if: matrix.ntfs
-        run: sudo apt-get update && sudo apt-get install -y ntfs-3g
+        run: sudo apt-get update && sudo apt-get install -y ntfs-3g exfatprogs
       - run: cargo test -p hivepack --locked --features ntfs --test ntfs --test extract_ntfs
         env:
           HIVEPACK_NTFS_REQUIRED: ${{ matrix.ntfs && '1' || '' }}
+      # hivepack::exfat is in the default features, so the whole suite above
+      # reaches it — but its volumes take exfatprogs, which no runner image
+      # carries, and the step that installs it comes after that run. So the
+      # two tests are run again here, where it is installed, and the one job
+      # that has it is held to having it: `HIVEPACK_EXFAT_REQUIRED` makes a
+      # missing tool a failure rather than a printed reason, since `cargo
+      # test` hides what a passing test printed and a suite that found no
+      # tools would look exactly like one that read a volume. The volumes
+      # built by hand need no tool and run everywhere: docs/exfat.md.
+      - if: matrix.ntfs
+        run: cargo test -p hivepack --locked --test exfat --test extract_exfat
+        env:
+          HIVEPACK_EXFAT_REQUIRED: '1'
       # hivepack::memory, off by default: its tests on each system (on
       # Windows, its own process in a job object), and the example that
       # wires it to the coders.
