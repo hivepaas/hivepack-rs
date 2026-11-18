@@ -83,6 +83,16 @@
 //! extended attributes and neither kind of link, so only files and
 //! directories come out.
 //!
+//! With the feature `ntfs`, off by default as the library that reads the
+//! structures is not in a release that can be fuzzed (`docs/ntfs.md`),
+//! `extract_ntfs` extracts the NTFS file systems `hivepack::ntfs` reads —
+//! a Windows VHDX, a VM's disk. What NTFS keeps that cannot come out whole
+//! is refused rather than written: data NTFS compressed itself, which the
+//! library hands back compressed with no error at all, data the
+//! encrypting file system holds the key to, and reparse points. The
+//! streams beside a file are left where they are, and the security
+//! descriptor every file carries is not turned into a Unix owner or mode.
+//!
 //! With the feature `rar`, off by default as it takes UnRAR's license,
 //! `extract_rar` extracts RAR archives the same way, reading them twice.
 //!
@@ -105,6 +115,8 @@ mod ext;
 mod fat;
 mod iso;
 mod name;
+#[cfg(feature = "ntfs")]
+mod ntfs;
 mod once;
 mod origin;
 mod plan;
@@ -132,6 +144,8 @@ pub use ext::{extract_ext, extract_ext_to};
 pub use fat::{extract_fat, extract_fat_to};
 pub use iso::{extract_iso, extract_iso_to};
 pub use name::{MAX_COMPONENT, Name, NameError, NameRules, check_name, check_name_for};
+#[cfg(feature = "ntfs")]
+pub use ntfs::{extract_ntfs, extract_ntfs_to};
 pub use origin::Origin;
 pub use plan::{
     Limits, LinkOutside, Links, NameDecoder, Names, OnDamaged, OnDamagedFn, OnLinksOutside,

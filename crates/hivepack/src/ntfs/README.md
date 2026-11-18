@@ -2,7 +2,7 @@
 
 Reading NTFS file systems in safe Rust, read-only.
 
-> **Status:** reads the directories, the files, the times and the alternate data streams of an NTFS file system on a [`Disk`](../image) — a partition of a disk image, or a file that holds one as it is. Compressed and encrypted data are **refused**, not read. Checked against file systems `mkntfs` writes and `ntfs-3g` fills, including a compressed file, a sparse file, a file in a hundred pieces, a second name for one file, and a directory too long for its own record. Writing is not here and is not planned. This is the last file system of [issue #225](https://github.com/hivepaas/hivepack-rs/issues/225), after [`hivepack::fat`](../fat) and [`hivepack::ext`](../ext).
+> **Status:** reads the directories, the files, the times and the alternate data streams of an NTFS file system on a [`Disk`](../image) — a partition of a disk image, or a file that holds one as it is. Compressed and encrypted data are **refused**, not read. Checked against file systems `mkntfs` writes and `ntfs-3g` fills, including a compressed file, a sparse file, a file in a hundred pieces, a second name for one file, and a directory too long for its own record. Extracted to a folder or a sink by [`hivepack::extract`](../extract)'s `extract_ntfs`, with every rule it holds an archive to. Writing is not here and is not planned. This is the last file system of [issue #225](https://github.com/hivepaas/hivepack-rs/issues/225), after [`hivepack::fat`](../fat) and [`hivepack::ext`](../ext).
 
 ```rust
 use std::io::Read;

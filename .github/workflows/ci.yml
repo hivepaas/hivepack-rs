@@ -189,7 +189,7 @@ jobs:
       # the two that need no tools run everywhere: docs/ntfs.md.
       - if: matrix.ntfs
         run: sudo apt-get update && sudo apt-get install -y ntfs-3g
-      - run: cargo test -p hivepack --locked --features ntfs --test ntfs
+      - run: cargo test -p hivepack --locked --features ntfs --test ntfs --test extract_ntfs
         env:
           HIVEPACK_NTFS_REQUIRED: ${{ matrix.ntfs && '1' || '' }}
       # hivepack::memory, off by default: its tests on each system (on
