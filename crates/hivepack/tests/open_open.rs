@@ -1613,6 +1613,37 @@ fn a_file_system_the_reader_opens_is_told_by_the_opener() {
     }
 }
 
+/// The same contract for NTFS, in a test of its own because the feature is
+/// off by default: the suite that runs everywhere must not be gated on it.
+///
+/// `mkntfs` alone is enough here — nothing has to be mounted or written
+/// into the file system — so this runs wherever ntfs-3g's tools are
+/// installed, and says so where they are not.
+#[test]
+#[cfg(all(feature = "ntfs", feature = "image"))]
+fn an_ntfs_file_system_the_reader_opens_is_told_by_the_opener() {
+    let s = Scratch::new();
+    // 16 MiB: mkntfs refuses a volume too small to hold its own records.
+    let Some(image) = an_image(&s, "ntfs.img", 16 << 20, &["mkntfs", "-F", "-q"]) else {
+        eprintln!(
+            "mkntfs cannot be run here: what hivepack::ntfs opens is not checked \
+             against what the opener tells. The rules are checked on their own in \
+             open::detect's tests, over a boot sector built by hand."
+        );
+        return;
+    };
+    // The reader opens it.
+    hivepack::ntfs::Ntfs::open(&image[..]).unwrap();
+    // So the opener has to say so, as it is and under a layer.
+    let (layers, container, _) = open(&image).unwrap();
+    assert!(layers.is_empty());
+    assert_eq!(container, Container::Ntfs);
+    let (layers, container, data) = open(&zstd(&image)).unwrap();
+    assert_eq!(layers, vec![Layer::Zstd]);
+    assert_eq!(container, Container::Ntfs);
+    assert_eq!(data, image, "under zstd: not the same bytes");
+}
+
 /// A disk with a table on it, and the file system in its partition told
 /// through it: the three layers of a disk image, which is what this is for.
 #[test]
