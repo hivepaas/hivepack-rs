@@ -120,6 +120,9 @@ jobs:
             groups: core,generated,fuzz
             cache: core-generated-fuzz
             unsafe-fast: true
+            # The one job that builds an NTFS file system rather than
+            # saying it cannot: it installs the tools and may mount.
+            ntfs: true
           # Its whole suite as packwing builds hivepack, every format through
           # the unsafe-fast decoders and arm64's CRC-32 instructions; the
           # others' as the crate's default, which main runs both ways.
@@ -175,16 +178,20 @@ jobs:
       - run: cargo test -p hivepack --locked --features rar,memory --test extract_rar --test extract_rar_threads --test rar_oracle --test rar_threads --test memory_limits
       # hivepack::ntfs, off by default like rar, so the whole suite above
       # does not reach it. The tests build a file system, which takes tools
-      # no runner image carries, so Linux installs them and is then held to
-      # having them: without `HIVEPACK_NTFS_REQUIRED`, a run that found no
-      # tools passes exactly as one that read an image does, and `cargo
-      # test` hides the printed reason for a test that passes. The other
-      # systems have no such tools at all and skip: docs/ntfs.md.
-      - if: runner.os == 'Linux'
+      # no runner image carries and a FUSE mount the runner has to allow,
+      # so one job installs them and is then held to having them: without
+      # `HIVEPACK_NTFS_REQUIRED` a run that found no tools passes exactly
+      # as one that read an image does, and `cargo test` hides the printed
+      # reason for a test that passes. Only this job, measured: the arm
+      # runner answers "mount failed: Operation not permitted" to an
+      # unprivileged ntfs-3g, and macOS and Windows have no such tools at
+      # all. The others still run the tests and print why they skip, and
+      # the two that need no tools run everywhere: docs/ntfs.md.
+      - if: matrix.ntfs
         run: sudo apt-get update && sudo apt-get install -y ntfs-3g
       - run: cargo test -p hivepack --locked --features ntfs --test ntfs
         env:
-          HIVEPACK_NTFS_REQUIRED: ${{ runner.os == 'Linux' && '1' || '' }}
+          HIVEPACK_NTFS_REQUIRED: ${{ matrix.ntfs && '1' || '' }}
       # hivepack::memory, off by default: its tests on each system (on
       # Windows, its own process in a job object), and the example that
       # wires it to the coders.

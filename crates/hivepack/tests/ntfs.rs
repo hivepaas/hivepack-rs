@@ -103,18 +103,26 @@ struct Built {
 
 /// The image the tests read, built once, or why it could not be built.
 ///
-/// Where `HIVEPACK_NTFS_REQUIRED` is set, not being able to build it is a
-/// failure rather than a reason: CI sets it on the systems whose tools it
-/// installs, as the data sets do with `HIVEPACK_TESTDATA_REQUIRED`.
-/// Without that, a test that found no tools and a test that read an image
-/// both pass, and `cargo test` hides the printed reason for a test that
-/// passes, so the suite could say nothing and look the same.
+/// Where `HIVEPACK_NTFS_REQUIRED` holds a value, not being able to build
+/// it is a failure rather than a reason: CI gives it one on the job whose
+/// tools it installs and that can mount what they write, as the data sets
+/// do with `HIVEPACK_TESTDATA_REQUIRED`. Without that, a test that found
+/// no tools and a test that read an image both pass, and `cargo test`
+/// hides the printed reason for a test that passes, so the suite could say
+/// nothing and look exactly the same.
+///
+/// **An empty value is not a value.** A workflow that sets the variable
+/// for every system and fills it in for one leaves the others holding an
+/// empty string, which is still set as far as the environment goes; the
+/// first version of this read it with `var_os` and failed on macOS and
+/// Windows for having been given nothing.
 fn built() -> Result<&'static Built, &'static str> {
     static ONCE: OnceLock<Result<Built, String>> = OnceLock::new();
     let built = ONCE.get_or_init(build).as_ref().map_err(String::as_str);
     if let Err(why) = built {
+        let required = std::env::var("HIVEPACK_NTFS_REQUIRED").unwrap_or_default();
         assert!(
-            std::env::var_os("HIVEPACK_NTFS_REQUIRED").is_none(),
+            required.is_empty(),
             "HIVEPACK_NTFS_REQUIRED is set, so an image was to be built: {why}"
         );
     }
