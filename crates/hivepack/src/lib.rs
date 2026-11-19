@@ -68,6 +68,8 @@ pub mod cpio;
 pub mod crypto;
 #[cfg(feature = "deflate")]
 pub mod deflate;
+#[cfg(feature = "exfat")]
+pub mod exfat;
 #[cfg(feature = "ext")]
 pub mod ext;
 #[cfg(feature = "extract")]

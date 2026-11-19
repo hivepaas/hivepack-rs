@@ -348,6 +348,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "exfat"
+path = "fuzz_targets/exfat.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "ext"
 path = "fuzz_targets/ext.rs"
 test = false

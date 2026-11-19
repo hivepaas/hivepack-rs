@@ -15,6 +15,7 @@ hivepack = "0.11"                                                           # ev
 | `rar` | RAR, reading only (feature off by default, under UnRAR's license) |
 | `image` | disk images: the disk in one (raw, VHD, QCOW2, VHDX, VMDK, VDI), and its partitions (MBR, GPT), reading |
 | `fat` | FAT12, FAT16 and FAT32 file systems, with VFAT long names, reading |
+| `exfat` | exFAT file systems, what a card over 32 GB holds, reading |
 | `ext` | ext2, ext3 and ext4 file systems, reading |
 | `iso`, `udf`, `squashfs`, `appimage`, `cpio`, `xar` | ISO 9660 images, UDF volumes, SquashFS images (snaps) and AppImages, cpio and RPM payloads, XAR (`.pkg`, `.xip`), reading |
 | `deflate`, `bzip2`, `lz4`, `xz`, `zstd` | Deflate, zlib, gzip, bzip2, LZ4, XZ, LZMA, Zstandard |

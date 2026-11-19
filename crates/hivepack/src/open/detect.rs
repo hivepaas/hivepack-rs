@@ -113,6 +113,11 @@ pub enum Container {
     /// read by `hivepack::fat`: an EFI system partition taken out on its
     /// own, a camera's card, a floppy image.
     Fat,
+    /// An exFAT file system with no table in front of it, read by
+    /// `hivepack::exfat`: a memory card larger than 32 GB, which is where
+    /// Windows stops offering FAT32, so every large SD card and stick sold
+    /// formatted is this.
+    ExFat,
     /// An ext2, ext3 or ext4 file system with no table in front of it, read
     /// by `hivepack::ext`: a partition taken out on its own, and what
     /// WSL2's `ext4.vhdx` holds.
@@ -469,11 +474,6 @@ fn is_partitioned(head: &[u8]) -> bool {
     any
 }
 
-/// Whether `head` begins a FAT file system. The rules are the reader's own
-/// (`crates/hivepack/src/fat/boot.rs`), written again here because telling
-/// one must not take the reader: `open` is built without `fat`. A test with
-/// the feature on asserts that what the reader opens is told here
-/// (`crates/hivepack/tests/open_open.rs`).
 /// Whether a VDI begins here: the signature 64 bytes in, and a major
 /// version of 1, which is the version whose header holds what is read.
 ///
@@ -490,6 +490,31 @@ fn is_vdi(head: &[u8]) -> bool {
         && head.get(at + 6..at + 8) == Some(&VDI_MAJOR[..])
 }
 
+/// Whether `head` begins an exFAT file system. The rule is the reader's own
+/// (`crates/hivepack/src/exfat/boot.rs`), written again here because telling
+/// one must not take the reader: `open` is built without `exfat`.
+///
+/// exFAT carries the same jump and the same two bytes at the end of the
+/// sector as FAT, and says its name where the one that made a FAT file
+/// system goes. What tells the two apart is the 53 bytes in which FAT keeps
+/// its own numbers: the specification says they are zero in an exFAT volume,
+/// and FAT cannot have them all zero — a FAT file system with no sector
+/// size, no sectors per cluster and no reserved sectors is not one.
+fn is_exfat(head: &[u8]) -> bool {
+    let Some(first) = head.get(..512) else {
+        return false;
+    };
+    first[510..512] == [0x55, 0xAA]
+        && matches!(first[0], 0xEB | 0xE9)
+        && &first[3..11] == b"EXFAT   "
+        && first[11..64].iter().all(|b| *b == 0)
+}
+
+/// Whether `head` begins a FAT file system. The rules are the reader's own
+/// (`crates/hivepack/src/fat/boot.rs`), written again here because telling
+/// one must not take the reader: `open` is built without `fat`. A test with
+/// the feature on asserts that what the reader opens is told here
+/// (`crates/hivepack/tests/open_open.rs`).
 fn is_fat(head: &[u8]) -> bool {
     let Some(first) = head.get(..512) else {
         return false;
@@ -702,6 +727,9 @@ pub fn detect(head: &[u8], name: Option<&str>) -> Detected {
     if enough_for_a_disk(head) {
         if is_partitioned(head) {
             return Detected::Container(Container::PartitionedDisk);
+        }
+        if is_exfat(head) {
+            return Detected::Container(Container::ExFat);
         }
         if is_fat(head) {
             return Detected::Container(Container::Fat);
@@ -1241,10 +1269,37 @@ mod tests {
         assert!(!is_partitioned(&fat) && !is_partitioned(&ntfs));
     }
 
+    /// An exFAT boot sector, told from a FAT one. The two carry the same
+    /// jump and the same two bytes at the sector's end, and exFAT says its
+    /// name where the tool that made a FAT file system goes: what sets
+    /// them apart is the 53 bytes FAT keeps its numbers in, which the
+    /// specification says an exFAT volume leaves zero.
+    #[test]
+    fn an_exfat_boot_sector_is_told_from_a_fat_one() {
+        let mut exfat = vec![0u8; 512];
+        exfat[0..3].copy_from_slice(&[0xEB, 0x76, 0x90]);
+        exfat[3..11].copy_from_slice(b"EXFAT   ");
+        exfat[510..512].copy_from_slice(&[0x55, 0xAA]);
+        assert_eq!(
+            layer(&whole(exfat.clone())),
+            Detected::Container(Container::ExFat)
+        );
+        assert!(is_exfat(&exfat));
+        assert!(!is_fat(&exfat) && !is_ntfs(&exfat) && !is_partitioned(&exfat));
+        // A sector that says exFAT and keeps FAT's numbers as well is
+        // neither: no tool writes one, and it is not guessed at.
+        let mut both = exfat.clone();
+        both[11..13].copy_from_slice(&512u16.to_le_bytes());
+        both[13] = 8;
+        assert!(!is_exfat(&both) && !is_fat(&both));
+        // And a FAT boot sector is not exFAT.
+        assert!(!is_exfat(&boot_sector(512, 8, false)));
+    }
+
     #[test]
     fn what_is_not_a_boot_sector_is_not_a_file_system() {
-        // No jump, a sector size no disk has, no table, and exFAT, which
-        // keeps FAT's signature and jump and is not read here.
+        // No jump, a sector size no disk has, no table, and a sector that
+        // says exFAT while keeping FAT's own numbers, which is neither.
         let mut no_jump = boot_sector(512, 1, false);
         no_jump[0] = 0x00;
         let odd_sector = boot_sector(777, 1, false);

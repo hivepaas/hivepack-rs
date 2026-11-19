@@ -1775,3 +1775,41 @@ fn a_vdi_the_reader_opens_is_told_by_the_opener() {
     assert_eq!(container, Container::Vdi);
     assert_eq!(data, vdi, "under zstd: not the same bytes");
 }
+
+/// An exFAT volume: what the reader opens, the opener tells, as it is and
+/// under a layer.
+///
+/// The two file systems are told apart by what FAT keeps in the 53 bytes
+/// exFAT leaves zero, and `open` is built without either reader, so this
+/// is the direction that matters — over a volume `mkfs.exfat` wrote, not
+/// over a boot sector this test built, which `open::detect`'s own tests
+/// cover.
+#[test]
+#[cfg(feature = "exfat")]
+fn an_exfat_file_system_the_reader_opens_is_told_by_the_opener() {
+    let s = Scratch::new();
+    let Some(image) = an_image(&s, "card.img", 64 << 20, &["mkfs.exfat", "-q"]) else {
+        eprintln!(
+            "mkfs.exfat cannot be run here: what hivepack::exfat opens is not checked \
+             against what the opener tells. The rule is checked on its own in \
+             open::detect's tests, over a boot sector built by hand."
+        );
+        return;
+    };
+    // The reader opens it.
+    hivepack::exfat::Exfat::open(&image[..]).unwrap();
+    // So the opener has to say so, as it is and under a layer.
+    let (layers, container, _) = open(&image).unwrap();
+    assert!(layers.is_empty());
+    assert_eq!(container, Container::ExFat);
+    let (layers, container, data) = open(&zstd(&image)).unwrap();
+    assert_eq!(layers, vec![Layer::Zstd]);
+    assert_eq!(container, Container::ExFat);
+    assert_eq!(data, image, "under zstd: not the same bytes");
+    // And FAT's reader does not open it, which is what the two rules say.
+    #[cfg(feature = "fat")]
+    assert!(matches!(
+        hivepack::fat::Fat::open(&image[..]),
+        Err(hivepack::fat::Error::ExFat)
+    ));
+}

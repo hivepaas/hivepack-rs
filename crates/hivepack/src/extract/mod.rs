@@ -83,6 +83,14 @@
 //! extended attributes and neither kind of link, so only files and
 //! directories come out.
 //!
+//! With the feature `exfat`, `extract_exfat` extracts the exFAT file
+//! systems `hivepack::exfat` reads — a memory card larger than 32 GB, a
+//! camera's card, a stick as it was sold. It keeps as little beside a file
+//! as FAT does, so only files and directories come out; what it keeps and
+//! FAT does not is the offset from UTC beside each time, which is taken
+//! off, and the length a file has been written to, past which the file
+//! comes out as zeroes rather than as whatever is in the clusters.
+//!
 //! With the feature `ntfs`, off by default as the library that reads the
 //! structures is not in a release that can be fuzzed (`docs/ntfs.md`),
 //! `extract_ntfs` extracts the NTFS file systems `hivepack::ntfs` reads —
@@ -109,6 +117,8 @@
 mod cpio;
 mod destination;
 mod error;
+#[cfg(feature = "exfat")]
+mod exfat;
 #[cfg(feature = "ext")]
 mod ext;
 #[cfg(feature = "fat")]
@@ -138,6 +148,8 @@ pub use cpio::{extract_cpio, extract_cpio_to};
 #[cfg(feature = "rar")]
 pub use error::RarProblem;
 pub use error::{Error, ErrorKind};
+#[cfg(feature = "exfat")]
+pub use exfat::{extract_exfat, extract_exfat_to};
 #[cfg(feature = "ext")]
 pub use ext::{extract_ext, extract_ext_to};
 #[cfg(feature = "fat")]

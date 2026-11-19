@@ -149,6 +149,11 @@ pub enum ErrorKind {
     /// it, or a directory whose records do not read.
     #[cfg(feature = "fat")]
     Fat(crate::fat::Error),
+    /// The exFAT file system could not be read: a file whose clusters lead
+    /// off it, a set of directory entries that fails its own checksum, or
+    /// a directory whose entries do not read.
+    #[cfg(feature = "exfat")]
+    ExFat(crate::exfat::Error),
     /// The NTFS file system could not be read, or holds what is not read:
     /// data NTFS compressed or encrypted, a reparse point, a file whose
     /// runs do not cover its length, or a directory whose entries do not
@@ -206,6 +211,8 @@ impl ErrorKind {
             ErrorKind::Ext(_) => true,
             #[cfg(feature = "fat")]
             ErrorKind::Fat(_) => true,
+            #[cfg(feature = "exfat")]
+            ErrorKind::ExFat(_) => true,
             // A file this crate will not read — compressed, encrypted, a
             // reparse point — is not damage: reading on would not help,
             // and `OnDamaged` is for what a second try can get past.
@@ -287,6 +294,8 @@ impl fmt::Display for ErrorKind {
             ErrorKind::Ext(e) => write!(f, "file system: {e}"),
             #[cfg(feature = "fat")]
             ErrorKind::Fat(e) => write!(f, "file system: {e}"),
+            #[cfg(feature = "exfat")]
+            ErrorKind::ExFat(e) => write!(f, "file system: {e}"),
             #[cfg(feature = "ntfs")]
             ErrorKind::Ntfs(e) => write!(f, "file system: {e}"),
             ErrorKind::SevenZip(e) => write!(f, "archive: {e}"),
@@ -330,6 +339,8 @@ impl std::error::Error for Error {
             ErrorKind::Ext(e) => Some(e),
             #[cfg(feature = "fat")]
             ErrorKind::Fat(e) => Some(e),
+            #[cfg(feature = "exfat")]
+            ErrorKind::ExFat(e) => Some(e),
             #[cfg(feature = "ntfs")]
             ErrorKind::Ntfs(e) => Some(e),
             ErrorKind::SevenZip(e) => Some(e),
