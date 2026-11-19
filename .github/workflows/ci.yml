@@ -188,7 +188,9 @@ jobs:
       # all. The others still run the tests and print why they skip, and
       # the two that need no tools run everywhere: docs/ntfs.md.
       - if: matrix.ntfs
-        run: sudo apt-get update && sudo apt-get install -y ntfs-3g exfatprogs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ntfs-3g exfatprogs android-sdk-libsparse-utils
       - run: cargo test -p hivepack --locked --features ntfs --test ntfs --test extract_ntfs
         env:
           HIVEPACK_NTFS_REQUIRED: ${{ matrix.ntfs && '1' || '' }}
@@ -205,6 +207,15 @@ jobs:
         run: cargo test -p hivepack --locked --test exfat --test extract_exfat
         env:
           HIVEPACK_EXFAT_REQUIRED: '1'
+      # hivepack::image's sparse reader against Android's own tools, which
+      # are the only oracle for that format: `img2simg` writes one and
+      # `simg2img` reads one, and they are in a package no runner image
+      # carries. Same shape as the two above — the images built by hand run
+      # everywhere, and this job is held to having the tools.
+      - if: matrix.ntfs
+        run: cargo test -p hivepack --locked --test image_sparse
+        env:
+          HIVEPACK_SPARSE_REQUIRED: '1'
       # hivepack::memory, off by default: its tests on each system (on
       # Windows, its own process in a job object), and the example that
       # wires it to the coders.

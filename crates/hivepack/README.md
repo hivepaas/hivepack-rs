@@ -13,7 +13,7 @@ hivepack = "0.11"                                                           # ev
 |---|---|
 | `zip`, `tar`, `sevenz` | ZIP, tar and 7z archives |
 | `rar` | RAR, reading only (feature off by default, under UnRAR's license) |
-| `image` | disk images: the disk in one (raw, VHD, QCOW2, VHDX, VMDK, VDI), and its partitions (MBR, GPT), reading |
+| `image` | disk images: the disk in one (raw, VHD, QCOW2, VHDX, VMDK, VDI, Android sparse), and its partitions (MBR, GPT), reading |
 | `fat` | FAT12, FAT16 and FAT32 file systems, with VFAT long names, reading |
 | `exfat` | exFAT file systems, what a card over 32 GB holds, reading |
 | `ext` | ext2, ext3 and ext4 file systems, reading |

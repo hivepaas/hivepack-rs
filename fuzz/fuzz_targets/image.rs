@@ -1,5 +1,5 @@
 //! hivepack::image on any input: the partition tables of a raw disk, in
-//! both sector sizes a table can be counted in, and the five containers,
+//! both sector sizes a table can be counted in, and the six containers,
 //! each opened on the same bytes and the disk it holds read through it.
 //!
 //! What is read is read twice, in pieces of different sizes the first eight
@@ -12,7 +12,9 @@
 
 #![no_main]
 
-use hivepack::image::{Disk, Part, Qcow2, Vdi, Vhd, Vhdx, Vmdk, partitions, partitions_in};
+use hivepack::image::{
+    AndroidSparse, Disk, Part, Qcow2, Vdi, Vhd, Vhdx, Vmdk, partitions, partitions_in,
+};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_DATA: u64 = 4 << 20;
@@ -73,7 +75,7 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    // The containers. Each says what is not its own, so all five are tried
+    // The containers. Each says what is not its own, so all six are tried
     // on every input; whichever opens is read as a disk.
     if let Ok(vhd) = Vhd::open(data) {
         assert_eq!(look(&vhd, seed), look(&vhd, !seed));
@@ -89,5 +91,8 @@ fuzz_target!(|data: &[u8]| {
     }
     if let Ok(vdi) = Vdi::open(data) {
         assert_eq!(look(&vdi, seed), look(&vdi, !seed));
+    }
+    if let Ok(sparse) = AndroidSparse::open(data) {
+        assert_eq!(look(&sparse, seed), look(&sparse, !seed));
     }
 });

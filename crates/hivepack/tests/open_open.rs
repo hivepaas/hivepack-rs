@@ -1813,3 +1813,46 @@ fn an_exfat_file_system_the_reader_opens_is_told_by_the_opener() {
         Err(hivepack::fat::Error::ExFat)
     ));
 }
+
+/// An Android sparse image, told by the four bytes it begins with: what
+/// the reader opens, the opener tells, as it is and under a layer.
+///
+/// The image is built here, since Android's tools are in a package no
+/// runner image carries and the rule under test is about the first four
+/// bytes, not about what a tool writes after them.
+#[test]
+#[cfg(feature = "image")]
+fn an_android_sparse_image_the_reader_opens_is_told_by_the_opener() {
+    // A header and one chunk of a block of data, as img2simg writes.
+    let block = 4096usize;
+    let mut image = Vec::new();
+    image.extend_from_slice(&0xed26_ff3au32.to_le_bytes());
+    image.extend_from_slice(&1u16.to_le_bytes());
+    image.extend_from_slice(&0u16.to_le_bytes());
+    image.extend_from_slice(&28u16.to_le_bytes());
+    image.extend_from_slice(&12u16.to_le_bytes());
+    image.extend_from_slice(&(block as u32).to_le_bytes());
+    image.extend_from_slice(&1u32.to_le_bytes());
+    image.extend_from_slice(&1u32.to_le_bytes());
+    image.extend_from_slice(&0u32.to_le_bytes());
+    image.extend_from_slice(&0xCAC1u16.to_le_bytes());
+    image.extend_from_slice(&0u16.to_le_bytes());
+    image.extend_from_slice(&1u32.to_le_bytes());
+    image.extend_from_slice(&(12 + block as u32).to_le_bytes());
+    image.extend(std::iter::repeat_n(0x5Au8, block));
+
+    // The reader opens it, and the disk it holds is the block that went in.
+    let read = hivepack::image::AndroidSparse::open(&image[..]).unwrap();
+    let mut held = vec![0u8; block];
+    hivepack::image::Disk::read_exact_at(&read, 0, &mut held).unwrap();
+    assert!(held.iter().all(|b| *b == 0x5A));
+
+    // So the opener has to say so, as it is and under a layer.
+    let (layers, container, _) = open(&image).unwrap();
+    assert!(layers.is_empty());
+    assert_eq!(container, Container::AndroidSparse);
+    let (layers, container, data) = open(&zstd(&image)).unwrap();
+    assert_eq!(layers, vec![Layer::Zstd]);
+    assert_eq!(container, Container::AndroidSparse);
+    assert_eq!(data, image, "under zstd: not the same bytes");
+}
