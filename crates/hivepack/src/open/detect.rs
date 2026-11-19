@@ -80,6 +80,11 @@ pub enum Container {
     /// program, which `hivepack::iso` reads from the start, as an ISO 9660
     /// image, in a layer too.
     AppImageType1,
+    /// A WIM archive (`install.wim` and `boot.wim` of a Windows disc, a
+    /// `.esd`, a `.swm`), which `hivepack::wim` reads by random access:
+    /// its table of resources is at the end, so under layers it must be
+    /// taken out to a file first.
+    Wim,
     /// A SquashFS image (a snap package, `.sqfs`, `.squashfs`), which
     /// `hivepack::squashfs` reads by random access: in a layer, it must be
     /// taken out to a file first.
@@ -232,6 +237,11 @@ const ELF_MAGIC: &[u8] = b"\x7fELF";
 /// that telling one does not take the reader), as squashfuse and `file`
 /// tell an image.
 const SQUASHFS_MAGIC: &[u8] = b"hsqs";
+
+/// A WIM archive's magic (`hivepack::wim`'s own, kept here so that telling
+/// one does not take the reader): what `install.wim`, `boot.wim`, a `.esd`
+/// and a `.swm` all begin with.
+const WIM_MAGIC: &[u8] = b"MSWIM\0\0\0";
 
 /// Whether `head` starts with a skippable frame's magic, 0x184D2A50 to
 /// 0x184D2A5F, little-endian: zstd's and LZ4's, which share them.
@@ -696,6 +706,9 @@ pub fn detect(head: &[u8], name: Option<&str>) -> Detected {
     if starts(SQUASHFS_MAGIC) {
         return Detected::Container(Container::Squashfs);
     }
+    if starts(WIM_MAGIC) {
+        return Detected::Container(Container::Wim);
+    }
     if is_xar(head) {
         return Detected::Container(Container::Xar);
     }
@@ -1124,6 +1137,16 @@ mod tests {
     /// A VDI says what it is 64 bytes in, so the rule is its own: the
     /// signature there, whatever the text in front of it says, and a major
     /// version of 1.
+    /// A WIM, told by the eight bytes it begins with — which a `.esd` and
+    /// a part of a split set begin with as well, and the reader is what
+    /// says what each of them needs.
+    #[test]
+    fn a_wim_is_told_by_its_magic() {
+        let mut head = vec![0u8; 256];
+        head[..8].copy_from_slice(WIM_MAGIC);
+        assert_eq!(layer(&whole(head)), Detected::Container(Container::Wim));
+    }
+
     /// An Android sparse image, told by the four bytes it begins with.
     #[test]
     fn an_android_sparse_image_is_told_by_its_magic() {

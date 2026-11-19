@@ -104,6 +104,8 @@ pub mod squashfs;
 pub mod tar;
 #[cfg(feature = "udf")]
 pub mod udf;
+#[cfg(feature = "wim")]
+pub mod wim;
 #[cfg(feature = "xar")]
 pub mod xar;
 #[cfg(feature = "xz")]

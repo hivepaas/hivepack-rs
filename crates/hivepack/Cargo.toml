@@ -40,7 +40,7 @@ features = ["full", "memory"]
 # Every format but RAR, whose code is under UnRAR's license: see LICENSE.md.
 default = ["full"]
 
-full = ["age", "appimage", "ar", "bzip2", "cpio", "crypto", "deflate", "exfat", "ext", "extract", "fat", "image", "iso", "lz4", "lzo", "open", "sevenz", "sign", "squashfs", "tar", "udf", "xar", "xz", "zip", "zstd"]
+full = ["age", "appimage", "ar", "bzip2", "cpio", "crypto", "deflate", "exfat", "ext", "extract", "fat", "image", "iso", "lz4", "lzo", "open", "sevenz", "sign", "squashfs", "tar", "udf", "wim", "xar", "xz", "zip", "zstd"]
 
 # How much memory the program may still take, and a budget to choose threads
 # under it. Not a format, and so not in `full`: it calls the system through
@@ -97,6 +97,10 @@ image = ["deflate"]
 fat = ["image"]
 
 exfat = ["image"]
+
+# Nothing yet: the resources a WIM holds are read where they are not
+# compressed, and XPRESS, LZX and LZMS come with their own decoders.
+wim = []
 
 ext = ["image"]
 
