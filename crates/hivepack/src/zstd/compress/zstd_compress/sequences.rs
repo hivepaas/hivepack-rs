@@ -23,7 +23,7 @@ use super::{
 use crate::zstd::common::error_private::{Result, error};
 use crate::zstd::common::mem::write_le32;
 use crate::zstd::common::zstd_internal::{
-    BlockType, MIN_CBLOCK_SIZE, MINMATCH, ZSTD_BLOCKHEADERSIZE, ZSTD_REP_NUM,
+    BlockType, MIN_CBLOCK_SIZE, MINMATCH, ZSTD_BLOCKHEADERSIZE, ZSTD_BLOCKSIZE_MAX, ZSTD_REP_NUM,
 };
 use crate::zstd::compress::zstd_compress_internal::{
     FseRepeat, LongLengthType, ParamSwitch, SeqDef, SeqStoreView,
@@ -428,18 +428,27 @@ struct SequencePosition {
 
 /// `blockSize_explicitDelimiter`: the size of the next block, the lengths
 /// of its sequences up to its delimiter and that one's literals. Fails
-/// without a delimiter, or with a sequence of offset 0 and a match.
+/// without a delimiter, with a sequence of offset 0 and a match, or with
+/// lengths that make a block larger than the largest the format has.
 fn block_size_explicit_delimiter(in_seqs: &[Sequence], seq_pos: SequencePosition) -> Result<usize> {
     let mut end = false;
-    let mut block_size: usize = 0;
+    let mut block_size: u64 = 0;
     let mut spos = seq_pos.idx;
     debug_assert!(spos <= in_seqs.len());
     while spos < in_seqs.len() {
         let seq = in_seqs[spos];
         end = seq.offset == 0;
-        // libzstd adds the two lengths as `U32`, which can wrap around.
-        block_size =
-            block_size.wrapping_add(seq.lit_length.wrapping_add(seq.match_length) as usize);
+        // libzstd 1.5.7 adds the two lengths as `U32`, which wraps around: a
+        // sum of 2^32 counts as a block of nothing, and the sequences are
+        // then taken for a block they are far larger than, which is how the
+        // literals of one block came to be stored past the block's own size.
+        // libzstd's own `dev` adds them in 64 bits and bounds the total every
+        // time round, which is what this does.
+        block_size += u64::from(seq.lit_length) + u64::from(seq.match_length);
+        if block_size > ZSTD_BLOCKSIZE_MAX as u64 {
+            // Larger than any block the format has.
+            return error!(ExternalSequencesInvalid);
+        }
         if end {
             if seq.match_length != 0 {
                 // A delimiter has neither an offset nor a match.
@@ -453,7 +462,8 @@ fn block_size_explicit_delimiter(in_seqs: &[Sequence], seq_pos: SequencePosition
         // No block delimiter before the end of the sequences.
         return error!(ExternalSequencesInvalid);
     }
-    Ok(block_size)
+    // Bounded above, so it is a size on every target.
+    Ok(block_size as usize)
 }
 
 /// `determine_blockSize`: the size of the next block, at most `block_size`
@@ -942,6 +952,10 @@ impl CCtx {
             // literals the block has no room for, which the store would
             // write past its buffer. A sum that saturates is past the
             // block, and fails that check on the next sequence.
+            // Without delimiters there is no block size read off the
+            // sequences, so the bound in `block_size_explicit_delimiter`
+            // is no help here and this is what holds the literals of a
+            // block to it.
             ip = ip
                 .saturating_add(match_length as usize)
                 .saturating_add(lit_length as usize);
