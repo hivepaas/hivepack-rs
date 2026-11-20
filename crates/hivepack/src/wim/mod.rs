@@ -51,10 +51,16 @@ use lookup::Resources;
 /// What a WIM begins with.
 const MAGIC: &[u8; 8] = b"MSWIM\0\0\0";
 
-/// How long the header is, as every tool writes it, and the version every
-/// tool writes.
+/// How long the header is, as every tool writes it.
 const HEADER: usize = 208;
+/// The version every tool writes, and the one written instead where an
+/// archive may hold LZMS or solid resources — measured: `wimlib-imagex`
+/// writes `0x0e00` for `--compress=LZMS` and for `--solid`, which is what
+/// a `.esd` is. Reading it is what lets such an archive be told apart and
+/// say which compression it needs, rather than being refused as a version
+/// nothing knows.
 const VERSION: u32 = 0x0001_0d00;
+const VERSION_SOLID: u32 = 0x0000_0e00;
 
 /// The header's flags that matter here.
 const COMPRESSION: u32 = 0x0000_0002;
@@ -204,7 +210,7 @@ impl<R: Read + Seek> Wim<R> {
             return Err(Error::Says);
         }
         let version = le32(&header, 12);
-        if version != VERSION {
+        if version != VERSION && version != VERSION_SOLID {
             return Err(Error::Version { version });
         }
         let flags = le32(&header, 16);

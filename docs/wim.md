@@ -30,7 +30,19 @@ What is **named and refused**, each with its own `Unsupported`:
 | `Unsupported::Spanned` | a part of a split archive (`.swm`), whose other parts are files this cannot reach |
 | `Unsupported::Reparse` | a file whose data is a reparse point — a symbolic link, a junction, a placeholder — which is not a file's bytes |
 
-So **an uncompressed WIM reads whole, and a Windows disc's `install.wim` opens, lists every file with its length and SHA-1, and says it needs LZX for the bytes.** That is the useful half of the format: the tree, the names, the lengths, the hashes and what is a hard link of what, all of which live in the metadata rather than in the compressed resources. The decoders come next, one at a time: XPRESS, then LZX, then LZMS.
+So **an uncompressed WIM reads whole. A compressed one opens and says which compression it needs, but its tree is not read** — an image's metadata is a resource like any other, and a compressed archive compresses that too. This was measured rather than reasoned about: `wimlib-imagex capture --compress=XPRESS|LZX|LZMS` writes the metadata resource with `METADATA | COMPRESSED` every time, and 7-Zip, which writes WIMs with no compression at all, cannot be asked for one that has it. An earlier version of this page said such an archive still lists every file with its length and SHA-1; that came from an archive whose header was turned over by hand with its resources left uncompressed, which is not what any tool writes, and it was wrong.
+
+What a compressed archive does tell, with no decoder at all:
+
+- **the header** — which compression, and the chunk size (32768 for XPRESS and LZX, 131072 for LZMS);
+- **the table of resources** — how many there are, and each one's length before and after compression with its SHA-1. The table is a resource too, but every tool writes it uncompressed;
+- **the XML** — each image's name (`Windows 11 Pro`), how many files and directories it holds and how many bytes they come to.
+
+The names, the tree and what is a hard link of what are in the metadata resource, behind the same decoder as the files. The decoders come next, one at a time: XPRESS, then LZX, then LZMS.
+
+## A `.esd` says it is a different version
+
+An archive that may hold LZMS or solid resources carries **version `0x0e00`** in its header rather than the `0x00010d00` everything else writes, and its resources for files inside a solid block carry offsets **into that block** rather than onto the file. Both are read here: the version is accepted so that such an archive can be told apart and say that it needs LZMS, and a solid resource is kept as it stands rather than measured against the file, so that it is refused by name (`Unsupported::Solid`) instead of being called a broken table. Measured on what `wimlib-imagex capture --solid` writes.
 
 ## The rules it follows
 
