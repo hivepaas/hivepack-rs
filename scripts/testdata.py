@@ -271,6 +271,30 @@ def build_7zz(source: Path, folder: Path) -> None:
     shutil.copy2(program, folder / program.name)
 
 
+def build_wimlib(source: Path, folder: Path) -> None:
+    """wimlib's own program from the release's sources, with its configure
+    script: the only tool here that writes a compressed WIM. 7-Zip reads
+    XPRESS and LZX but writes neither, so without this there is nothing to
+    check a WIM decoder against. Built without libntfs-3g and libfuse3,
+    which only its mounting and its NTFS capture need, and without a shared
+    library, so the program runs on its own."""
+    tree = next(source.glob("wimlib-*"))
+    print(f"  building wimlib-imagex from {tree.name}")
+    jobs = str(os.cpu_count() or 2)
+    steps = [
+        ["./configure", "--without-ntfs-3g", "--without-fuse", "--disable-shared", "--quiet"],
+        ["make", "-j", jobs, "V=0"],
+    ]
+    for step in steps:
+        run = subprocess.run(step, cwd=tree, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.PIPE, text=True)
+        if run.returncode != 0:
+            # The end of what it said: configure and make both say a lot first.
+            print(run.stderr[-4000:], file=sys.stderr)
+            raise SystemExit(f"{step[0]} for wimlib failed with {run.returncode}")
+    shutil.copy2(tree / "wimlib-imagex", folder / "wimlib-imagex")
+
+
 def libzip_sources(lib: Path) -> list:
     """The library's C files, as lib/CMakeLists.txt lists them in ZIP_SOURCES,
     with the ones it adds for the system; zip_err_str.c is generated apart."""
@@ -908,6 +932,8 @@ def generate_set(entry: dict, cache: Path, sets: dict) -> None:
     folder.mkdir(parents=True)
     if generate["tool"] == "7zz":
         build_7zz(cache / origin["name"], folder)
+    elif generate["tool"] == "wimlib":
+        build_wimlib(cache / origin["name"], folder)
     elif generate["tool"] in ("mksquashfs", "unsquashfs"):
         build_mksquashfs(cache / origin["name"], generate.get("sources", []), folder,
                          [cache / e["name"] for e in extra], generate["tool"])

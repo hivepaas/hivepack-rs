@@ -4,7 +4,7 @@
 
 - **Committed sets** are in this folder. Each source keeps its license file next to its data.
 - **Fetched sets** are downloaded by `scripts/testdata.py`, checked against the SHA-256 in the manifest, and unpacked into `target/testdata/<set>`. Setting `HIVEPACK_TESTDATA` puts them somewhere else, where the tests and the benchmarks in `tools/*-bench` look for them too: one cache can serve several worktrees.
-- **Generated sets** are made in the same place by zstd's own `decodecorpus` tool, or are the oracle programs in `tools/`. The script builds them from the zstd 1.5.7, zlib 1.3.2, bzip2 1.0.8, lz4 1.10.0, LZO 2.10 (with lzokay's latest commit), XZ Utils 5.8.4, libzip 1.12.1, nettle 3.10.2, 7-Zip 26.05, libarchive 3.8.10, libxml2 2.15.4, squashfuse 0.6.5 and squashfs-tools 4.6.1 releases with the system C compiler (and zstd's Makefile for `decodecorpus`, and 7-Zip's for `7zz`), and `tools/age-oracle` and `tools/tar-oracle` with Go, which downloads the modules their `go.sum` pins.
+- **Generated sets** are made in the same place by zstd's own `decodecorpus` tool, or are the oracle programs in `tools/`. The script builds them from the zstd 1.5.7, zlib 1.3.2, bzip2 1.0.8, lz4 1.10.0, LZO 2.10 (with lzokay's latest commit), XZ Utils 5.8.4, libzip 1.12.1, nettle 3.10.2, 7-Zip 26.05, wimlib 1.14.4, libarchive 3.8.10, libxml2 2.15.4, squashfuse 0.6.5 and squashfs-tools 4.6.1 releases with the system C compiler (and zstd's Makefile for `decodecorpus`, and 7-Zip's for `7zz`), and `tools/age-oracle` and `tools/tar-oracle` with Go, which downloads the modules their `go.sum` pins.
 
 ```sh
 python3 scripts/testdata.py fetch                  # the core sets: a 16 MB download
@@ -74,6 +74,8 @@ Each set has a `kind`:
 | `7z-oracle` | `tools/7z-oracle`, built with the LZMA SDK's 7z decoder: `SzArEx_Open`, `SzAr_DecodeFolder` and `SzArEx_Extract`, for comparing hivepack-7z with them; and its PPMd var.I (`Ppmd8.c`), for comparing hivepack-zip's PPMd with it | MIT and public domain | generated |
 | `7z-bench-sdk` | `tools/7z-oracle/bench.c`, built with the same LZMA SDK files as `7z-oracle`: the SDK's side of `tools/7z-bench` | MIT and public domain | generated, `bench` |
 | `7zz` | 7-Zip's console program, built with its makefile: the archives hivepack-7z's tests read. Only a tool: nothing is linked with it | LGPL-2.1-or-later, BSD-3-Clause, and the unRAR restriction for its RAR code | generated |
+| `wimlib-1.14.4-source` | the wimlib 1.14.4 release, to build the next set from; pinned by its SHA-256 | GPL-3.0-or-later, the library also LGPL-3.0-or-later | fetched |
+| `wimlib` | `wimlib-imagex`, built with wimlib's configure script without libntfs-3g and libfuse3: **the only tool here that writes a compressed WIM**, since 7-Zip reads XPRESS and LZX but writes neither. Only a tool: nothing is linked with it, and nothing in this repository is read from it | GPL-3.0-or-later | generated |
 | `nettle-oracle` | `tools/nettle-oracle`, built with nettle 3.10.2's AES, SHA-1, MD5, HMAC and PBKDF2 sources: for comparing hivepack-crypto with them | MIT, and nettle's licenses | generated |
 | `tar-oracle` | `tools/tar-oracle`, built with Go 1.27.2's archive/tar, the release its `go.mod` names: for comparing hivepack-tar with it | MIT, and BSD-3-Clause (Go) | generated |
 | `tar-bench-go` | `tools/tar-bench/go`, built with Go 1.27.2's `archive/tar`: Go's side of `tools/tar-bench` | MIT and BSD-3-Clause | generated, `bench` |

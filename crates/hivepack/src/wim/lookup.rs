@@ -75,7 +75,13 @@ pub(crate) fn read<R: Read + Seek>(
     let mut metadata = Vec::new();
     for entry in raw.as_chunks::<ENTRY>().0 {
         let resource = Resource::of(entry, 0);
-        if !resource.on_the_file(whole) {
+        // A solid resource's numbers are not places on the file: its
+        // offset is inside the block it was packed into, and that block
+        // has a descriptor of its own. Measured on what `wimlib-imagex
+        // capture --solid` writes, which is what a `.esd` is. Nothing here
+        // unpacks one, so it is kept as it stands and refused by name when
+        // something reaches for it, rather than counted a broken table.
+        if !resource.solid() && !resource.on_the_file(whole) {
             return Err(Error::Lookup);
         }
         // Which part of a split set holds it. A whole archive says 1, and

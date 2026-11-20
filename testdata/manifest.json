@@ -382,6 +382,20 @@
       "kind": "tool"
     },
     {
+      "name": "wimlib-1.14.4-source",
+      "fetch": { "group": "generated", "files": [{ "url": "https://wimlib.net/downloads/wimlib-1.14.4.tar.gz", "sha256": "3633db2b6c8b255eb86d3bf3df3059796bd1f08e50b8c9728c7eb66662e51300", "unpack": "tar.gz" }] },
+      "source": "https://wimlib.net/downloads/ (a detached PGP signature is published beside the archive)",
+      "license": "GPL-3.0-or-later, with the library also under LGPL-3.0-or-later: built as a tool and run as one, and not read for anything in this repository",
+      "kind": "source"
+    },
+    {
+      "name": "wimlib",
+      "generate": { "group": "generated", "from": "wimlib-1.14.4-source", "tool": "wimlib" },
+      "source": "wimlib 1.14.4's own program, wimlib-imagex, built from the release's sources with its configure script, without libntfs-3g and libfuse3. It is the only tool here that writes a compressed WIM: 7-Zip reads XPRESS and LZX but writes neither (7zz a -twim -mm=XPRESS fails with E_INVALIDARG), so without this there is nothing to check a WIM decoder against",
+      "license": "GPL-3.0-or-later",
+      "kind": "tool"
+    },
+    {
       "name": "fifield-zipbombs",
       "fetch": { "group": "core", "files": [{ "url": "https://www.bamsoftware.com/hacks/zipbomb/zbsm.zip", "sha256": "fb4ff972d21189beec11e05109c4354d0cd6d3b629263d6c950cf8cc3f78bd99" }, { "url": "https://www.bamsoftware.com/hacks/zipbomb/zblg.zip", "sha256": "f1dc920869794df3e258f42f9b99157104cd3f8c14394c1b9d043d6fcda14c0a" }, { "url": "https://www.bamsoftware.com/hacks/zipbomb/zbxl.zip", "sha256": "eafd8f574ea7fd0f345eaa19eae8d0d78d5323c8154592c850a2d78a86817744" }] },
       "source": "https://www.bamsoftware.com/hacks/zipbomb/ (David Fifield, \"A better zip bomb\", WOOT 2019)",
