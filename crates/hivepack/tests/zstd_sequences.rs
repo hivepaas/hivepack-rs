@@ -705,6 +705,47 @@ fn sequences_that_make_no_sense_fail_without_panicking() {
         Err(ErrorCode::ExternalSequencesInvalid)
     );
 
+    // Lengths whose sum wraps around to nothing: `ip` stands still while
+    // every sequence stores its literals, so the literals of a block grow
+    // past the block's own size. Each sequence on its own has literals
+    // inside the block, which is all the check before the store can see.
+    for format in [
+        SequenceFormat::ExplicitBlockDelimiters,
+        SequenceFormat::NoBlockDelimiters,
+    ] {
+        let mut p = CCtx::new();
+        p.set_parameter(P::BlockDelimiters(format))
+            .expect("the port sets it");
+        p.set_parameter(P::MaxBlockSize(1024))
+            .expect("the port sets it");
+        let mut seqs: Vec<Sequence> = (0..20).map(|_| seq(1, 100, u32::MAX - 99)).collect();
+        if matches!(format, SequenceFormat::ExplicitBlockDelimiters) {
+            seqs.push(seq(0, 0, 0));
+        }
+        assert_eq!(
+            code(p.compress_sequences(&mut frame, &seqs, &src[..1024])),
+            Err(ErrorCode::ExternalSequencesInvalid),
+            "{format:?}"
+        );
+    }
+
+    // The same, with the literals of the block's own delimiter: few enough
+    // sequences that the buffer takes theirs, and the last literals then
+    // go past its end. This is the shape the `sequences` fuzz target found.
+    {
+        let mut p = CCtx::new();
+        p.set_parameter(P::BlockDelimiters(SequenceFormat::ExplicitBlockDelimiters))
+            .expect("the port sets it");
+        p.set_parameter(P::MaxBlockSize(1024))
+            .expect("the port sets it");
+        let mut seqs: Vec<Sequence> = (0..10).map(|_| seq(1, 100, u32::MAX - 99)).collect();
+        seqs.push(seq(0, 100, 0));
+        assert_eq!(
+            code(p.compress_sequences(&mut frame, &seqs, &src[..1024])),
+            Err(ErrorCode::ExternalSequencesInvalid)
+        );
+    }
+
     // Literals apart, the same offset.
     let mut p = CCtx::new();
     p.set_parameter(P::BlockDelimiters(SequenceFormat::ExplicitBlockDelimiters))
