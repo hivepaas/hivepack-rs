@@ -754,7 +754,15 @@ impl CCtx {
             }
             self.seq_store
                 .store_external_seq(src, ip, lit_length, off_base, match_length);
-            ip = ip.wrapping_add(match_length.wrapping_add(lit_length) as usize);
+            // The two lengths are added one at a time, and saturate: their
+            // sum wrapping around 2^32 would leave `ip` short of what the
+            // sequence took, and the check above would then pass for
+            // literals the block has no room for, which the store would
+            // write past its buffer. A sum that saturates is past the
+            // block, and fails that check on the next sequence.
+            ip = ip
+                .saturating_add(match_length as usize)
+                .saturating_add(lit_length as usize);
             idx += 1;
         }
         if idx == in_seqs.len() {
@@ -928,7 +936,15 @@ impl CCtx {
             }
             self.seq_store
                 .store_external_seq(src, ip, lit_length, off_base, match_length);
-            ip = ip.wrapping_add(match_length.wrapping_add(lit_length) as usize);
+            // The two lengths are added one at a time, and saturate: their
+            // sum wrapping around 2^32 would leave `ip` short of what the
+            // sequence took, and the check above would then pass for
+            // literals the block has no room for, which the store would
+            // write past its buffer. A sum that saturates is past the
+            // block, and fails that check on the next sequence.
+            ip = ip
+                .saturating_add(match_length as usize)
+                .saturating_add(lit_length as usize);
             if !final_match_split {
                 // The next sequence.
                 idx += 1;
