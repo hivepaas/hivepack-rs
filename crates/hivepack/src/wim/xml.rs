@@ -41,11 +41,12 @@ pub(crate) fn read<R: Read + Seek>(
     reader: &mut R,
     xml: &Resource,
     compression: Compression,
+    chunk: u32,
 ) -> Result<Vec<Said>, Error> {
     if xml.size == 0 {
         return Ok(Vec::new());
     }
-    let raw = read_resource(reader, xml, u64::MAX, compression, MOST_XML)?;
+    let raw = read_resource(reader, xml, u64::MAX, compression, chunk, MOST_XML)?;
     Ok(said(&text(&raw)))
 }
 

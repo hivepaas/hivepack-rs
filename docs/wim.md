@@ -17,28 +17,64 @@ This is the first of the layers. What is here:
 
 - **`Wim::open(reader)`** — the header, the table of resources, and the XML. `compression`, `chunk_size`, `images` and `resources` say what the archive is.
 - **`Wim::entries(index)`** — one image's tree, parents before what they hold, each entry with the path to it, its name, the short name where it has one, the length and SHA-1 from the table, the three times, Windows' attributes, the Unix mode where 7-Zip wrote one, which set of hard links it belongs to, and how many streams beside its own it names.
-- **`Wim::read(&entry)`** — a file's bytes, **where its resource is not compressed**.
+- **`Wim::read(&entry)`** — a file's bytes: its chunks decompressed where its resource is compressed with XPRESS, and refused by name where it is LZX or LZMS.
 
 What is **named and refused**, each with its own `Unsupported`:
 
 | | |
 |---|---|
-| `Unsupported::Xpress` | resources compressed with XPRESS |
 | `Unsupported::Lzx` | resources compressed with LZX — what a Windows disc's `install.wim` holds |
 | `Unsupported::Lzms` | resources compressed with LZMS — what a `.esd` holds |
 | `Unsupported::Solid` | a solid block: many files compressed together, as a `.esd` and `wimlib --solid` write |
 | `Unsupported::Spanned` | a part of a split archive (`.swm`), whose other parts are files this cannot reach |
 | `Unsupported::Reparse` | a file whose data is a reparse point — a symbolic link, a junction, a placeholder — which is not a file's bytes |
 
-So **an uncompressed WIM reads whole. A compressed one opens and says which compression it needs, but its tree is not read** — an image's metadata is a resource like any other, and a compressed archive compresses that too. This was measured rather than reasoned about: `wimlib-imagex capture --compress=XPRESS|LZX|LZMS` writes the metadata resource with `METADATA | COMPRESSED` every time, and 7-Zip, which writes WIMs with no compression at all, cannot be asked for one that has it. An earlier version of this page said such an archive still lists every file with its length and SHA-1; that came from an archive whose header was turned over by hand with its resources left uncompressed, which is not what any tool writes, and it was wrong.
+So **an uncompressed WIM reads whole, and an XPRESS one reads whole as well.** An LZX or LZMS archive opens and says which compression it needs, but its tree is not read — an image's metadata is a resource like any other, and a compressed archive compresses that too. This was measured rather than reasoned about: `wimlib-imagex capture --compress=XPRESS|LZX|LZMS` writes the metadata resource with `METADATA | COMPRESSED` every time, and 7-Zip, which writes WIMs with no compression at all, cannot be asked for one that has it. An earlier version of this page said such an archive still lists every file with its length and SHA-1; that came from an archive whose header was turned over by hand with its resources left uncompressed, which is not what any tool writes, and it was wrong.
 
-What a compressed archive does tell, with no decoder at all:
+What an LZX or LZMS archive does tell, with no decoder for it:
 
 - **the header** — which compression, and the chunk size (32768 for XPRESS and LZX, 131072 for LZMS);
 - **the table of resources** — how many there are, and each one's length before and after compression with its SHA-1. The table is a resource too, but every tool writes it uncompressed;
 - **the XML** — each image's name (`Windows 11 Pro`), how many files and directories it holds and how many bytes they come to.
 
-The names, the tree and what is a hard link of what are in the metadata resource, behind the same decoder as the files. The decoders come next, one at a time: XPRESS, then LZX, then LZMS.
+The names, the tree and what is a hard link of what are in the metadata resource, behind the same decoder as the files. LZX comes next, and then LZMS.
+
+## A resource is chunks, not one stream
+
+A compressed resource is not one compressed stream. It is the file cut into chunks of the header's chunk size, each compressed on its own, with a table at the front saying where each begins — which is what lets one byte of a 4 GiB file be reached without the rest.
+
+**This layout was measured, not read off a specification.** Microsoft's 2007 *Windows Imaging File Format (WIM)* paper is not published on its own site any more and the copies about are other people's, so `wim::chunks` takes the layout off what `wimlib-imagex` writes and checks every number against it — the same way [`image::Vdi`](image.md) is held to `qemu-img`. On a 140000-byte file in chunks of 32768:
+
+```text
+size=140000 packed=41124 chunks=5          chunks = ceil(size / chunk)
+table = [32768, 40283, 40558, 40833]       one entry for every chunk but the first,
+                                           each counted from the table's end
+  chunk 0: 32768 <- 32768 bytes   stored, since compressing it did not pay
+  chunk 1:   7515 <- 32768 bytes   XPRESS
+  chunk 2:    275 <- 32768 bytes   XPRESS
+  chunk 3:    275 <- 32768 bytes   XPRESS
+  chunk 4:    275 <-  8928 bytes   XPRESS, the last one holding the rest
+```
+
+A chunk's compressed length is the gap to the next chunk's offset, the last reaching the resource's end; an entry is four bytes, or eight where the resource holds more than 4 GiB. And **a chunk as long compressed as it is uncompressed is held as it is**, not compressed — which is why a resource marked compressed whose one chunk is its own length reads as itself, a case `tests/wim.rs` holds on to.
+
+## XPRESS
+
+`wim::xpress` decodes XPRESS with Huffman coding, from Microsoft's **[MS-XCA]: Xpress Compression Algorithm** (v20240423), published under its Open Specification Promise, whose §2.2.4 gives the decompression algorithm as pseudocode. Nothing here is a port: wimlib's decompressor is GPL-3.0-or-later and was not read — it is built by `scripts/testdata.py` and run as a program to write the archives the tests read back.
+
+A block begins with **256 bytes holding 512 four-bit code lengths**, from which the canonical Huffman codes are rebuilt. A symbol under 256 is that byte; at or above it, the symbol carries both the match's length and how many bits of its distance follow:
+
+```text
+HuffmanSymbol = 256 + min(Length - 3, 15) + 16 * GetHighBit(Distance)
+```
+
+Three things in the specification needed deciding rather than copying, and each is written down where it is handled:
+
+- **A length of 15 means 18 or more**, and the rest is in *bytes* taken from the stream — not from the bits. They sit where a reader taking halfwords has got to, which is what §2.1.4.3 means by "the next bytes that the decompression function will read". `a_long_match_takes_its_length_from_a_byte` counts that position out.
+- **The specification's encoder and decoder disagree** about lengths of 65536 and over: the encoder writes a halfword of zero and then a 32-bit length, the decoder refuses a halfword under 15 instead of reading one. A block holds 65536 bytes, so no such length fits in one, and the reader keeps the decoder's rule.
+- **A distance of 1 has no bits** to read, and the pseudocode's shift by `32 - MatchOffsetBitLength` does not say so; none are read.
+
+One chunk is one block. A chunk longer than a block (65536 bytes) is refused rather than read as though the table at its start covered all of it; a WIM compresses XPRESS in chunks of 32768, so the case does not arise in an archive a tool wrote.
 
 ## A `.esd` says it is a different version
 
