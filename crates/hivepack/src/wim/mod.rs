@@ -12,12 +12,20 @@
 //! What this reads: the header, the table of resources, the XML that
 //! names the images, and each image's tree, with every entry's name,
 //! attributes, times, length and SHA-1 — and the files themselves, their
-//! chunks decompressed where the resource is compressed. **XPRESS**
-//! (`wim::xpress`, from Microsoft's [MS-XCA]) and **LZX** (`wim::lzx`,
-//! from [MS-PATCH]) are decoded, so a `.wim` from a Windows disc reads
-//! whole: its tree as well as its files, an image's metadata being a
-//! compressed resource itself. **LZMS** and a **solid block** are named
-//! rather than guessed at ([`Unsupported`]), so a `.esd` opens and says
+//! chunks decompressed where the resource is compressed, read whole
+//! ([`Wim::read`]) or a chunk at a time ([`Wim::file`]). With the feature
+//! `extract`, `extract_wim` takes one image out to a folder.
+//!
+//! **Every file is held to the SHA-1 the image names it by** as it is
+//! read. A WIM carries no other check — none beside a chunk, none beside a
+//! resource — so that hash is the one thing that says a file came out as
+//! it went in.
+//!
+//! **XPRESS** (`wim::xpress`, from Microsoft's [MS-XCA]) and **LZX**
+//! (`wim::lzx`, from [MS-PATCH]) are decoded, so a `.wim` from a Windows
+//! disc reads whole: its tree as well as its files, an image's metadata
+//! being a compressed resource itself. **LZMS** and a **solid block** are
+//! named rather than guessed at ([`Unsupported`]), so a `.esd` opens and says
 //! what it needs; LZMS has no published specification and the only
 //! implementation of it is GPL-3.0-or-later.
 //!
@@ -322,10 +330,39 @@ impl<R: Read + Seek> Wim<R> {
     /// A file's bytes, its chunks decompressed where its resource is
     /// compressed with a compression there is a decoder for.
     ///
+    /// **The whole file is held in memory.** For one of an unknown length,
+    /// which an image of a Windows installation holds plenty of, read it
+    /// through [`Wim::file`] instead: that holds one chunk at a time.
+    ///
     /// A file of no bytes reads as none. A directory is an error
     /// ([`Error::NotAFile`]), and so is a reparse point
     /// ([`Unsupported::Reparse`]), whose data is not a file's bytes.
     pub fn read(&mut self, entry: &Entry) -> Result<Vec<u8>, Error> {
+        let mut file = self.file(entry)?;
+        let mut out = vec![0u8; usize::try_from(file.size()).map_err(|_| Error::Resource)?];
+        let mut at = 0;
+        while at < out.len() {
+            match file.pull(&mut out[at..])? {
+                // The resource gave less than it says it holds.
+                0 => return Err(Error::Resource),
+                read => at += read,
+            }
+        }
+        Ok(out)
+    }
+
+    /// A file of an image, as a reader over its bytes.
+    ///
+    /// **One chunk is held, never the file**: a chunk is decompressed as
+    /// it is reached, so a file of 4 GiB is read through a buffer of the
+    /// archive's chunk size (32768 bytes, where nothing says otherwise).
+    /// That is what makes an image of a Windows installation extractable
+    /// on a machine that could not hold one of its files.
+    ///
+    /// A file of no bytes reads as none. A directory is an error
+    /// ([`Error::NotAFile`]), and so is a reparse point
+    /// ([`Unsupported::Reparse`]), whose data is not a file's bytes.
+    pub fn file(&mut self, entry: &Entry) -> Result<File<'_, R>, Error> {
         if entry.is_dir() {
             return Err(Error::NotAFile);
         }
@@ -333,16 +370,33 @@ impl<R: Read + Seek> Wim<R> {
             return Err(Error::Needs(Unsupported::Reparse { tag }));
         }
         let Some(resource) = entry.resource else {
-            return Ok(Vec::new());
+            return Ok(File {
+                how: How::Nothing,
+                size: 0,
+                given: 0,
+                want: None,
+                sha1: sha1::Sha1::default(),
+            });
         };
-        read_resource(
+        let size = resource.size;
+        let how = reading_of(
             &mut self.reader,
             &resource,
             self.whole,
             self.compression,
             self.chunk,
-            u64::MAX,
-        )
+        )?;
+        Ok(File {
+            how,
+            size,
+            given: 0,
+            // A directory and a file of no bytes carry zeroes where the
+            // hash goes, and a tree that names a resource by zeroes is
+            // not naming this file by anything: there is nothing to hold
+            // it to.
+            want: (entry.hash != [0u8; 20]).then_some(entry.hash),
+            sha1: sha1::Sha1::default(),
+        })
     }
 
     /// The archive it was opened on.
@@ -368,20 +422,117 @@ fn compression_of(flags: u32) -> Result<Compression, Error> {
     }
 }
 
-/// What a resource holds, up to `most` bytes of it.
+/// Where one resource's bytes come from.
+enum How<'a, R> {
+    /// An entry whose hash names no resource: a file of no bytes.
+    Nothing,
+    /// A resource held as it is, from where it begins on the file.
+    Plain {
+        reader: &'a mut R,
+        /// How much of it is still to come.
+        left: u64,
+    },
+    /// A compressed resource: its chunks, decompressed as they are
+    /// reached. Boxed, since it holds a chunk and the table of them and
+    /// the other two hold a reader and a length.
+    Chunks(Box<chunks::Reading<'a, R>>),
+}
+
+/// One file of an image, as a reader over its bytes: see [`Wim::file`],
+/// which is what makes one.
+///
+/// **What it gives is held to the SHA-1 the archive names it by.** A WIM
+/// carries no other check of a file's data — no CRC beside a chunk, no
+/// digest beside a resource — so the hash in the tree is the one thing
+/// that says the bytes are the bytes that went in. Read the file whole and
+/// it is checked; stop part way and there is nothing to check it against.
+pub struct File<'a, R> {
+    how: How<'a, R>,
+    size: u64,
+    /// How much has been given out, for telling when the file is whole.
+    given: u64,
+    /// The SHA-1 the tree names it by, where it names one, and what has
+    /// been read hashed as it goes.
+    want: Option<[u8; 20]>,
+    sha1: sha1::Sha1,
+}
+
+impl<R: Read + Seek> File<'_, R> {
+    /// How many bytes it holds.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// The next bytes into `buf`, and 0 once the file is read whole.
+    ///
+    /// This is [`Read::read`] saying what a WIM says when it fails:
+    /// through `Read` the same failure arrives as an [`io::Error`], since
+    /// that is all `Read` can carry.
+    ///
+    /// The last bytes of the file are given once the SHA-1 of all of them
+    /// matches the one the archive names the file by, and never where it
+    /// does not ([`Error::Hash`]).
+    pub fn pull(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
+        let read = match &mut self.how {
+            How::Nothing => 0,
+            How::Plain { reader, left } => {
+                if *left == 0 || buf.is_empty() {
+                    0
+                } else {
+                    let want = buf.len().min(usize::try_from(*left).unwrap_or(usize::MAX));
+                    match reader.read(&mut buf[..want])? {
+                        // The file ends before the resource says it does.
+                        0 => return Err(Error::Resource),
+                        read => {
+                            *left -= read as u64;
+                            read
+                        }
+                    }
+                }
+            }
+            How::Chunks(reading) => reading.pull(buf)?,
+        };
+        if read == 0 {
+            return Ok(0);
+        }
+        if self.want.is_some() {
+            use sha1::Digest;
+            self.sha1.update(&buf[..read]);
+        }
+        self.given += read as u64;
+        if self.given >= self.size
+            && let Some(want) = self.want
+        {
+            use sha1::Digest;
+            let got: [u8; 20] = self.sha1.clone().finalize().into();
+            if got != want {
+                return Err(Error::Hash);
+            }
+        }
+        Ok(read)
+    }
+}
+
+impl<R: Read + Seek> Read for File<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.pull(buf).map_err(io::Error::from)
+    }
+}
+
+/// Where a resource's bytes come from, with every refusal made before any
+/// of them is read.
 ///
 /// A compressed resource is read chunk by chunk (`chunks`) where there is
 /// a decoder for its compression, and refused by the name of that
 /// compression where there is not. A solid one is refused by its own name:
 /// read as the bytes it is, it would be read as rubbish.
-pub(crate) fn read_resource<R: Read + Seek>(
-    reader: &mut R,
+fn reading_of<'a, R: Read + Seek>(
+    reader: &'a mut R,
     resource: &Resource,
     whole: u64,
     compression: Compression,
     chunk: u32,
-    most: u64,
-) -> Result<Vec<u8>, Error> {
+) -> Result<How<'a, R>, Error> {
     if !resource.on_the_file(whole) {
         return Err(Error::Resource);
     }
@@ -399,26 +550,56 @@ pub(crate) fn read_resource<R: Read + Seek>(
                 flags: EVERY_COMPRESSION,
             }));
         }
-        return chunks::read(reader, resource, whole, compression, chunk, most);
+        let reading = chunks::Reading::new(reader, resource, whole, compression, chunk)?;
+        return Ok(How::Chunks(Box::new(reading)));
     }
     // Not compressed: what it holds is what it takes, and nothing else is
     // a resource this can read.
     if resource.packed != resource.size {
         return Err(Error::Resource);
     }
+    reader.seek(SeekFrom::Start(resource.at))?;
+    Ok(How::Plain {
+        reader,
+        left: resource.size,
+    })
+}
+
+/// What a resource holds, up to `most` bytes of it: [`reading_of`] read
+/// through.
+pub(crate) fn read_resource<R: Read + Seek>(
+    reader: &mut R,
+    resource: &Resource,
+    whole: u64,
+    compression: Compression,
+    chunk: u32,
+    most: u64,
+) -> Result<Vec<u8>, Error> {
     if resource.size > most {
         return Err(Error::TooMany);
     }
-    let mut raw = vec![0u8; resource.size as usize];
-    reader.seek(SeekFrom::Start(resource.at))?;
-    reader.read_exact(&mut raw).map_err(|e| {
-        if e.kind() == io::ErrorKind::UnexpectedEof {
-            Error::Resource
-        } else {
-            Error::Io(e)
+    let size = usize::try_from(resource.size).map_err(|_| Error::Resource)?;
+    // An image's metadata is a resource like any other, and the table
+    // names it by a hash too — but the hash is the table's, not the
+    // resource's own, and `Resource` does not carry it: what is held to
+    // its hash is a file, through `Wim::file`.
+    let mut file = File {
+        how: reading_of(reader, resource, whole, compression, chunk)?,
+        size: resource.size,
+        given: 0,
+        want: None,
+        sha1: sha1::Sha1::default(),
+    };
+    let mut out = vec![0u8; size];
+    let mut at = 0;
+    while at < out.len() {
+        match file.pull(&mut out[at..])? {
+            // The resource gave less than it says it holds.
+            0 => return Err(Error::Resource),
+            read => at += read,
         }
-    })?;
-    Ok(raw)
+    }
+    Ok(out)
 }
 
 pub(crate) fn le16(of: &[u8], at: usize) -> u16 {

@@ -54,6 +54,11 @@ pub enum Error {
     /// chunk is whole, or a match reaching before the chunk or past the
     /// end of its own block.
     Lzx,
+    /// The bytes of a file do not hash to the SHA-1 the archive names it
+    /// by: the resource is damaged, or it is not the resource the entry
+    /// means. A WIM carries no other check of a file's data, so this is
+    /// the one that says the file came out as it went in.
+    Hash,
     /// What was to be read as a file is a directory.
     NotAFile,
     /// The archive holds what this does not read, named rather than
@@ -137,6 +142,10 @@ impl fmt::Display for Error {
                 write!(f, "a chunk compressed with XPRESS does not decompress")
             }
             Error::Lzx => write!(f, "a chunk compressed with LZX does not decompress"),
+            Error::Hash => write!(
+                f,
+                "the file's bytes do not match the SHA-1 the archive names it by"
+            ),
             Error::NotAFile => write!(f, "that is a directory, not a file"),
             Error::Needs(what) => write!(f, "the archive needs {what}"),
         }

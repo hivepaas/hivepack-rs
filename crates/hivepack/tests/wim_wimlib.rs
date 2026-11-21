@@ -17,161 +17,13 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use hivepack::wim::{Compression, Error, Unsupported, Wim};
 
-/// Where `scripts/testdata.py` puts what it fetches and builds.
-fn cache() -> PathBuf {
-    std::env::var_os("HIVEPACK_TESTDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/testdata"))
-}
+#[path = "wim_support/mod.rs"]
+mod build;
 
-/// `wimlib-imagex`, as `scripts/testdata.py` builds it. CI lists the
-/// `generated` group in `HIVEPACK_TESTDATA_REQUIRED` where it builds it,
-/// and then a missing one fails rather than being passed over.
-fn wimlib() -> Option<PathBuf> {
-    let folder = cache().join("wimlib");
-    if folder.join(".complete").exists() {
-        return Some(folder.join("wimlib-imagex"));
-    }
-    let required = std::env::var("HIVEPACK_TESTDATA_REQUIRED").unwrap_or_default();
-    assert!(
-        !required.split(',').any(|g| g == "all" || g == "generated"),
-        "wimlib is missing: run `python3 scripts/testdata.py fetch --group generated`"
-    );
-    eprintln!("skipping: wimlib is not built (scripts/testdata.py fetch --group generated)");
-    None
-}
-
-/// A folder in the system's temporary one, removed when dropped.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new(what: &str) -> Scratch {
-        let path =
-            std::env::temp_dir().join(format!("hivepack-wimlib-{}-{what}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).unwrap();
-        Scratch(path)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// Bytes that are the same every run, and not all alike.
-fn pattern(len: usize, seed: u64) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(len);
-    let mut x = seed | 1;
-    for _ in 0..len {
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        bytes.push((x >> 24) as u8);
-    }
-    bytes
-}
-
-/// The tree these tests put in an archive: a path for each file with its
-/// bytes, and none for a folder. It holds bytes that compress (the same
-/// line over and over) and bytes that do not (a pattern), so that a
-/// compressed archive really has compressed resources in it.
-fn a_tree() -> BTreeMap<&'static str, Option<Vec<u8>>> {
-    BTreeMap::from([
-        ("readme.txt", Some(b"hello from a wim\n".to_vec())),
-        ("docs", None),
-        ("docs/note.txt", Some(b"deeper\n".to_vec())),
-        (
-            "docs/over and over.txt",
-            Some(b"the quick brown fox jumps over the lazy dog\n".repeat(400)),
-        ),
-        (
-            "docs/over and over again.txt",
-            Some(b"the quick brown fox jumps over the lazy dog\n".repeat(3000)),
-        ),
-        // Nothing but `E8` x86 calls, each with a displacement small
-        // enough to be a target inside a file, which is what LZX's call
-        // translation ([MS-PATCH] §2.2.2) rewrites. An LZX archive really
-        // holds them rewritten, so reading this file back as it went in
-        // is what says the translation is undone — and the same file in
-        // an XPRESS archive says that compression does not translate.
-        ("calls.bin", Some(b"\xe8\x00\x01\x00\x00".repeat(2000))),
-        // A chunk that compresses followed by one that does not, so that
-        // a compressed resource holds a **stored** chunk beside a
-        // compressed one.
-        ("mixed.bin", Some(mixed())),
-        ("empty.bin", Some(Vec::new())),
-        ("noise.bin", Some(pattern(60_000, 11))),
-    ])
-}
-
-/// 32768 bytes of text that compresses, and then 32768 that do not, with
-/// an `E8` x86 call every 500 bytes of them: what a compressor stores as
-/// it is rather than compressing. The bytes a stored chunk holds are the
-/// file's own, with no call translation done to them, which is what
-/// reading this file back out of an LZX archive says.
-fn mixed() -> Vec<u8> {
-    let mut bytes = b"the quick brown fox jumps over the lazy dog\n".repeat(745);
-    bytes.truncate(32_768);
-    let mut noise = pattern(32_768, 99);
-    for at in (100..32_700).step_by(500) {
-        noise[at..at + 5].copy_from_slice(&[0xE8, 0x00, 0x01, 0x00, 0x00]);
-    }
-    bytes.extend_from_slice(&noise);
-    bytes
-}
-
-/// An archive of [`a_tree`] that wimlib wrote with `how`, and its bytes.
-/// `how` is the arguments that say how to compress it: `--compress=LZX`,
-/// `--solid` on its own, a `--chunk-size` beside either.
-fn captured(s: &Scratch, tool: &Path, how: &[&str]) -> Vec<u8> {
-    let named = how.join("-").replace("--", "");
-    // One tree for every archive of one test, so that two archives of it
-    // differ only in how they are compressed: the files are the same
-    // files, with the same times, so an image's metadata is the same
-    // bytes and what is read out of one can be held against the other.
-    let tree = s.0.join("tree");
-    // Written once, not again for each archive: writing a file over again
-    // gives it new times, and the times are in the metadata resource that
-    // these archives are read against each other to check.
-    if !tree.exists() {
-        for (path, what) in a_tree() {
-            let at = tree.join(path);
-            match what {
-                Some(bytes) => {
-                    std::fs::create_dir_all(at.parent().unwrap()).unwrap();
-                    std::fs::write(&at, bytes).unwrap();
-                }
-                None => std::fs::create_dir_all(&at).unwrap(),
-            }
-        }
-    }
-    let archive = s.0.join(format!("{named}.wim"));
-    let _ = std::fs::remove_file(&archive);
-    let out = Command::new(tool)
-        .args([
-            "capture",
-            tree.to_str().unwrap(),
-            archive.to_str().unwrap(),
-            "probe",
-            "--norpfix",
-        ])
-        .args(how)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "wimlib-imagex capture {how:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    std::fs::read(&archive).unwrap()
-}
+use build::{Scratch, a_tree, a_tree_with_links, captured, captured_from, want, wimlib};
 
 /// An archive wimlib wrote with no compression: the tree that went in comes
 /// back, as it does from 7-Zip's in `tests/wim.rs`. Two writers of the same
@@ -255,14 +107,6 @@ fn described(wim: &mut Wim<std::io::Cursor<Vec<u8>>>) -> Vec<String> {
                 e.extra_streams,
             )
         })
-        .collect()
-}
-
-/// [`a_tree`] with the paths as a read gives them.
-fn want() -> BTreeMap<String, Option<Vec<u8>>> {
-    a_tree()
-        .into_iter()
-        .map(|(path, what)| (path.to_string(), what))
         .collect()
 }
 
@@ -362,4 +206,167 @@ fn a_compressed_archive_says_which_compression_the_tree_needs() {
             tree.err()
         );
     }
+}
+
+/// A file read through [`Wim::file`] is the file [`Wim::read`] gives, and
+/// it arrives **chunk by chunk**: read with a buffer of seven bytes, the
+/// 132000-byte file of the tree comes out whole and the same, over the
+/// five LZX chunks it is held in and across every boundary between them.
+///
+/// This is what lets an image of a Windows installation be extracted on a
+/// machine that could not hold one of its files: the reader holds a chunk,
+/// never the file.
+#[test]
+fn a_file_reads_through_a_small_buffer_as_it_reads_whole() {
+    let Some(tool) = wimlib() else {
+        return;
+    };
+    let s = Scratch::new("stream");
+    let bytes = captured(&s, &tool, &["--compress=LZX"]);
+    let mut wim = Wim::open(std::io::Cursor::new(bytes)).unwrap();
+    let entries = wim.entries(1).unwrap();
+    let long = entries
+        .iter()
+        .find(|entry| entry.path.ends_with("over and over again.txt"))
+        .expect("the tree holds the long file")
+        .clone();
+    assert_eq!(long.size, 132_000);
+
+    let whole = wim.read(&long).unwrap();
+    let mut file = wim.file(&long).unwrap();
+    assert_eq!(file.size(), 132_000);
+    let mut piece = [0u8; 7];
+    let mut read = Vec::new();
+    loop {
+        match file.pull(&mut piece).unwrap() {
+            0 => break,
+            n => read.extend_from_slice(&piece[..n]),
+        }
+    }
+    assert_eq!(read, whole);
+
+    // And through `Read`, which is what an extractor uses, with the
+    // buffer that lands on no chunk boundary at all.
+    use std::io::Read;
+    let mut file = wim.file(&long).unwrap();
+    let mut through = Vec::new();
+    file.read_to_end(&mut through).unwrap();
+    assert_eq!(through, whole);
+
+    // A file of no bytes reads as none, and a directory is not a file.
+    let empty = entries
+        .iter()
+        .find(|entry| entry.path.ends_with("empty.bin"))
+        .expect("the tree holds an empty file")
+        .clone();
+    let mut file = wim.file(&empty).unwrap();
+    assert_eq!(file.size(), 0);
+    assert_eq!(file.pull(&mut piece).unwrap(), 0);
+    let dir = entries
+        .iter()
+        .find(|entry| entry.is_dir())
+        .expect("the tree holds a folder")
+        .clone();
+    assert!(matches!(wim.file(&dir), Err(Error::NotAFile)));
+}
+
+/// A file whose bytes were changed after the archive was written does not
+/// read: the SHA-1 the tree names it by is the one check a WIM gives, and
+/// a WIM gives no other -- no CRC beside a chunk, nothing beside a
+/// resource -- so without this a damaged archive would hand back damaged
+/// bytes and say nothing.
+///
+/// The archive is the uncompressed one, so that the file's bytes are in it
+/// as themselves and one of them can be turned over where it lies.
+#[test]
+fn a_file_whose_bytes_were_changed_does_not_read() {
+    let Some(tool) = wimlib() else {
+        return;
+    };
+    let s = Scratch::new("hash");
+    let mut bytes = captured(&s, &tool, &["--compress=none"]);
+    let said = b"hello from a wim\n";
+    let at = bytes
+        .windows(said.len())
+        .position(|at| at == said)
+        .expect("the file's bytes are in the archive as themselves");
+    bytes[at] ^= 0x20;
+
+    let mut wim = Wim::open(std::io::Cursor::new(bytes)).unwrap();
+    let entries = wim.entries(1).unwrap();
+    let changed = entries
+        .iter()
+        .find(|entry| entry.path == "readme.txt")
+        .expect("the tree holds it")
+        .clone();
+    assert!(
+        matches!(wim.read(&changed), Err(Error::Hash)),
+        "a changed file read as though it were the file"
+    );
+    // And every other file still reads: one resource was turned over, not
+    // the archive.
+    let note = entries
+        .iter()
+        .find(|entry| entry.path == "docs/note.txt")
+        .expect("the tree holds it")
+        .clone();
+    assert_eq!(wim.read(&note).unwrap(), b"deeper\n");
+}
+
+/// An entry with **streams beside it** is read past, and the file's own
+/// hash is taken from the unnamed one.
+///
+/// A WIM keeps the streams of an entry (`file.txt:stream`, and the reparse
+/// data of a symbolic link) as stream entries in the metadata after the
+/// entry itself, and the next entry of the list begins after them. A
+/// reader that stepped over the entry alone would read the first stream
+/// entry as an entry of the tree and refuse the whole image, and
+/// `wimlib-imagex` writes two of them for every symbolic link it
+/// captures, so without this an archive holding one does not read at all.
+///
+/// The hash is the other half: the field in such an entry is zeroes, and
+/// the unnamed stream entry after it carries the SHA-1 of what the file
+/// holds. Read from the field alone, a symbolic link here would have no
+/// resource and a length of nothing, rather than the 44 bytes of reparse
+/// data wimlib really wrote.
+#[test]
+#[cfg(unix)]
+fn an_entry_with_streams_beside_it_is_read_past() {
+    let Some(tool) = wimlib() else { return };
+    let s = Scratch::new("streams");
+    let tree = s.0.join("tree");
+    a_tree_with_links(&tree);
+    let bytes = captured_from(&tool, &tree, &s.0.join("streams.wim"), &["--compress=LZX"]);
+
+    let mut wim = Wim::open(std::io::Cursor::new(bytes)).unwrap();
+    let entries = wim.entries(1).unwrap();
+    let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        ["link.txt", "one.txt", "sub", "two.txt", "sub/note.txt"]
+    );
+
+    // The symbolic link: a reparse point, whose kind is the one Windows
+    // gives a symbolic link, with its reparse data as the resource the
+    // unnamed stream entry names. Its data is not a file's bytes, so
+    // reading it is refused rather than handed back as the file.
+    let link = &entries[0];
+    assert_eq!(link.reparse_tag, Some(0xa000_000c));
+    assert_eq!(link.size, 44);
+    assert_ne!(link.hash, [0u8; 20]);
+    // Both stream entries wimlib wrote are unnamed, so there is no named
+    // stream beside the file.
+    assert_eq!(link.extra_streams, 0);
+    assert!(matches!(
+        wim.read(link),
+        Err(Error::Needs(Unsupported::Reparse { tag: 0xa000_000c }))
+    ));
+
+    // And the two names of one file say so, by the set they are both in.
+    let (one, two) = (&entries[1], &entries[3]);
+    assert_eq!(one.hard_link_group, two.hard_link_group);
+    assert!(one.hard_link_group.is_some());
+    assert_eq!(one.hash, two.hash);
+    assert_eq!(wim.read(one).unwrap(), b"shared bytes\n");
+    assert_eq!(wim.read(two).unwrap(), b"shared bytes\n");
 }

@@ -160,6 +160,13 @@ pub enum ErrorKind {
     /// read.
     #[cfg(feature = "ntfs")]
     Ntfs(crate::ntfs::Error),
+    /// The WIM archive could not be read, or holds what is not read: a
+    /// file whose bytes do not match the SHA-1 the image names it by
+    /// ([`crate::wim::Error::Hash`]), a reparse point, a resource in a
+    /// solid block or compressed with LZMS, or a tree that does not hold
+    /// together.
+    #[cfg(feature = "wim")]
+    Wim(crate::wim::Error),
     /// The 7z archive's data could not be read: damaged, a CRC that does
     /// not match, a method `hivepack::sevenz` does not decode, or a password
     /// missing or wrong.
@@ -213,6 +220,15 @@ impl ErrorKind {
             ErrorKind::Fat(_) => true,
             #[cfg(feature = "exfat")]
             ErrorKind::ExFat(_) => true,
+            // What this will not read — a reparse point, a solid block,
+            // LZMS — is not damage, as NTFS's refusals below are not. A
+            // file whose SHA-1 does not match is, and it is the one kind
+            // a WIM can tell: nothing else in the format says that a
+            // resource is not the resource it claims to be.
+            #[cfg(feature = "wim")]
+            ErrorKind::Wim(e) => {
+                !matches!(e, crate::wim::Error::Needs(_) | crate::wim::Error::NotAFile)
+            }
             // A file this crate will not read — compressed, encrypted, a
             // reparse point — is not damage: reading on would not help,
             // and `OnDamaged` is for what a second try can get past.
@@ -298,6 +314,8 @@ impl fmt::Display for ErrorKind {
             ErrorKind::ExFat(e) => write!(f, "file system: {e}"),
             #[cfg(feature = "ntfs")]
             ErrorKind::Ntfs(e) => write!(f, "file system: {e}"),
+            #[cfg(feature = "wim")]
+            ErrorKind::Wim(e) => write!(f, "archive: {e}"),
             ErrorKind::SevenZip(e) => write!(f, "archive: {e}"),
             #[cfg(feature = "rar")]
             ErrorKind::Rar(e) => write!(f, "archive: {e}"),
@@ -343,6 +361,8 @@ impl std::error::Error for Error {
             ErrorKind::ExFat(e) => Some(e),
             #[cfg(feature = "ntfs")]
             ErrorKind::Ntfs(e) => Some(e),
+            #[cfg(feature = "wim")]
+            ErrorKind::Wim(e) => Some(e),
             ErrorKind::SevenZip(e) => Some(e),
             #[cfg(feature = "rar")]
             ErrorKind::Rar(e) => Some(e),
