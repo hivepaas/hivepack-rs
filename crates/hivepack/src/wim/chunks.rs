@@ -29,7 +29,36 @@
 use std::io::{Read, Seek, SeekFrom};
 
 use super::error::{Error, Unsupported};
-use super::{Compression, Resource, le32, le64, xpress};
+use super::{Compression, Resource, le32, le64, lzx, xpress};
+
+/// The decoder a compression needs, built when a chunk is really
+/// compressed rather than for the resource: one of stored chunks needs
+/// none, and an archive whose chunk size no decoder can take still reads
+/// the chunks it stored.
+enum Decoder {
+    Xpress(xpress::Decoder),
+    Lzx(lzx::Decoder),
+}
+
+impl Decoder {
+    fn new(compression: Compression, chunk: u64) -> Result<Decoder, Error> {
+        match compression {
+            Compression::Xpress => Ok(Decoder::Xpress(xpress::Decoder::new())),
+            Compression::Lzx => Ok(Decoder::Lzx(lzx::Decoder::new(chunk)?)),
+            // `read_resource` has refused these above; they are here so
+            // that adding a decoder is a change the compiler asks for.
+            Compression::None => Err(Error::Says),
+            Compression::Lzms => Err(Error::Needs(Unsupported::Lzms)),
+        }
+    }
+
+    fn decompress(&mut self, packed: &[u8], into: &mut [u8]) -> Result<(), Error> {
+        match self {
+            Decoder::Xpress(decoder) => xpress::decompress(decoder, packed, into),
+            Decoder::Lzx(decoder) => decoder.decompress(packed, into),
+        }
+    }
+}
 
 /// Where a chunk's entry says it begins, from the table's end.
 fn entry(raw: &[u8], at: usize, wide: bool) -> u64 {
@@ -95,7 +124,7 @@ pub(crate) fn read<R: Read + Seek>(
     bounds.push(data);
 
     let mut out = vec![0u8; usize::try_from(size).map_err(|_| Error::Resource)?];
-    let mut decoder = xpress::Decoder::new();
+    let mut decoder: Option<Decoder> = None;
     let mut packed = Vec::new();
     for i in 0..count {
         let from = bounds[i as usize];
@@ -127,14 +156,11 @@ pub(crate) fn read<R: Read + Seek>(
             // Longer compressed than it is uncompressed, which no chunk is.
             return Err(Error::Resource);
         }
-        match compression {
-            Compression::Xpress => xpress::decompress(&mut decoder, &packed, into)?,
-            // `needs` has refused these above; this is here so that adding
-            // a decoder is a change the compiler asks for.
-            Compression::None => return Err(Error::Says),
-            Compression::Lzx => return Err(Error::Needs(Unsupported::Lzx)),
-            Compression::Lzms => return Err(Error::Needs(Unsupported::Lzms)),
-        }
+        let decoder = match decoder {
+            Some(ref mut decoder) => decoder,
+            None => decoder.insert(Decoder::new(compression, chunk)?),
+        };
+        decoder.decompress(&packed, into)?;
     }
     Ok(out)
 }

@@ -2,7 +2,7 @@
 
 `hivepack::wim` reads the Windows Imaging Format, read-only. `install.wim` and `boot.wim` on every Windows disc are WIMs, a `.esd` is one, and `DISM`, `wimlib` and 7-Zip all write them. It is the format behind "I downloaded a Windows ISO and want one file out of it" — the ISO's [`iso`](open.md) or [`udf`](udf.md) side holds `sources/install.wim`, and the files are inside that.
 
-**It is not a port.** The layout is Microsoft's published *Windows Imaging File Format (WIM)* specification, and it is checked against 7-Zip, which writes an uncompressed WIM and reads every kind.
+**It is not a port.** The layout is Microsoft's published *Windows Imaging File Format (WIM)* specification, the compressions are Microsoft's **[MS-XCA]** and **[MS-PATCH]**, and it is checked against two writers: 7-Zip, which writes an uncompressed WIM and reads every kind, and `wimlib-imagex`, which writes every kind and is the only oracle for a compressed one. wimlib is GPL-3.0-or-later; it is built by `scripts/testdata.py` and run as a program, and nothing in this repository is read from it.
 
 ## A WIM is not an archive of files in a row
 
@@ -17,27 +17,26 @@ This is the first of the layers. What is here:
 
 - **`Wim::open(reader)`** — the header, the table of resources, and the XML. `compression`, `chunk_size`, `images` and `resources` say what the archive is.
 - **`Wim::entries(index)`** — one image's tree, parents before what they hold, each entry with the path to it, its name, the short name where it has one, the length and SHA-1 from the table, the three times, Windows' attributes, the Unix mode where 7-Zip wrote one, which set of hard links it belongs to, and how many streams beside its own it names.
-- **`Wim::read(&entry)`** — a file's bytes: its chunks decompressed where its resource is compressed with XPRESS, and refused by name where it is LZX or LZMS.
+- **`Wim::read(&entry)`** — a file's bytes: its chunks decompressed where its resource is compressed with XPRESS or LZX, and refused by name where it is LZMS or a solid block.
 
 What is **named and refused**, each with its own `Unsupported`:
 
 | | |
 |---|---|
-| `Unsupported::Lzx` | resources compressed with LZX — what a Windows disc's `install.wim` holds |
 | `Unsupported::Lzms` | resources compressed with LZMS — what a `.esd` holds |
 | `Unsupported::Solid` | a solid block: many files compressed together, as a `.esd` and `wimlib --solid` write |
 | `Unsupported::Spanned` | a part of a split archive (`.swm`), whose other parts are files this cannot reach |
 | `Unsupported::Reparse` | a file whose data is a reparse point — a symbolic link, a junction, a placeholder — which is not a file's bytes |
 
-So **an uncompressed WIM reads whole, and an XPRESS one reads whole as well.** An LZX or LZMS archive opens and says which compression it needs, but its tree is not read — an image's metadata is a resource like any other, and a compressed archive compresses that too. This was measured rather than reasoned about: `wimlib-imagex capture --compress=XPRESS|LZX|LZMS` writes the metadata resource with `METADATA | COMPRESSED` every time, and 7-Zip, which writes WIMs with no compression at all, cannot be asked for one that has it. An earlier version of this page said such an archive still lists every file with its length and SHA-1; that came from an archive whose header was turned over by hand with its resources left uncompressed, which is not what any tool writes, and it was wrong.
+So **an uncompressed WIM reads whole, an XPRESS one reads whole, and an LZX one reads whole** — which is what a Windows disc's `install.wim` is. A `.esd`, and anything else holding LZMS or solid resources, opens and says which compression it needs, but its tree is not read: an image's metadata is a resource like any other, and a compressed archive compresses that too. This was measured rather than reasoned about: `wimlib-imagex capture --compress=XPRESS|LZX|LZMS` writes the metadata resource with `METADATA | COMPRESSED` every time, and 7-Zip, which writes WIMs with no compression at all, cannot be asked for one that has it. An earlier version of this page said such an archive still lists every file with its length and SHA-1; that came from an archive whose header was turned over by hand with its resources left uncompressed, which is not what any tool writes, and it was wrong.
 
-What an LZX or LZMS archive does tell, with no decoder for it:
+What a `.esd` does tell, with no decoder for LZMS:
 
 - **the header** — which compression, and the chunk size (32768 for XPRESS and LZX, 131072 for LZMS);
 - **the table of resources** — how many there are, and each one's length before and after compression with its SHA-1. The table is a resource too, but every tool writes it uncompressed;
 - **the XML** — each image's name (`Windows 11 Pro`), how many files and directories it holds and how many bytes they come to.
 
-The names, the tree and what is a hard link of what are in the metadata resource, behind the same decoder as the files. LZX comes next, and then LZMS.
+The names, the tree and what is a hard link of what are in the metadata resource, behind the same decoder as the files. **LZMS has no published specification** and the only implementation of it is GPL-3.0-or-later, so it stays named and refused unless that changes; a solid block is LZMS as well.
 
 ## A resource is chunks, not one stream
 
@@ -76,6 +75,31 @@ Three things in the specification needed deciding rather than copying, and each 
 
 One chunk is one block. A chunk longer than a block (65536 bytes) is refused rather than read as though the table at its start covered all of it; a WIM compresses XPRESS in chunks of 32768, so the case does not arise in an archive a tool wrote.
 
+## LZX
+
+`wim::lzx` decodes LZX, which is what a Windows disc's `install.wim` holds, from Microsoft's **[MS-PATCH]: LZX DELTA Compression and Decompression**, published under its Open Specification Promise, whose §2.7 gives the decoding of a match or a literal as pseudocode. It was read from Microsoft's own Open Specifications pages, which carry a revision date per section; the newest of the ones that matter here is §2.6.3, revised 2025-05-20. LZXD is LZX with delta compression added; a WIM gives the decoder no reference data, so §2.1.3 never arises and what is left is LZX itself. Nothing here is a port: wimlib's decompressor is GPL-3.0-or-later and was not read.
+
+A chunk holds one or more **blocks**, each with its own Huffman trees. The **main tree** has 256 symbols for the literal bytes and eight more for each position slot, so a match's symbol carries both its length header, of [0, 7], and the slot its offset falls in; the slot's **base position** and **footer bits** are what the window decides, 30 slots for the 32768 a WIM's chunks are. The **length tree** holds the rest of a length over eight, the **aligned offset tree** the low three bits of an offset in an aligned offset block, and a **pretree** the path lengths of the others, written as the difference from the lengths of the block before. Three **repeated offsets** stand for the offsets of the last three matches.
+
+**A WIM does four things the specification does not**, and no specification of the WIM variant is published, so these were measured against archives `wimlib-imagex` wrote:
+
+1. **No chunk-size prefix** (§2.2.1): a WIM's own table of chunks already says how long each is.
+2. **No E8 header bit** (§2.2.2) — and yet **x86 call translation is always on**. Nothing in the stream says whether the calls were rewritten; every chunk is undone with an `E8_file_size` of **12000000** and a `chunk_offset` of **zero**, a chunk being translated on its own as it is compressed on its own. Measured against a file of nothing but `E8` calls over three chunks, with displacements on each side of every edge of the rule — 0, 1, 1000, 11999999, 12000000, -1, -2³¹ — of which that one reading gives back all 70000 bytes and no other gives even 95% of them: a cumulative `chunk_offset` misses 3892 bytes and a file size of 10000000 misses 6938. A **stored** chunk is not translated: its bytes are the file's own, which a resource whose first chunk compresses and whose second does not says.
+3. **No Extra Length field** (§2.6.6). That field is LZXD's own, for the matches of up to 32768 bytes §2.1.5 gives; a WIM's LZX is the older format, whose longest match is the 257 the length tree reaches. Reading the field where it is not there is what a WIM shows plainest: a match of 257 bytes is taken as one of 427, which over text that repeats every 44 bytes still copies the right bytes, so the nine bits it swallows only come out as rubbish a line later.
+4. **The Block Size field is not 24 bits** (§2.3.1.2). One bit after the block type says the block holds 32768 bytes; where it does not, a field follows that is 16 bits for a window of 32768 or less and 24 bits for a larger one:
+
+```text
+chunk 32768, block 32768:  001 1              verbatim, 32768
+chunk 32768, block  4896:  001 0 0x1320       verbatim, 4896    (16 bits)
+chunk 65536, block 65536:  001 0 0x010000     verbatim, 65536   (24 bits)
+chunk 65536, block 37664:  001 0 0x009320     verbatim, 37664   (24 bits)
+chunk 32768, block   624:  010 0 0x0270       aligned offset, 624
+```
+
+And one place where **the specification disagrees with itself**: for a slot of exactly three footer bits, §2.6.3 splits the low three bits off into the aligned offset tree, as it does for every offset over 15, while §2.7's pseudocode asks for *more* than three footer bits before it does. Archives are written §2.6.3's way, so that is what is read — the other way round, an aligned offset block whose offsets are 16 to 31 comes out as rubbish, which is how the disagreement was found: an image's metadata is an aligned offset block, and it was the first thing that would not read.
+
+An **uncompressed block** (§2.3.2.1) is the one rule here with no archive to hold it to. Nothing writes one into a WIM — a chunk that does not compress is stored as it is, which `wim::chunks` reads — so its padding, which §2.3.2.1 gives as "1 to 16 bits", is implemented as the specification words it and checked only against streams written here.
+
 ## A `.esd` says it is a different version
 
 An archive that may hold LZMS or solid resources carries **version `0x0e00`** in its header rather than the `0x00010d00` everything else writes, and its resources for files inside a solid block carry offsets **into that block** rather than onto the file. Both are read here: the version is accepted so that such an archive can be told apart and say that it needs LZMS, and a solid resource is kept as it stands rather than measured against the file, so that it is refused by name (`Unsupported::Solid`) instead of being called a broken table. Measured on what `wimlib-imagex capture --solid` writes.
@@ -101,7 +125,17 @@ An archive that may hold LZMS or solid resources carries **version `0x0e00`** in
 - **Two names of one file**: the entries carry the same SHA-1, the archive holds two resources (the bytes and the tree), and both names read the same bytes.
 - **The times**: the modified time within a second of what the file on disk had, and the two 7-Zip leaves out coming back as none.
 - **Archives changed by hand**, for what no tool writes: each compression named and refused, both ways it says it is a split set, a version this does not read, a header of the wrong size, a table of resources that is not on the file, a table whose length is not a whole number of entries, and **a tree that leads back into itself**, which is built by pointing a real archive's directory at the root's own child list. That test failed before the loop check covered the root, which is how the gap was found.
-- **A fuzz target, `wim`**, which opens any input, walks every image and reads every file, twice, and compares.
+- **A fuzz target, `wim`**, which opens any input, walks every image and reads every file, twice, and compares. Each input is fed again with the header turned over to say XPRESS, LZX in chunks of 32768 and LZX in chunks of 65536, because a resource is only decompressed where the header names a compression there is a decoder for: without that, the fuzzer would have to write those four bytes itself before it ever reached a decoder.
+
+`crates/hivepack/tests/wim_wimlib.rs`, against `wimlib-imagex`, which is the only oracle for a **compressed** archive, since 7-Zip reads XPRESS and LZX but writes neither:
+
+- **An uncompressed archive wimlib wrote**, read back as the tree that went in — the same tree 7-Zip's test reads, so what is read is the format and not one tool's habits.
+- **An XPRESS archive**, and **LZX archives in chunks of 32768, 65536 and 131072**, each read back as the tree that went in, with every file's bytes compared. The chunk size decides three things at once, so each is read: how wide the Block Size field is, how many position slots the window has (30, 32, 34), and whether a chunk holds more than one block — wimlib ends a block every 100000 bytes, so the 131072 chunks hold two, each with its trees written as the difference from the trees of the block before.
+- The tree those archives hold is what says they read: a file over five chunks, one that does not compress at all, one whose first chunk compresses and whose second is stored, a file of nothing but `E8` x86 calls, a name with accents, a file of no bytes — and the image's metadata, which is a compressed resource too, and an aligned offset block where the files are verbatim ones.
+- **Every entry field of an LZX archive against the uncompressed archive of the same tree** — the names, the short names, the lengths, the hashes, the times, the attributes, the reparse tags, the hard-link sets. The metadata resource is the same bytes in both, so this is how far a compressed one is read: field by field, and not only as far as the paths and the files. All but the time a file was last *read*, which moves on its own, writing the second archive of a tree being a read of it.
+- **An LZMS archive and a `--solid` one**, which say which compression they need by name, and what they still tell without a decoder: the compression, the chunk size, how many resources there are, and the names of their images.
+
+And `wim::lzx`'s and `wim::xpress`'s own tests, which build streams bit by bit from the specifications' own encodings — the only way to reach what no archive here holds: an uncompressed LZX block, a tree that is not a canonical code, a block of a type the format has not, a match reaching before the chunk or past its own block, and the position slot table, whose 30, 32, 34, 36, 38, 42, 50, 66, 98, 162 and 290 slots — one for each window LZX has, from 2^15 to 2^25 — are checked against the rows §2.1.6 tabulates.
 
 ## What a reader should know
 

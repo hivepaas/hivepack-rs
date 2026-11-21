@@ -9,17 +9,24 @@
 //! it, and a `.wim` of several Windows editions is mostly one set of
 //! resources with several trees over it.
 //!
-//! What this reads now: the header, the table of resources, the XML that
+//! What this reads: the header, the table of resources, the XML that
 //! names the images, and each image's tree, with every entry's name,
-//! attributes, times, length and SHA-1, and the files whose resources are
-//! **not compressed**. What a resource is compressed with is named rather
-//! than guessed at ([`Unsupported`]), so a `.wim` from a Windows disc says
-//! it needs LZX and a `.esd` says it needs LZMS, which are what comes
-//! next.
+//! attributes, times, length and SHA-1 — and the files themselves, their
+//! chunks decompressed where the resource is compressed. **XPRESS**
+//! (`wim::xpress`, from Microsoft's [MS-XCA]) and **LZX** (`wim::lzx`,
+//! from [MS-PATCH]) are decoded, so a `.wim` from a Windows disc reads
+//! whole: its tree as well as its files, an image's metadata being a
+//! compressed resource itself. **LZMS** and a **solid block** are named
+//! rather than guessed at ([`Unsupported`]), so a `.esd` opens and says
+//! what it needs; LZMS has no published specification and the only
+//! implementation of it is GPL-3.0-or-later.
 //!
 //! Nothing here is a port. The layout is Microsoft's published *Windows
-//! Imaging File Format (WIM)* specification, and it is checked against
-//! what 7-Zip reads and writes: `docs/wim.md`.
+//! Imaging File Format (WIM)* specification and the compressions are its
+//! [MS-XCA] and [MS-PATCH]; wimlib, which is GPL-3.0-or-later, is built
+//! and run as a program to write the archives the tests read back, never
+//! read. It is checked against what 7-Zip and `wimlib-imagex` read and
+//! write: `docs/wim.md`.
 //!
 //! ```no_run
 //! use hivepack::wim::Wim;
@@ -40,6 +47,7 @@ mod chunks;
 mod dentry;
 mod error;
 mod lookup;
+mod lzx;
 mod xml;
 mod xpress;
 
@@ -110,7 +118,8 @@ impl Compression {
             Compression::None => None,
             // XPRESS is decoded: `wim::xpress`, from [MS-XCA].
             Compression::Xpress => None,
-            Compression::Lzx => Some(Unsupported::Lzx),
+            // LZX is decoded: `wim::lzx`, from [MS-PATCH].
+            Compression::Lzx => None,
             Compression::Lzms => Some(Unsupported::Lzms),
         }
     }

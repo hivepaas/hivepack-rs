@@ -337,50 +337,47 @@ mod by_hand {
         }
     }
 
-    /// The compressions a WIM in the wild is in, where there is no decoder
-    /// for them: named, and refused by name. A `.wim` from a Windows disc
-    /// is LZX and a `.esd` is LZMS.
+    /// The compression a WIM in the wild is in that has no decoder here:
+    /// named, and refused by name. A `.esd` is LZMS.
     ///
-    /// XPRESS is not here: it is decoded, so a resource marked compressed
-    /// in one of these archives is XPRESS-decoded and fails for not being
-    /// XPRESS, which `xpress_bytes_that_are_not_xpress_are_refused` holds.
+    /// XPRESS and LZX are not here: both are decoded, so a resource
+    /// marked compressed in an archive of either is decoded and fails for
+    /// not being that compression, which
+    /// `xpress_bytes_that_are_not_xpress_are_refused` and
+    /// `lzx_bytes_that_are_not_lzx_are_refused` hold.
     #[test]
     fn the_compressions_that_are_not_decoded_yet_are_named() {
         let Some(tool) = seven_zip() else { return };
         let s = Scratch::new("compressions");
-        for (flags, compression, needs) in [
-            (0x0004_0002u32, Compression::Lzx, Unsupported::Lzx),
-            (0x0008_0002, Compression::Lzms, Unsupported::Lzms),
-        ] {
-            // The header says the compression, and the resources say they
-            // are compressed: what a real archive of that kind holds.
-            let bytes = with(&s, &tool, |bytes| {
-                bytes[16..20].copy_from_slice(&flags.to_le_bytes());
-                bytes[20..24].copy_from_slice(&32768u32.to_le_bytes());
-                // The table of resources is at the end, and its own
-                // resource header is in the file header: mark the table
-                // compressed as well.
-                bytes[55] |= 0x04;
-            });
-            // Opening reads the table, which is the first thing that is
-            // compressed: it says what it needs, by name.
-            let opened = Wim::open(std::io::Cursor::new(bytes.clone()));
-            assert!(
-                matches!(opened.as_ref().err(), Some(Error::Needs(what)) if *what == needs),
-                "{compression:?}: wanted {needs:?}"
-            );
+        let (flags, compression, needs) = (0x0008_0002u32, Compression::Lzms, Unsupported::Lzms);
+        // The header says the compression, and the resources say they are
+        // compressed: what a real archive of that kind holds.
+        let bytes = with(&s, &tool, |bytes| {
+            bytes[16..20].copy_from_slice(&flags.to_le_bytes());
+            bytes[20..24].copy_from_slice(&32768u32.to_le_bytes());
+            // The table of resources is at the end, and its own resource
+            // header is in the file header: mark the table compressed as
+            // well.
+            bytes[55] |= 0x04;
+        });
+        // Opening reads the table, which is the first thing that is
+        // compressed: it says what it needs, by name.
+        let opened = Wim::open(std::io::Cursor::new(bytes.clone()));
+        assert!(
+            matches!(opened.as_ref().err(), Some(Error::Needs(what)) if *what == needs),
+            "{compression:?}: wanted {needs:?}"
+        );
 
-            // With only a file's resource compressed, the archive opens
-            // and the tree reads; the file is what says what it needs.
-            let bytes = with(&s, &tool, |bytes| {
-                bytes[16..20].copy_from_slice(&flags.to_le_bytes());
-                bytes[20..24].copy_from_slice(&32768u32.to_le_bytes());
-            });
-            let mut wim = Wim::open(std::io::Cursor::new(bytes)).unwrap();
-            assert_eq!(wim.compression(), compression);
-            assert_eq!(wim.chunk_size(), 32768);
-            assert!(wim.entries(1).is_ok(), "the tree still reads");
-        }
+        // With only a file's resource compressed, the archive opens and
+        // the tree reads; the file is what says what it needs.
+        let bytes = with(&s, &tool, |bytes| {
+            bytes[16..20].copy_from_slice(&flags.to_le_bytes());
+            bytes[20..24].copy_from_slice(&32768u32.to_le_bytes());
+        });
+        let mut wim = Wim::open(std::io::Cursor::new(bytes)).unwrap();
+        assert_eq!(wim.compression(), compression);
+        assert_eq!(wim.chunk_size(), 32768);
+        assert!(wim.entries(1).is_ok(), "the tree still reads");
     }
 
     /// A resource marked compressed whose chunks are each as long as what
@@ -431,6 +428,31 @@ mod by_hand {
         assert!(
             matches!(opened.as_ref().err(), Some(Error::Xpress)),
             "wanted Error::Xpress, got {:?}",
+            opened.err()
+        );
+    }
+
+    /// The same again for LZX, which is what a Windows disc's
+    /// `install.wim` holds: a chunk that is not stored reaches the
+    /// decoder, and bytes that are not LZX are refused as that rather
+    /// than read as rubbish.
+    #[test]
+    fn lzx_bytes_that_are_not_lzx_are_refused() {
+        let Some(tool) = seven_zip() else { return };
+        let s = Scratch::new("not-lzx");
+        let bytes = with(&s, &tool, |bytes| {
+            bytes[16..20].copy_from_slice(&0x0004_0002u32.to_le_bytes());
+            bytes[20..24].copy_from_slice(&32768u32.to_le_bytes());
+            bytes[55] |= 0x04;
+            let mut packed = [0u8; 8];
+            packed[..7].copy_from_slice(&bytes[48..55]);
+            let shorter = u64::from_le_bytes(packed) - 1;
+            bytes[48..55].copy_from_slice(&shorter.to_le_bytes()[..7]);
+        });
+        let opened = Wim::open(std::io::Cursor::new(bytes));
+        assert!(
+            matches!(opened.as_ref().err(), Some(Error::Lzx)),
+            "wanted Error::Lzx, got {:?}",
             opened.err()
         );
     }

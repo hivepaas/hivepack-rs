@@ -88,24 +88,34 @@ fn whole(data: &[u8]) -> Option<Vec<Vec<(String, u64, Vec<u8>, Option<String>)>>
     Some(images.into_iter().map(|index| image(&mut wim, index)).collect())
 }
 
-/// The same bytes with the header saying XPRESS in chunks of 32768.
+/// The same bytes with the header saying one compression and a chunk size
+/// to go with it.
 ///
 /// A resource is only decompressed where the header names a compression
 /// there is a decoder for, so without this the fuzzer would have to write
-/// those four bytes itself before it ever reached `wim::xpress`.
-fn as_xpress(data: &[u8]) -> Option<Vec<u8>> {
+/// those four bytes itself before it ever reached `wim::xpress` or
+/// `wim::lzx`. The chunk sizes are the ones that read differently: 32768
+/// for XPRESS, and for LZX both 32768, whose Block Size field is 16 bits,
+/// and 65536, whose field is 24 and whose window has two slots more.
+fn as_compressed(data: &[u8], flags: u32, chunk: u32) -> Option<Vec<u8>> {
     if data.len() < 208 {
         return None;
     }
     let mut bytes = data.to_vec();
-    bytes[16..20].copy_from_slice(&0x0002_0002u32.to_le_bytes());
-    bytes[20..24].copy_from_slice(&32_768u32.to_le_bytes());
+    bytes[16..20].copy_from_slice(&flags.to_le_bytes());
+    bytes[20..24].copy_from_slice(&chunk.to_le_bytes());
     Some(bytes)
 }
 
 fuzz_target!(|data: &[u8]| {
     assert_eq!(whole(data), whole(data));
-    if let Some(xpress) = as_xpress(data) {
-        assert_eq!(whole(&xpress), whole(&xpress));
+    for (flags, chunk) in [
+        (0x0002_0002, 32_768),
+        (0x0004_0002, 32_768),
+        (0x0004_0002, 65_536),
+    ] {
+        if let Some(bytes) = as_compressed(data, flags, chunk) {
+            assert_eq!(whole(&bytes), whole(&bytes));
+        }
     }
 });
