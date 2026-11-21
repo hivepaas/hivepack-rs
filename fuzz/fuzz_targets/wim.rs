@@ -88,6 +88,24 @@ fn whole(data: &[u8]) -> Option<Vec<Vec<(String, u64, Vec<u8>, Option<String>)>>
     Some(images.into_iter().map(|index| image(&mut wim, index)).collect())
 }
 
+/// The same bytes with the header saying XPRESS in chunks of 32768.
+///
+/// A resource is only decompressed where the header names a compression
+/// there is a decoder for, so without this the fuzzer would have to write
+/// those four bytes itself before it ever reached `wim::xpress`.
+fn as_xpress(data: &[u8]) -> Option<Vec<u8>> {
+    if data.len() < 208 {
+        return None;
+    }
+    let mut bytes = data.to_vec();
+    bytes[16..20].copy_from_slice(&0x0002_0002u32.to_le_bytes());
+    bytes[20..24].copy_from_slice(&32_768u32.to_le_bytes());
+    Some(bytes)
+}
+
 fuzz_target!(|data: &[u8]| {
     assert_eq!(whole(data), whole(data));
+    if let Some(xpress) = as_xpress(data) {
+        assert_eq!(whole(&xpress), whole(&xpress));
+    }
 });

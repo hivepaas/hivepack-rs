@@ -337,15 +337,19 @@ mod by_hand {
         }
     }
 
-    /// The compressions a WIM in the wild is in: named, and refused by
-    /// name. A `.wim` from a Windows disc is LZX and a `.esd` is LZMS.
+    /// The compressions a WIM in the wild is in, where there is no decoder
+    /// for them: named, and refused by name. A `.wim` from a Windows disc
+    /// is LZX and a `.esd` is LZMS.
+    ///
+    /// XPRESS is not here: it is decoded, so a resource marked compressed
+    /// in one of these archives is XPRESS-decoded and fails for not being
+    /// XPRESS, which `xpress_bytes_that_are_not_xpress_are_refused` holds.
     #[test]
     fn the_compressions_that_are_not_decoded_yet_are_named() {
         let Some(tool) = seven_zip() else { return };
         let s = Scratch::new("compressions");
         for (flags, compression, needs) in [
-            (0x0002_0002u32, Compression::Xpress, Unsupported::Xpress),
-            (0x0004_0002, Compression::Lzx, Unsupported::Lzx),
+            (0x0004_0002u32, Compression::Lzx, Unsupported::Lzx),
             (0x0008_0002, Compression::Lzms, Unsupported::Lzms),
         ] {
             // The header says the compression, and the resources say they
@@ -377,6 +381,58 @@ mod by_hand {
             assert_eq!(wim.chunk_size(), 32768);
             assert!(wim.entries(1).is_ok(), "the tree still reads");
         }
+    }
+
+    /// A resource marked compressed whose chunks are each as long as what
+    /// they hold is a resource of **stored** chunks, and reads as itself.
+    ///
+    /// That is the format's own rule, measured on what `wimlib-imagex`
+    /// writes (`crates/hivepack/src/wim/chunks.rs`), and this is the case
+    /// it is easiest to get wrong: the archive says XPRESS, the table of
+    /// resources says it is compressed, and its bytes are what 7-Zip wrote
+    /// plainly — one chunk, held as it is, so the archive opens and the
+    /// tree reads.
+    #[test]
+    fn a_resource_of_stored_chunks_reads_as_itself() {
+        let Some(tool) = seven_zip() else { return };
+        let s = Scratch::new("stored-chunks");
+        let bytes = with(&s, &tool, |bytes| {
+            bytes[16..20].copy_from_slice(&0x0002_0002u32.to_le_bytes());
+            bytes[20..24].copy_from_slice(&32768u32.to_le_bytes());
+            // The resource header of the table of resources is in the file
+            // header: mark the table compressed, and leave its bytes.
+            bytes[55] |= 0x04;
+        });
+        let mut wim = Wim::open(std::io::Cursor::new(bytes)).unwrap();
+        assert_eq!(wim.compression(), Compression::Xpress);
+        assert!(wim.entries(1).is_ok(), "the tree reads");
+    }
+
+    /// The same archive with the table one byte shorter than what it
+    /// holds, so its chunk is not a stored one and the decoder is reached:
+    /// the bytes are not XPRESS, and that is what is said.
+    #[test]
+    fn xpress_bytes_that_are_not_xpress_are_refused() {
+        let Some(tool) = seven_zip() else { return };
+        let s = Scratch::new("not-xpress");
+        let bytes = with(&s, &tool, |bytes| {
+            bytes[16..20].copy_from_slice(&0x0002_0002u32.to_le_bytes());
+            bytes[20..24].copy_from_slice(&32768u32.to_le_bytes());
+            bytes[55] |= 0x04;
+            // The seven bytes before the flags are how long it is in the
+            // archive; one less than what it holds, so the chunk is
+            // compressed rather than stored.
+            let mut packed = [0u8; 8];
+            packed[..7].copy_from_slice(&bytes[48..55]);
+            let shorter = u64::from_le_bytes(packed) - 1;
+            bytes[48..55].copy_from_slice(&shorter.to_le_bytes()[..7]);
+        });
+        let opened = Wim::open(std::io::Cursor::new(bytes));
+        assert!(
+            matches!(opened.as_ref().err(), Some(Error::Xpress)),
+            "wanted Error::Xpress, got {:?}",
+            opened.err()
+        );
     }
 
     /// A part of a split archive (`.swm`): the resources it names are in

@@ -36,10 +36,12 @@
 
 #![forbid(unsafe_code)]
 
+mod chunks;
 mod dentry;
 mod error;
 mod lookup;
 mod xml;
+mod xpress;
 
 use std::io::{self, Read, Seek, SeekFrom};
 
@@ -106,7 +108,8 @@ impl Compression {
     fn needs(&self) -> Option<Unsupported> {
         match self {
             Compression::None => None,
-            Compression::Xpress => Some(Unsupported::Xpress),
+            // XPRESS is decoded: `wim::xpress`, from [MS-XCA].
+            Compression::Xpress => None,
             Compression::Lzx => Some(Unsupported::Lzx),
             Compression::Lzms => Some(Unsupported::Lzms),
         }
@@ -229,7 +232,7 @@ impl<R: Read + Seek> Wim<R> {
         }
 
         let resources = lookup::read(&mut reader, &table, whole, compression, chunk)?;
-        let names = xml::read(&mut reader, &xml, compression)?;
+        let names = xml::read(&mut reader, &xml, compression, chunk)?;
 
         // The images are the metadata resources, in the order the table
         // holds them, and the XML names them by the same order.
@@ -301,12 +304,14 @@ impl<R: Read + Seek> Wim<R> {
             &metadata,
             self.whole,
             self.compression,
+            self.chunk,
             MOST_METADATA,
         )?;
         dentry::tree(&raw, &self.resources)
     }
 
-    /// A file's bytes, where its resource is not compressed.
+    /// A file's bytes, its chunks decompressed where its resource is
+    /// compressed with a compression there is a decoder for.
     ///
     /// A file of no bytes reads as none. A directory is an error
     /// ([`Error::NotAFile`]), and so is a reparse point
@@ -326,6 +331,7 @@ impl<R: Read + Seek> Wim<R> {
             &resource,
             self.whole,
             self.compression,
+            self.chunk,
             u64::MAX,
         )
     }
@@ -355,14 +361,16 @@ fn compression_of(flags: u32) -> Result<Compression, Error> {
 
 /// What a resource holds, up to `most` bytes of it.
 ///
-/// A compressed resource is refused by the name of its compression, and a
-/// solid one by its own name: either read as the bytes it is would be read
-/// as rubbish.
+/// A compressed resource is read chunk by chunk (`chunks`) where there is
+/// a decoder for its compression, and refused by the name of that
+/// compression where there is not. A solid one is refused by its own name:
+/// read as the bytes it is, it would be read as rubbish.
 pub(crate) fn read_resource<R: Read + Seek>(
     reader: &mut R,
     resource: &Resource,
     whole: u64,
     compression: Compression,
+    chunk: u32,
     most: u64,
 ) -> Result<Vec<u8>, Error> {
     if !resource.on_the_file(whole) {
@@ -372,11 +380,17 @@ pub(crate) fn read_resource<R: Read + Seek>(
         return Err(Error::Needs(Unsupported::Solid));
     }
     if resource.compressed() {
-        return Err(Error::Needs(compression.needs().unwrap_or(
-            Unsupported::Compression {
+        if let Some(needs) = compression.needs() {
+            return Err(Error::Needs(needs));
+        }
+        if compression == Compression::None {
+            // Flags that say compressed in an archive whose header says
+            // nothing is compressed: the two disagree.
+            return Err(Error::Needs(Unsupported::Compression {
                 flags: EVERY_COMPRESSION,
-            },
-        )));
+            }));
+        }
+        return chunks::read(reader, resource, whole, compression, chunk, most);
     }
     // Not compressed: what it holds is what it takes, and nothing else is
     // a resource this can read.

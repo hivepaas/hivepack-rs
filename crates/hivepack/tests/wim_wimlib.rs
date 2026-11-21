@@ -162,25 +162,54 @@ fn an_archive_wimlib_wrote_uncompressed_reads_as_the_tree_that_went_in() {
     assert_eq!(found, want);
 }
 
-/// A compressed archive, as every tool but 7-Zip writes one: **the tree
+/// An archive wimlib wrote with XPRESS: the tree **and** every file come
+/// back as they went in, chunk by chunk.
+///
+/// The tree matters as much as the files: an image's metadata is a
+/// compressed resource too, so this is also the first test in which a
+/// compressed metadata resource is read.
+#[test]
+fn an_xpress_archive_reads_as_the_tree_that_went_in() {
+    let Some(tool) = wimlib() else { return };
+    let s = Scratch::new("xpress");
+    let bytes = captured(&s, &tool, "--compress=XPRESS");
+
+    let mut wim = Wim::open(std::io::Cursor::new(bytes)).unwrap();
+    assert_eq!(wim.compression(), Compression::Xpress);
+    assert_eq!(wim.chunk_size(), 32_768);
+
+    let entries = wim.entries(1).unwrap();
+    let mut found = BTreeMap::new();
+    for entry in &entries {
+        let what = if entry.is_dir() {
+            None
+        } else {
+            Some(wim.read(entry).unwrap())
+        };
+        found.insert(entry.path.clone(), what);
+    }
+    let want: BTreeMap<String, Option<Vec<u8>>> = a_tree()
+        .into_iter()
+        .map(|(path, what)| (path.to_string(), what))
+        .collect();
+    assert_eq!(found, want);
+}
+
+/// A compressed archive whose compression has no decoder yet: **the tree
 /// itself is compressed**, so it is not read, and the reader says which
 /// compression it needs by name rather than guessing at bytes.
 ///
-/// This is the shape a Windows disc's `install.wim` has. What such an
-/// archive still tells without a decoder is checked here too, because it is
-/// all it tells: the compression, the chunk size, how many resources there
-/// are and how long each is, and the names of its images from the XML.
+/// This is the shape a Windows disc's `install.wim` has, which is LZX.
+/// What such an archive still tells without a decoder is checked here too,
+/// because it is all it tells: the compression, the chunk size, how many
+/// resources there are and how long each is, and the names of its images
+/// from the XML.
 #[test]
 fn a_compressed_archive_says_which_compression_the_tree_needs() {
     let Some(tool) = wimlib() else { return };
     let s = Scratch::new("compressed");
     for (how, compression, chunk, needs) in [
-        (
-            "--compress=XPRESS",
-            Compression::Xpress,
-            32_768,
-            Unsupported::Xpress,
-        ),
+        // XPRESS is decoded: `an_xpress_archive_reads_as_the_tree_that_went_in`.
         ("--compress=LZX", Compression::Lzx, 32_768, Unsupported::Lzx),
         (
             "--compress=LZMS",

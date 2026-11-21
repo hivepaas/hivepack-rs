@@ -56,12 +56,12 @@ pub(crate) fn read<R: Read + Seek>(
     compression: Compression,
     chunk: u32,
 ) -> Result<Resources, Error> {
-    let _ = chunk;
     let raw = read_resource(
         reader,
         table,
         whole,
         compression,
+        chunk,
         (MOST_ENTRIES * ENTRY) as u64,
     )?;
     if !raw.len().is_multiple_of(ENTRY) {

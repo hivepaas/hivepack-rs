@@ -43,6 +43,11 @@ pub enum Error {
         /// What was asked for, counted from 1 as every tool counts.
         index: u32,
     },
+    /// A chunk compressed with XPRESS does not decompress: a table of
+    /// code lengths that is not a canonical Huffman code, bits that run
+    /// out before the chunk is whole, a match reaching before the chunk
+    /// or past its end, or a length the format cannot hold.
+    Xpress,
     /// What was to be read as a file is a directory.
     NotAFile,
     /// The archive holds what this does not read, named rather than
@@ -118,6 +123,9 @@ impl fmt::Display for Error {
             Error::TooDeep => write!(f, "directories inside directories past what is walked"),
             Error::TooMany => write!(f, "more entries than are read"),
             Error::NoSuchImage { index } => write!(f, "the archive holds no image {index}"),
+            Error::Xpress => {
+                write!(f, "a chunk compressed with XPRESS does not decompress")
+            }
             Error::NotAFile => write!(f, "that is a directory, not a file"),
             Error::Needs(what) => write!(f, "the archive needs {what}"),
         }
