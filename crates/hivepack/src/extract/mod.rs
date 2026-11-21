@@ -101,6 +101,17 @@
 //! streams beside a file are left where they are, and the security
 //! descriptor every file carries is not turned into a Unix owner or mode.
 //!
+//! With the feature `wim`, `extract_wim` extracts **one image** of a WIM
+//! archive — `install.wim` and `boot.wim` from a Windows disc, what DISM
+//! and wimlib write. An archive holds several images over one set of
+//! resources, so the image is named by its number as a disk image's
+//! partition is, and every file is held to the SHA-1 the image names it
+//! by, which is the only check the format gives. A reparse point is
+//! refused rather than created pointing at nothing, since what it stands
+//! for is in reparse data this does not read; the names an image says
+//! share one file become hard links, without which an image of a Windows
+//! installation would be written many times over.
+//!
 //! With the feature `rar`, off by default as it takes UnRAR's license,
 //! `extract_rar` extracts RAR archives the same way, reading them twice.
 //!
@@ -140,6 +151,8 @@ mod squashfs;
 mod tar;
 mod udf;
 mod unicode;
+#[cfg(feature = "wim")]
+mod wim;
 mod writers;
 mod xar;
 mod zip;
@@ -174,5 +187,7 @@ pub use tar::{extract_tar, extract_tar_to, remove_stale};
 pub use udf::{extract_udf, extract_udf_to};
 /// The version of Unicode names are compared with: major, minor, update.
 pub use unicode::VERSION as UNICODE_VERSION;
+#[cfg(feature = "wim")]
+pub use wim::{extract_wim, extract_wim_to};
 pub use xar::{extract_xar, extract_xar_to};
 pub use zip::{Damaged, Summary, extract_zip, extract_zip_to};

@@ -42,11 +42,36 @@ fn image(wim: &mut Wim<Cursor<&[u8]>>, index: u32) -> Vec<(String, u64, Vec<u8>,
                 }
                 Err(e) => ended = Some(e.to_string()),
             }
+            // Read whole and read through a buffer of seven bytes are the
+            // same file: the streaming reader holds one chunk, and the
+            // chunk boundaries fall wherever the archive puts them.
+            let through = piece_by_piece(wim, entry);
+            match (&ended, through) {
+                (None, Ok(piece)) => assert_eq!(piece, body, "{}", entry.path),
+                (Some(said), Err(e)) => assert_eq!(said, &e, "{}", entry.path),
+                (ended, through) => {
+                    panic!("{}: whole {ended:?}, in pieces {through:?}", entry.path)
+                }
+            }
         }
         found.push((entry.path.clone(), entry.size, body, ended));
         let _ = look(entry);
     }
     found
+}
+
+/// A file read through a small buffer, as an extractor reads it: the
+/// bytes, or what stopped it.
+fn piece_by_piece(wim: &mut Wim<Cursor<&[u8]>>, entry: &Entry) -> Result<Vec<u8>, String> {
+    let mut file = wim.file(entry).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    let mut piece = [0u8; 7];
+    loop {
+        match file.pull(&mut piece).map_err(|e| e.to_string())? {
+            0 => return Ok(out),
+            read => out.extend_from_slice(&piece[..read]),
+        }
+    }
 }
 
 /// Every field of an entry, touched so that none of them can panic on its

@@ -13,11 +13,13 @@ Two things make it unlike every other archive here:
 
 ## What it reads now, and what comes next
 
-This is the first of the layers. What is here:
+What is here:
 
 - **`Wim::open(reader)`** — the header, the table of resources, and the XML. `compression`, `chunk_size`, `images` and `resources` say what the archive is.
 - **`Wim::entries(index)`** — one image's tree, parents before what they hold, each entry with the path to it, its name, the short name where it has one, the length and SHA-1 from the table, the three times, Windows' attributes, the Unix mode where 7-Zip wrote one, which set of hard links it belongs to, and how many streams beside its own it names.
-- **`Wim::read(&entry)`** — a file's bytes: its chunks decompressed where its resource is compressed with XPRESS or LZX, and refused by name where it is LZMS or a solid block.
+- **`Wim::read(&entry)`** — a file's bytes: its chunks decompressed where its resource is compressed with XPRESS or LZX, and refused by name where it is LZMS or a solid block. The whole file is held in memory.
+- **`Wim::file(&entry)`** — the same file as a reader, **one chunk held at a time**: a chunk is decompressed as it is reached, so a 4 GiB file in an image is read through a buffer of the archive's chunk size. That is what makes an image of a Windows installation extractable on a machine that could not hold one of its files.
+- **`extract_wim(&mut wim, image, destination, &options)`** — one image out to disk, or into a `Sink` with `extract_wim_to`, with every rule [extraction](extract.md) holds every other format to. One image at a time, by its number, as a disk image's one partition is: what the folders for several images would be called is for whoever asks.
 
 What is **named and refused**, each with its own `Unsupported`:
 
@@ -37,6 +39,37 @@ What a `.esd` does tell, with no decoder for LZMS:
 - **the XML** — each image's name (`Windows 11 Pro`), how many files and directories it holds and how many bytes they come to.
 
 The names, the tree and what is a hard link of what are in the metadata resource, behind the same decoder as the files. **LZMS has no published specification** and the only implementation of it is GPL-3.0-or-later, so it stays named and refused unless that changes; a solid block is LZMS as well.
+
+## Every file is held to its SHA-1
+
+A WIM carries **no check beside a chunk and none beside a resource**. What it has is the hash in the tree: every file is named by the SHA-1 of what it holds, which is how two files of the same bytes become one resource. So that hash is the one thing that says a file came out as it went in, and `wim::File` holds every file to it as the bytes are given out — a file read whole and failing it is `Error::Hash`, and nothing of it is written.
+
+That is not free: SHA-1 over everything read. It is the price of not handing back a damaged file as though it were the file, which is what every other reader here does with the check its format gives (a ZIP archive's CRC-32, a XAR archive's digest, an exFAT entry set's checksum).
+
+## The streams beside an entry
+
+An entry of an image's tree can be followed by **stream entries**: a file's alternate data streams (`file.txt:stream`), and the reparse data of a symbolic link or a junction. They sit in the metadata after the entry itself, each as long as it says and padded to eight bytes, and **the next entry of the list begins where they end**.
+
+Two things come out of that, both measured on an archive `wimlib-imagex capture` wrote from a tree holding a symbolic link and a file under two names:
+
+```text
+     8: len= 104 attrs=0x00000010 nads=0 name=''          the root
+   112: --- end of list
+   120: len= 120 attrs=0x00000400 nads=2 name='link.txt'   a reparse point
+        dentry hash = 0000000000000000000000000000000000000000
+        ads[0] len=40 name='' hash=892938b04c98f46cb2c0a6ac726f0ae784e35226
+        ads[1] len=40 name='' hash=0000000000000000000000000000000000000000
+   320: len= 120 attrs=0x00000080 nads=0 name='one.txt'
+        dentry hash = f572d396fae9206628714fb2ce00f72e94f2258f
+   440: len= 112 attrs=0x00000010 nads=0 name='sub'
+   552: len= 120 attrs=0x00000080 nads=0 name='two.txt'
+        dentry hash = f572d396fae9206628714fb2ce00f72e94f2258f
+```
+
+- **The entry after one with streams is past them, not past the entry.** `link.txt` is 120 bytes long and the entry after it is at 320, not at 240: the two stream entries of 40 bytes each are in between. A reader that stepped over the entry alone would read a stream entry as an entry of the tree and refuse the image — which is what this did until it was measured, so **an archive holding a symbolic link did not read at all**. wimlib writes two stream entries for every symbolic link it captures.
+- **The file's own hash is in the unnamed stream where there are streams at all.** `link.txt` carries zeroes where the hash goes, and `ads[0]`, the one with no name, carries the SHA-1 of the 44 bytes of reparse data that the table of resources holds. A reader taking the field alone would read such a file as empty. Where the entry does carry a hash, that one stands: what is there is not thrown away for what is beside it.
+
+`Entry::extra_streams` counts the **named** streams only, which are the ones nothing outside Windows keeps; the unnamed one is the file itself.
 
 ## A resource is chunks, not one stream
 
@@ -134,6 +167,19 @@ An archive that may hold LZMS or solid resources carries **version `0x0e00`** in
 - The tree those archives hold is what says they read: a file over five chunks, one that does not compress at all, one whose first chunk compresses and whose second is stored, a file of nothing but `E8` x86 calls, a name with accents, a file of no bytes — and the image's metadata, which is a compressed resource too, and an aligned offset block where the files are verbatim ones.
 - **Every entry field of an LZX archive against the uncompressed archive of the same tree** — the names, the short names, the lengths, the hashes, the times, the attributes, the reparse tags, the hard-link sets. The metadata resource is the same bytes in both, so this is how far a compressed one is read: field by field, and not only as far as the paths and the files. All but the time a file was last *read*, which moves on its own, writing the second archive of a tree being a read of it.
 - **An LZMS archive and a `--solid` one**, which say which compression they need by name, and what they still tell without a decoder: the compression, the chunk size, how many resources there are, and the names of their images.
+- **A file read through a buffer of seven bytes** is the file read whole: the 132000-byte file of the tree, over the five LZX chunks it is held in and across every boundary between them, through `File::pull` and through `Read` alike.
+- **A file whose bytes were changed after the archive was written does not read.** One byte of the uncompressed archive is turned over where the file's bytes lie, and reading it is `Error::Hash` while every other file still reads: one resource was damaged, not the archive.
+- **An archive holding a symbolic link and a file under two names**: the tree reads past the stream entries beside the link (without that it does not read at all), the link's reparse tag is the one Windows gives a symbolic link, its length is the 44 bytes of reparse data the unnamed stream entry names, and reading it is refused by that tag; the two names carry one set and one hash and read the same bytes.
+
+`crates/hivepack/tests/extract_wim.rs`, for taking an image out:
+
+- **The archives wimlib wrote come out as the tree that went in**, uncompressed, XPRESS and LZX, with the counts the summary gives held against what landed.
+- **The names that share one file come out as one file with two names** — the same inode, a link count of two, and the bytes written once. A Windows image is full of them, so without this an image of an installation would come out many times its own size.
+- **A symbolic link is refused**, as the reparse point it is, with `OnRefused::Skip` leaving everything else and `OnRefused::Stop` ending the extraction.
+- **A file whose bytes were changed does not come out**: the extraction fails with `Error::Hash` and nothing of that file is left on the disk.
+- **An image that is not there** is an error, and no folder is made.
+- **A sink is given what the folder would get**: the folders, the files with their lengths, and the second name of a shared file as a hard link rather than as the bytes again.
+- **A fuzz target, `extract_wim`**, which extracts any input as an image into a scratch folder beside a file that must stay as it was: nothing written outside the destination, the summary's counts and bytes matching what is on the disk with a shared file counted once, and no file left cut off.
 
 And `wim::lzx`'s and `wim::xpress`'s own tests, which build streams bit by bit from the specifications' own encodings — the only way to reach what no archive here holds: an uncompressed LZX block, a tree that is not a canonical code, a block of a type the format has not, a match reaching before the chunk or past its own block, and the position slot table, whose 30, 32, 34, 36, 38, 42, 50, 66, 98, 162 and 290 slots — one for each window LZX has, from 2^15 to 2^25 — are checked against the rows §2.1.6 tabulates.
 

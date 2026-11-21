@@ -98,9 +98,11 @@ fat = ["image"]
 
 exfat = ["image"]
 
-# Nothing yet: the resources a WIM holds are read where they are not
-# compressed, and XPRESS, LZX and LZMS come with their own decoders.
-wim = []
+# XPRESS and LZX are decoded here, so nothing else is needed to read what
+# a WIM holds. `sha1` is: a WIM names every file by the SHA-1 of what it
+# holds, which is the only check the format carries, and a file read whole
+# is held to it.
+wim = ["dep:sha1"]
 
 ext = ["image"]
 

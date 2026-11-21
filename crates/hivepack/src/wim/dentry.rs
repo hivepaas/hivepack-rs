@@ -12,6 +12,13 @@ use super::{MAX_DEPTH, Resource, le16, le32, le64};
 /// writes, which is what the format fixes.
 const BASE: usize = 102;
 
+/// How long a stream entry is before its name: its own length, eight
+/// bytes kept, the SHA-1 of what the stream holds, and how long its name
+/// is. Measured against what `wimlib-imagex` writes for a reparse point,
+/// whose data is a stream of its own: two entries of 40 bytes, which is
+/// this and a name of nothing but its NUL.
+const STREAM: usize = 38;
+
 /// How many entries one image may hold. They are kept in memory, and a
 /// Windows disc's largest image is a few hundred thousand.
 const MOST_ENTRIES: usize = 1 << 22;
@@ -65,8 +72,10 @@ pub struct Entry {
     /// entry of a set carries the same number, and they are one file on
     /// the disk the image came from.
     pub hard_link_group: Option<u64>,
-    /// How many streams beside the file's own the entry names, which are
-    /// not read.
+    /// How many **named** streams the entry has beside the file's own
+    /// (`file.txt:stream`), which are not read. The unnamed stream, where
+    /// the entry has one, is the file itself and is not counted here: it
+    /// is what [`crate::wim::Wim::read`] gives.
     pub extra_streams: u16,
     dir: bool,
     /// Where its bytes are, where the table holds a resource for its hash.
@@ -140,7 +149,7 @@ pub(crate) fn tree(raw: &[u8], resources: &Resources) -> Result<Vec<Entry>, Erro
                 entry.size = entry.resource.map_or(0, |r| r.size);
             }
             entries.push(entry);
-            at = at.checked_add(read.length).ok_or(Error::Tree)?;
+            at = read.next;
         }
         // Depth first, in the order the directory holds its entries.
         todo.extend(inside.into_iter().rev());
@@ -163,10 +172,12 @@ fn security_end(raw: &[u8]) -> Result<usize, Error> {
     Ok(at)
 }
 
-/// What one entry says, and how long it is.
+/// What one entry says, and where the entry after it begins.
 struct Read {
     entry: Entry,
-    length: usize,
+    /// Where the next entry of the same list is: past this entry, padded
+    /// to eight bytes, and past the stream entries that follow it.
+    next: usize,
     /// Where its children are, and 0 for none.
     children: usize,
     name: String,
@@ -223,6 +234,47 @@ fn read_one(raw: &[u8], at: usize) -> Result<Option<Read>, Error> {
         None
     };
 
+    // **The streams beside an entry follow it**, as many as it says,
+    // each as long as it says and padded to eight bytes, and the entry
+    // after it begins where they end. A reader that stepped over the
+    // entry alone would read the first stream entry as an entry and
+    // refuse the tree: `wimlib-imagex` writes two of them for every
+    // symbolic link it captures, and a Windows image carries them for
+    // every file that has a stream beside its own.
+    //
+    // **The file's own hash is in the unnamed stream where there are
+    // streams at all.** The field in the entry is zeroes then, and a
+    // reader that took it would read the file as empty. Measured on an
+    // archive wimlib wrote: a symbolic link's entry carries zeroes where
+    // the hash goes, and the unnamed stream entry after it carries the
+    // SHA-1 of the reparse data, which is the resource the table holds.
+    // Where the entry carries a hash of its own, that one stands: what is
+    // there is not thrown away for what is beside it.
+    let mut next = at
+        .checked_add(length.next_multiple_of(8))
+        .ok_or(Error::Tree)?;
+    let mut named = 0u16;
+    for _ in 0..extra_streams {
+        if next >= raw.len() {
+            return Err(Error::Tree);
+        }
+        let stream = usize::try_from(le64(raw, next)).map_err(|_| Error::Tree)?;
+        if stream < STREAM || next.checked_add(stream).is_none_or(|end| end > raw.len()) {
+            return Err(Error::Tree);
+        }
+        let name_len = le16(raw, next + 36) as usize;
+        if name_len == 0 {
+            if hash == [0u8; 20] {
+                hash.copy_from_slice(&raw[next + 16..next + 36]);
+            }
+        } else {
+            named += 1;
+        }
+        next = next
+            .checked_add(stream.next_multiple_of(8))
+            .ok_or(Error::Tree)?;
+    }
+
     Ok(Some(Read {
         entry: Entry {
             path: String::new(),
@@ -241,11 +293,11 @@ fn read_one(raw: &[u8], at: usize) -> Result<Option<Read>, Error> {
             unix_mode: (attributes & UNIX_EXTENSION != 0).then_some(attributes >> 16),
             reparse_tag,
             hard_link_group,
-            extra_streams,
+            extra_streams: named,
             dir,
             resource: None,
         },
-        length,
+        next,
         children,
         name,
     }))

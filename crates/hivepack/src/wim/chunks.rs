@@ -25,8 +25,14 @@
 //! whose compressed length equals its uncompressed length is held as it
 //! is** rather than compressed. An entry is four bytes, or eight where the
 //! resource holds more than 4 GiB.
+//!
+//! **A resource is read as a stream of its chunks** ([`Reading`]): one is
+//! decompressed as it is reached and given out, so a file of any length is
+//! read through a buffer of one chunk rather than one of the file. `read`
+//! is that reader read through, for a resource that is to be held whole —
+//! an image's metadata, which is the tree itself.
 
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom};
 
 use super::error::{Error, Unsupported};
 use super::{Compression, Resource, le32, le64, lzx, xpress};
@@ -69,24 +75,29 @@ fn entry(raw: &[u8], at: usize, wide: bool) -> u64 {
     }
 }
 
-/// A compressed resource read whole, `most` bytes of it at most.
-///
-/// Each chunk is read and decompressed on its own, as it was compressed:
-/// nothing refers to the chunk before it, which is what lets a reader
-/// reach one byte of a 4 GiB file without the rest.
-pub(crate) fn read<R: Read + Seek>(
+/// Where the chunks of one resource are, read from its table: every
+/// chunk's beginning, the end of the last one after them, and where the
+/// first begins on the file.
+struct Chunks {
+    /// One more than the chunks: each chunk's start, counted from the
+    /// first chunk's own start, and the data's end last of all.
+    bounds: Vec<u64>,
+    /// Where the first chunk begins on the file.
+    at: u64,
+    /// How many bytes each chunk holds, uncompressed. The last holds the
+    /// rest.
+    each: u64,
+    /// How long the resource is, uncompressed.
+    size: u64,
+}
+
+/// Reads the table of chunks of `resource` and says where each one is.
+fn chunks_of<R: Read + Seek>(
     reader: &mut R,
     resource: &Resource,
     whole: u64,
-    compression: Compression,
     chunk: u32,
-    most: u64,
-) -> Result<Vec<u8>, Error> {
-    // `read_resource` has already refused a compression with no decoder,
-    // so what reaches here is one that has one.
-    if resource.size > most {
-        return Err(Error::TooMany);
-    }
+) -> Result<Chunks, Error> {
     let chunk = u64::from(chunk);
     if chunk == 0 {
         // A compressed resource in an archive whose header says no chunks
@@ -123,44 +134,134 @@ pub(crate) fn read<R: Read + Seek>(
     }
     bounds.push(data);
 
-    let mut out = vec![0u8; usize::try_from(size).map_err(|_| Error::Resource)?];
-    let mut decoder: Option<Decoder> = None;
-    let mut packed = Vec::new();
-    for i in 0..count {
-        let from = bounds[i as usize];
-        let to = bounds[i as usize + 1];
-        let held = to - from;
-        let at = (i * chunk) as usize;
-        let holds = usize::try_from(chunk.min(size - i * chunk)).map_err(|_| Error::Resource)?;
-        let into = &mut out[at..at + holds];
+    let at = resource
+        .at
+        .checked_add(table_bytes)
+        .filter(|at| at.checked_add(data).is_some_and(|end| end <= whole))
+        .ok_or(Error::Resource)?;
+    Ok(Chunks {
+        bounds,
+        at,
+        each: chunk,
+        size,
+    })
+}
 
-        let begins = resource
-            .at
-            .checked_add(table_bytes)
-            .and_then(|at| at.checked_add(from))
-            .ok_or(Error::Resource)?;
-        if begins.checked_add(held).is_none_or(|end| end > whole) {
-            return Err(Error::Resource);
+/// A compressed resource read as a stream: its chunks in order, each
+/// decompressed as it is reached.
+///
+/// **One chunk is held, not the file.** A chunk holds what the header says
+/// (32768 bytes, or what the archive was written with), so a 4 GiB file in
+/// an image is read through a buffer of that size, and the reader never
+/// has to hold the file itself.
+pub(crate) struct Reading<'a, R> {
+    reader: &'a mut R,
+    compression: Compression,
+    chunks: Chunks,
+    /// Which chunk comes next.
+    next: u64,
+    /// Built when a chunk is really compressed: see [`Decoder`].
+    decoder: Option<Decoder>,
+    /// The chunk now held, and how much of it has been given out.
+    held: Vec<u8>,
+    given: usize,
+    /// What a chunk's compressed bytes are read into, kept between chunks.
+    packed: Vec<u8>,
+    /// How much of the resource is still to come.
+    left: u64,
+}
+
+impl<'a, R: Read + Seek> Reading<'a, R> {
+    /// The resource in `reader`, to be read from its start.
+    pub(crate) fn new(
+        reader: &'a mut R,
+        resource: &Resource,
+        whole: u64,
+        compression: Compression,
+        chunk: u32,
+    ) -> Result<Reading<'a, R>, Error> {
+        let chunks = chunks_of(reader, resource, whole, chunk)?;
+        let left = chunks.size;
+        Ok(Reading {
+            reader,
+            compression,
+            chunks,
+            next: 0,
+            decoder: None,
+            held: Vec::new(),
+            given: 0,
+            packed: Vec::new(),
+            left,
+        })
+    }
+
+    /// The next bytes of the resource into `buf`, and 0 once it is whole.
+    pub(crate) fn pull(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
+        if buf.is_empty() {
+            return Ok(0);
         }
-        packed.clear();
-        packed.resize(usize::try_from(held).map_err(|_| Error::Resource)?, 0);
-        reader.seek(SeekFrom::Start(begins))?;
-        reader.read_exact(&mut packed)?;
+        if self.given == self.held.len() {
+            if self.left == 0 {
+                return Ok(0);
+            }
+            self.fill()?;
+        }
+        let take = buf.len().min(self.held.len() - self.given);
+        buf[..take].copy_from_slice(&self.held[self.given..self.given + take]);
+        self.given += take;
+        self.left -= take as u64;
+        Ok(take)
+    }
 
+    /// Reads the next chunk, decompressed where it is compressed.
+    ///
+    /// Each chunk is read and decompressed on its own, as it was
+    /// compressed: nothing refers to the chunk before it, which is what
+    /// lets a reader reach one byte of a 4 GiB file without the rest.
+    fn fill(&mut self) -> Result<(), Error> {
+        let i = self.next;
+        let chunks = &self.chunks;
+        let (Some(&from), Some(&to)) = (
+            chunks.bounds.get(i as usize),
+            chunks.bounds.get(i as usize + 1),
+        ) else {
+            // The chunks are read through and the resource is not whole:
+            // its own numbers disagree.
+            return Err(Error::Resource);
+        };
+        let held = to - from;
+        let holds = usize::try_from(chunks.each.min(chunks.size - i * chunks.each))
+            .map_err(|_| Error::Resource)?;
+        self.packed.clear();
+        self.packed
+            .resize(usize::try_from(held).map_err(|_| Error::Resource)?, 0);
+        self.reader.seek(SeekFrom::Start(chunks.at + from))?;
+        self.reader.read_exact(&mut self.packed)?;
+
+        self.held.clear();
+        self.held.resize(holds, 0);
+        self.given = 0;
+        self.next += 1;
         if held as usize == holds {
             // Compressing it did not pay, so it is held as it is.
-            into.copy_from_slice(&packed);
-            continue;
+            self.held.copy_from_slice(&self.packed);
+            return Ok(());
         }
         if held as usize > holds {
             // Longer compressed than it is uncompressed, which no chunk is.
             return Err(Error::Resource);
         }
-        let decoder = match decoder {
+        let each = chunks.each;
+        let decoder = match self.decoder {
             Some(ref mut decoder) => decoder,
-            None => decoder.insert(Decoder::new(compression, chunk)?),
+            None => self.decoder.insert(Decoder::new(self.compression, each)?),
         };
-        decoder.decompress(&packed, into)?;
+        decoder.decompress(&self.packed, &mut self.held)
     }
-    Ok(out)
+}
+
+impl<R: Read + Seek> Read for Reading<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.pull(buf).map_err(io::Error::from)
+    }
 }
