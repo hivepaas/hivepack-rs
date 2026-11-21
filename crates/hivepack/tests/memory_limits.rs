@@ -229,6 +229,43 @@ fn check(what: &str, actual: u64, estimate: u64) {
     assert!(ratio <= 2.0, "{what}: {actual} held, {estimate} estimated");
 }
 
+/// A measure against its estimate, **the bound alone**: actual no more.
+/// Printed with `--nocapture`, with the cores, since that is what decides
+/// the rest.
+///
+/// This is for a pipeline of workers, where how much is held at once is
+/// the scheduler's to say and not the library's. An estimate has to cover
+/// a full pipeline — every worker holding a job in and a job out — and a
+/// machine that cannot fill it holds less, so the ratio between the two
+/// moves with the machine while the estimate stays the same number.
+/// Measured on `data_that_does_not_compress`, zstd level 1 with two
+/// workers, by giving the test fewer cores with `taskset`:
+///
+/// ```text
+/// 8 cores:  12.4 MiB held, 19.4 MiB estimated, 1.57x
+/// 2 cores:  11.3 MiB held, 19.4 MiB estimated, 1.72x
+/// 1 core:    8.8 MiB held, 19.4 MiB estimated, 2.22x
+/// ```
+///
+/// The last of those is what a macOS runner reported, where this test
+/// binary's own tests run beside each other on three cores. Holding the
+/// ratio there would be holding the machine to something, not the code;
+/// what the estimate is for is that it is never too small, and that is
+/// checked everywhere.
+fn bound(what: &str, actual: u64, estimate: u64) {
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    println!(
+        "{what}: {:.1} MiB held, {:.1} MiB estimated, {:.2}x, on {cores} cores",
+        actual as f64 / MIB,
+        estimate as f64 / MIB,
+        estimate as f64 / actual as f64,
+    );
+    assert!(
+        actual <= estimate,
+        "{what}: {actual} held, {estimate} estimated"
+    );
+}
+
 /// `data` written as one file of a 7z archive with `options`, in pieces of
 /// 1 MiB, as a hash.
 fn write_7z(data: &[u8], options: &WriteOptions) -> u64 {
@@ -320,11 +357,12 @@ fn zstd_case(level: i32, workers: u32, job: usize, ldm: bool) {
         estimate
     });
     let ldm = if ldm { ", long distance matching" } else { "" };
-    check(
-        &format!("zstd level {level}{ldm}, {workers} workers"),
-        actual,
-        estimate,
-    );
+    let what = format!("zstd level {level}{ldm}, {workers} workers");
+    if workers == 0 {
+        check(&what, actual, estimate);
+    } else {
+        bound(&what, actual, estimate);
+    }
 }
 
 /// `data` through `CompressMt` with `options`, 1 MiB at a time in and out,
@@ -565,7 +603,7 @@ fn data_that_does_not_compress() {
         zstd_stream(&mut cctx, &data);
         estimate
     });
-    check("zstd level 1, noise, 2 workers", actual, estimate);
+    bound("zstd level 1, noise, 2 workers", actual, estimate);
     let options = MtOptions {
         block_size_100k: 1,
         ..bzip2_options(3)
