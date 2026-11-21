@@ -48,6 +48,12 @@ pub enum Error {
     /// out before the chunk is whole, a match reaching before the chunk
     /// or past its end, or a length the format cannot hold.
     Xpress,
+    /// A chunk compressed with LZX does not decompress: a tree that is
+    /// not a canonical Huffman code, a block of a type the format has
+    /// not, a block reaching past the chunk, bits that run out before the
+    /// chunk is whole, or a match reaching before the chunk or past the
+    /// end of its own block.
+    Lzx,
     /// What was to be read as a file is a directory.
     NotAFile,
     /// The archive holds what this does not read, named rather than
@@ -59,10 +65,14 @@ pub enum Error {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Unsupported {
-    /// Resources compressed with XPRESS.
+    /// Resources compressed with XPRESS. Never returned any more: XPRESS
+    /// is decoded (`Error::Xpress` is what a chunk of it that does not
+    /// decompress gives). Kept so that matching on it still compiles.
     Xpress,
     /// Resources compressed with LZX, which is what `install.wim` on a
-    /// Windows disc holds.
+    /// Windows disc holds. Never returned any more: LZX is decoded
+    /// (`Error::Lzx` is what a chunk of it that does not decompress
+    /// gives). Kept so that matching on it still compiles.
     Lzx,
     /// Resources compressed with LZMS, which is what a `.esd` holds.
     Lzms,
@@ -89,8 +99,8 @@ pub enum Unsupported {
 impl fmt::Display for Unsupported {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Unsupported::Xpress => f.write_str("XPRESS, which is not decoded yet"),
-            Unsupported::Lzx => f.write_str("LZX, which is not decoded yet"),
+            Unsupported::Xpress => f.write_str("XPRESS"),
+            Unsupported::Lzx => f.write_str("LZX"),
             Unsupported::Lzms => f.write_str("LZMS, which is not decoded yet"),
             Unsupported::Compression { flags } => {
                 write!(f, "a compression this does not know ({flags:#x})")
@@ -126,6 +136,7 @@ impl fmt::Display for Error {
             Error::Xpress => {
                 write!(f, "a chunk compressed with XPRESS does not decompress")
             }
+            Error::Lzx => write!(f, "a chunk compressed with LZX does not decompress"),
             Error::NotAFile => write!(f, "that is a directory, not a file"),
             Error::Needs(what) => write!(f, "the archive needs {what}"),
         }
